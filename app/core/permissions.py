@@ -46,6 +46,7 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "lead:write":        ("Create and work leads", "Leads"),
     "lead:assign":       ("Reassign lead ownership", "Leads"),
     "report:export":     ("Download reports as CSV or Excel", "Reports"),
+    "email:manage":      ("Manage scheduled report recipients, schedules and the delivery log (Administrator only)", "Reports"),
     "db:reset":          ("Wipe all business data after confirming with the admin secondary password", "Users and rights"),
     # ---- HR management (module phase 7)
     "hr:read":            ("View the HR dashboard and employee records", "HR"),
@@ -84,6 +85,8 @@ BASELINE_ROLE_PERMS: dict[str, set[str]] = {
                   # Full accounts reporting is a narrower right than the statements
                   # above; the Administrator may grant it to an Accounts head.
                   "accounts:reports",
+                  # Scheduled reports: recipients, schedules and the delivery log
+                  "email:manage",
                   # Approvals and post-billing amendments are administrator decisions
                   "approval:read", "approval:credit_limit", "invoice:edit_post_billing",
                   # HR management

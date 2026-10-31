@@ -26,6 +26,8 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                tax: {company: null, rates: [], slabs: [], states: [], rateFilter: "all"},
                invoices: [], creditNotes: [], debitNotes: [], invFilter: "all",
                accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
+               sr: {status: null, schedules: [], recipients: [], deliveries: [],
+                    tab: "schedules", logStatus: "", logPack: ""},
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
                dashFrom: "", dashTo: "", dashPreset: "month", dashDateError: "", dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
@@ -176,6 +178,7 @@ function enter(u) {
   showView("inventory", can("stock:read"));
   showView("distributors", can("sales:read"));
   showView("geo", can("sales:read"));
+  showView("scheduled", srAllowed());
   showView("reports", ["accounts:read", "hr:reports", "sales:read", "stock:read",
                        "supplier:read", "tax:read"].some(k => can(k)));
   $$(".nav-group").forEach(g => g.classList.toggle("hide", !g.querySelector("a.nav:not(.hide)")));
@@ -334,7 +337,8 @@ const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", 
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
                 users: "Users and rights", audit: "Audit trail",
-                compare: "MoM & YoY dashboard", geo: "Geography"};
+                compare: "MoM & YoY dashboard", geo: "Geography",
+                scheduled: "Scheduled reports"};
 const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
                    geo: "sales:read",
                    customers: "sales:read", users: "user:manage", audit: "audit:read",
@@ -342,15 +346,17 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
                    products: "product:read", inventory: "stock:read", purchasing: "stock:read",
                    distributors: "sales:read", sales: "sales:read", billing: "sales:read",
                    approvals: "approval:read",
-                   hr: "hr:read"};
+                   hr: "hr:read", scheduled: "email:manage"};
 function route() {
   const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
   // Staff with only self-service attendance still reach the HR page for their own day.
-  const allowed = !VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
-    || (v === "compare" && (can("sales:read") || can("stock:read")));
+  const allowed = (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
+    || (v === "compare" && (can("sales:read") || can("stock:read"))))
+    && (v !== "scheduled" || srAllowed());
   state.view = TITLES[v] && allowed ? v : "dash";
   $("#shell").dataset.view = state.view;
   if (state.view === "inventory") state.tab = ["stock", "ledger", "warehouses"].includes(sub) ? sub : "stock";
+  if (state.view === "scheduled") state.sr.tab = ["schedules", "recipients", "log"].includes(sub) ? sub : "schedules";
   $$(".view").forEach(s => s.classList.toggle("hide", s.id !== "v-" + state.view));
   $$(".nav[data-v]").forEach(a => { const on = a.dataset.v === state.view; a.classList.toggle("on", on); on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"); });
   $("#title").textContent = TITLES[state.view];
@@ -365,6 +371,7 @@ function route() {
   if (state.view === "hr") { if (can("hr:read")) openHr(); else renderHr(); }
   if (state.view === "compare") loadCompare();
   if (state.view === "geo") loadGeo();
+  if (state.view === "scheduled") openScheduled();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
 function showTab() {
@@ -462,6 +469,12 @@ function renderHead() {
     if (can("hr:write")) act = `<button class="btn" data-act="hr-employees" type="button">Employee master</button>`;
   }
   if (v === "settings") sub = "Users, roles, employees, tax configuration, HR policies and the audit trail.";
+  if (v === "scheduled") {
+    const s = state.sr.status;
+    sub = s
+      ? `${s.mode === "live" ? "Live mode" : "Test mode"}: ${state.sr.schedules.filter(x => x.enabled).length} of ${plural(state.sr.schedules.length, "schedule")} on. ${s.send_enabled ? "Sending is enabled." : "Sending is disabled."}`
+      : "Administrator only. Schedules, recipients and the delivery log, with every send audited.";
+  }
   if (v === "reports") sub = "Every figure is checked against the records it comes from. Downloads are recorded in the audit log.";
   if (v === "users") {
     const locked = state.users.filter(u => u.locked).length, pending = state.users.filter(u => u.must_change_password).length;
@@ -499,7 +512,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -4263,6 +4276,474 @@ function renderAudit() {
   $("#audNote").textContent = state.audit.total ? `Showing ${state.audit.rows.length} of ${state.audit.total}` : "";
 }
 
+/* ---------- scheduled reports (Administrator only) ----------
+   The server refuses every route here to anyone who is not the seeded
+   Administrator, even if a custom role was granted email:manage. The nav link
+   and this screen follow the same rule so a role is never offered a screen
+   that can only answer 403. Nothing here sends: Preview renders, and Run now /
+   Send test only queue a delivery row for the worker. */
+const srAllowed = () => can("email:manage") && !!state.user
+  && String(state.user.role || "").trim().toLowerCase() === "admin";
+const SR_STATUS = {queued: ["Queued", "off"], sending: ["Sending", "warn"], sent: ["Sent", "ok"],
+                   retry: ["Retry", "warn"], failed: ["Failed", "bad"], skipped: ["Skipped", "off"]};
+const SR_TRIGGER = {scheduled: "Scheduled", manual: "Run now", test: "Test", resend: "Resend"};
+const SR_GROUP = {md: "MD", admin: "Administrators", extra: "Extras"};
+const SR_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const SR_FREQ = {daily: "Every day", weekdays: "Monday to Friday", weekly: "Chosen weekdays",
+                 monthly: "Monthly rule", custom: "Custom cron"};
+const srChip = status => {
+  const [label, tone] = SR_STATUS[status] || [status || "–", "off"];
+  return `<span class="chip ${tone}">${esc(label)}</span>`;
+};
+const humanBytes = n => {
+  const v = Number(n) || 0;
+  if (v >= 1048576) return `${(v / 1048576).toFixed(1)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} KB`;
+  return `${v} B`;
+};
+
+function srTab(tab) {
+  state.sr.tab = ["schedules", "recipients", "log"].includes(tab) ? tab : "schedules";
+  srShowTab();
+  if (state.sr.tab === "log") loadDeliveries();
+}
+function srShowTab() {
+  ["schedules", "recipients", "log"].forEach(t =>
+    $("#sr-" + t).classList.toggle("hide", t !== state.sr.tab));
+  $$("#srTabs [data-sr-tab]").forEach(b =>
+    b.setAttribute("aria-selected", String(b.dataset.srTab === state.sr.tab)));
+}
+
+async function openScheduled() {
+  if (!srAllowed()) return;
+  srShowTab();
+  const [status, people, schedules] = await Promise.all([
+    api("/api/email-reports/status"),
+    api("/api/email-reports/recipients"),
+    api("/api/email-reports/schedules")
+  ]);
+  if (!status.ok) { toast(status, "Scheduled reports not loaded"); return; }
+  state.sr.status = status.body;
+  if (people.ok) state.sr.recipients = people.body || [];
+  if (schedules.ok) state.sr.schedules = schedules.body || [];
+  renderScheduled();
+  renderHead();
+  if (state.sr.tab === "log") await loadDeliveries();
+}
+
+function renderScheduled() {
+  if (!$("#srSchedRows") || !state.sr.status) return;
+  renderSrBanner();
+  renderSrSchedules();
+  renderSrRecipients();
+  renderSrLog();
+  srShowTab();
+}
+
+function renderSrBanner() {
+  const s = state.sr.status, el = $("#srBanner");
+  if (!s || !el) return;
+  const interval = s.worker_interval ? `The worker checks every ${s.worker_interval} s.` : "";
+  const testTo = s.test_recipient || "the first active Administrator";
+  let banner;
+  if (s.mode !== "live") {
+    banner = `<div class="callout"><div><b>Test mode.</b> Nothing is delivered to the real list: every queued
+      message is redirected to ${esc(testTo)} and marked as a test. SMTP
+      ${s.smtp_ready ? "is configured" : "is not configured, so a send cannot start"}.</div></div>`;
+  } else if (!s.send_enabled) {
+    banner = `<div class="callout"><div><b>Live mode selected, sending disabled.</b> A queued report waits
+      until the Administrator enables sending (EMAIL_SEND_ENABLED). Nothing leaves the server now.</div></div>`;
+  } else if (!s.smtp_ready) {
+    banner = `<div class="callout"><div><b>Live sending is on, but SMTP is not configured.</b> A send cannot
+      start until SMTP_HOST and SMTP_FROM are set.</div></div>`;
+  } else {
+    banner = `<div class="note"><span class="chip ok">Live</span> Sending is enabled. A scheduled run goes to
+      its real recipients and is written to the audit log.</div>`;
+  }
+  el.innerHTML = banner + `<div class="note">${esc(interval)} The largest message is ${esc(humanBytes(s.max_bytes))};
+    a larger set of attachments is reduced, never silently truncated.</div>`;
+}
+
+function renderSrSchedules() {
+  const list = state.sr.schedules;
+  $("#srSchedNote").textContent =
+    `${plural(list.length, "schedule")}, ${list.filter(s => s.enabled).length} on.`;
+  $("#srSchedRows").innerHTML = list.map(s => {
+    const people = s.recipients || [];
+    const counts = {to: 0, cc: 0, bcc: 0};
+    people.forEach(p => { counts[p.field] = (counts[p.field] || 0) + 1; });
+    const who = [counts.to ? `${counts.to} To` : "", counts.cc ? `${counts.cc} CC` : "",
+                 counts.bcc ? `${counts.bcc} BCC` : ""].filter(Boolean).join(", ");
+    const groups = (s.groups || []).map(g => SR_GROUP[g] || g);
+    const content = [
+      `<b>${esc(s.pack_label)}</b>`,
+      groups.length ? `Groups: ${esc(groups.join(", "))}` : "",
+      who ? `Named: ${esc(who)}` : "",
+      s.include_attachments ? "PDF + Excel" : "No attachments",
+      s.include_accounts ? "Accounts block" : "",
+      (s.custom_reports || []).length ? `${plural(s.custom_reports.length, "custom report")}` : ""
+    ].filter(Boolean).join("<br>");
+    const warnings = (s.warnings || []).map(w => `<div class="hint">${esc(w)}</div>`).join("");
+    const next = s.enabled ? fmtStamp(s.next_run_at) : "Paused";
+    const last = s.last_run_at
+      ? `${fmtStamp(s.last_run_at)} ${s.last_status ? srChip(s.last_status) : ""}`
+      : "Never run";
+    return `<tr>
+      <td><b>${esc(s.name)}</b><small>${esc(SR_FREQ[s.frequency] || s.frequency)}</small>
+        <small>${esc(s.timezone)}</small></td>
+      <td>${content}</td>
+      <td>${esc(s.description)}</td>
+      <td>${esc(next)}</td>
+      <td>${last}</td>
+      <td><span class="chip ${s.enabled ? "ok" : "off"}">${s.enabled ? "On" : "Paused"}</span>${warnings}</td>
+      <td class="rowacts">
+        <button class="btn ghost sm" type="button" data-act="sr-preview" data-id="${s.id}">Preview</button>
+        <button class="btn ghost sm" type="button" data-act="sr-test" data-id="${s.id}">Send test</button>
+        <button class="btn ghost sm" type="button" data-act="sr-run" data-id="${s.id}">Run now</button>
+        <button class="btn ghost sm" type="button" data-act="sr-edit" data-id="${s.id}">Edit</button>
+        <button class="btn ghost sm" type="button" data-act="sr-toggle" data-id="${s.id}" data-on="${s.enabled ? "1" : "0"}">${s.enabled ? "Pause" : "Resume"}</button>
+        <button class="btn ghost sm" type="button" data-act="sr-duplicate" data-id="${s.id}">Duplicate</button>
+        <button class="btn ghost sm" type="button" data-act="sr-delete" data-id="${s.id}">Delete</button>
+      </td></tr>`;
+  }).join("");
+  empty($("#srSchedEmpty"), !list.length, "No schedules yet.",
+    " A schedule is a pack, a set of recipients and a time. Nothing is sent until one exists, sending is enabled and the Administrator approves the list.");
+}
+
+function renderSrRecipients() {
+  const list = state.sr.recipients;
+  $("#srRecNote").textContent = `${plural(list.length, "recipient")}, ${list.filter(r => r.active).length} active.`;
+  $("#srRecRows").innerHTML = list.map(r => `<tr>
+    <td class="strong">${esc(r.email)}</td>
+    <td>${esc(r.name || "–")}</td>
+    <td><span class="chip ${r.group === "md" ? "ok" : r.group === "admin" ? "warn" : "off"}">${esc(SR_GROUP[r.group] || r.group)}</span></td>
+    <td><span class="chip ${r.active ? "ok" : "off"}">${r.active ? "Active" : "Inactive"}</span></td>
+    <td>${r.in_use ? "Used by a schedule" : "Not used yet"}</td>
+    <td class="rowacts">
+      <button class="btn ghost sm" type="button" data-act="sr-recipient-edit" data-id="${r.id}">Edit</button>
+      <button class="btn ghost sm" type="button" data-act="sr-recipient-delete" data-id="${r.id}"${r.in_use ? " title=\"Remove it from the schedule first\"" : ""}>Remove</button>
+    </td></tr>`).join("");
+  empty($("#srRecEmpty"), !list.length, "No recipients yet.",
+    " MD and Administrator groups are mandatory. An extra recipient can unsubscribe; the Administrator can re-enable or remove any address.");
+}
+
+function renderSrLog() {
+  const list = state.sr.deliveries;
+  const pack = $("#srLogPack"), keep = state.sr.logPack;
+  if (pack && state.sr.status) {
+    pack.innerHTML = `<option value="">All packs</option>` + state.sr.status.packs.map(p =>
+      `<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
+    pack.value = state.sr.status.packs.some(p => p.key === keep) ? keep : "";
+  }
+  $("#srLogRows").innerHTML = list.map(d => {
+    const att = Array.isArray(d.attachments) ? d.attachments : [];
+    const files = att.length
+      ? att.map(a => `<small>${esc(a.filename)} · ${esc(humanBytes(a.bytes))}</small>`).join("")
+      : `<small>None</small>`;
+    const period = d.period_from ? `${fmtDate(d.period_from)} – ${fmtDate(d.period_to)}` : "–";
+    const resend = d.schedule_id != null && !["queued", "sending"].includes(d.status)
+      ? `<button class="btn ghost sm" type="button" data-act="sr-resend" data-id="${d.id}">Resend</button>` : "";
+    return `<tr>
+      <td>${esc(fmtStamp(d.created_at))}<small>${esc(d.mode)}</small></td>
+      <td><b>${esc((reportPackLabel(d.pack)))}</b>${d.subject ? `<small>${esc(d.subject.slice(0, 80))}</small>` : ""}</td>
+      <td>${esc(SR_TRIGGER[d.trigger] || d.trigger)}</td>
+      <td>${esc(period)}</td>
+      <td class="n">${esc(d.recipient_count)}</td>
+      <td>${srChip(d.status)}${d.attempts ? `<small>${plural(d.attempts, "attempt")}</small>` : ""}</td>
+      <td>${files}${d.attachment_bytes ? `<small>${esc(humanBytes(d.attachment_bytes))} total</small>` : ""}</td>
+      <td><small>${esc(d.error || "–")}</small></td>
+      <td class="rowacts">${resend}</td></tr>`;
+  }).join("");
+  empty($("#srLogEmpty"), !list.length, "No deliveries match these filters.",
+    " A delivery row is written when a run is queued, and its status changes as the worker picks it up.");
+  $("#srLogNote").textContent = list.length ? `${list.length} shown, newest first.` : "";
+}
+function reportPackLabel(key) {
+  const meta = state.sr.status && state.sr.status.packs.find(p => p.key === key);
+  return meta ? meta.label : key;
+}
+
+async function loadDeliveries() {
+  if (!srAllowed() || !state.sr.status) return;
+  const q = new URLSearchParams();
+  if (state.sr.logStatus) q.set("status", state.sr.logStatus);
+  if (state.sr.logPack) q.set("pack", state.sr.logPack);
+  q.set("limit", "200");
+  const res = await api("/api/email-reports/deliveries?" + q.toString());
+  if (!res.ok) { toast(res, "Delivery log not loaded"); return; }
+  state.sr.deliveries = res.body || [];
+  renderSrLog();
+}
+
+function scheduleForm(id) {
+  if (!state.sr.status) return;
+  const s = id ? state.sr.schedules.find(x => x.id === Number(id)) : null;
+  if (id && !s) return;
+  const f = s || {name: "", pack_key: "monthly_md", enabled: true, frequency: "monthly",
+                  timezone: "Asia/Kolkata", weekdays: [0], times: ["09:00"],
+                  month_day: 1, month_rule: "first_working_day", custom_cron: "",
+                  holiday_rule: "shift", include_attachments: true, include_accounts: true,
+                  custom_reports: [], groups: [], recipients: []};
+  const packOptions = state.sr.status.packs.map(p =>
+    `<option value="${esc(p.key)}"${p.key === f.pack_key ? " selected" : ""} data-accounts="${p.accounts ? "1" : "0"}">${esc(p.label)}</option>`).join("");
+  const groups = new Set(f.groups || []);
+  const groupBoxes = ["md", "admin", "extra"].map(g =>
+    `<label style="font-weight:400"><input type="checkbox" name="group" value="${g}"${groups.has(g) ? " checked" : ""}> ${SR_GROUP[g]}</label>`).join(" ");
+  const linked = new Map((f.recipients || []).map(p => [p.id, p.field]));
+  const people = state.sr.recipients.length
+    ? state.sr.recipients.map(p => {
+        const on = linked.has(p.id);
+        const field = linked.get(p.id) || "to";
+        return `<tr>
+          <td><input type="checkbox" name="rcpt" value="${p.id}" id="sr-r${p.id}"${on ? " checked" : ""}></td>
+          <td><label for="sr-r${p.id}" style="font-weight:400">${esc(p.email)}${p.name ? ` <small>${esc(p.name)}</small>` : ""}</label>
+            ${p.active ? "" : `<span class="chip off">Inactive</span>`}</td>
+          <td><select data-sr-field="${p.id}" aria-label="To, CC or BCC for ${esc(p.email)}"${on ? "" : " disabled"}>
+            ${["to", "cc", "bcc"].map(x => `<option value="${x}"${x === field ? " selected" : ""}>${x.toUpperCase()}</option>`).join("")}
+          </select></td></tr>`;
+      }).join("")
+    : `<tr><td colspan="3"><small>No recipients yet. Add one on the Recipients tab.</small></td></tr>`;
+  const weekly = new Set((f.weekdays || []).map(Number));
+  const dayBoxes = SR_DAYS.map((name, i) =>
+    `<label style="font-weight:400"><input type="checkbox" name="wd" value="${i}"${weekly.has(i) ? " checked" : ""}> ${name}</label>`).join(" ");
+  const reportKeys = new Set(f.custom_reports || []);
+  const reportBoxes = state.sr.status.report_catalog.map(r =>
+    `<label style="font-weight:400"><input type="checkbox" name="creport" value="${esc(r.key)}"${reportKeys.has(r.key) ? " checked" : ""}> ${esc(r.title)}</label>`).join("<br>");
+  openDrawer(s ? `Edit ${s.name}` : "New schedule",
+    s ? s.description : "A pack, its recipients and when it runs. Every change is audited and takes effect on the next worker pass.",
+    `<form id="srForm" data-id="${s ? s.id : ""}" novalidate>
+      <label for="sr-name">Name</label>
+      <input id="sr-name" name="name" value="${esc(f.name)}" placeholder="Monthly MD report" maxlength="120" autocomplete="off">
+      <div class="row2">
+        <div><label for="sr-pack">Report pack</label>
+          <select id="sr-pack" name="pack_key">${packOptions}</select>
+          <div class="hint" id="srPackHint"></div></div>
+        <div><label for="sr-freq">Frequency</label>
+          <select id="sr-freq" name="frequency">
+            ${Object.entries(SR_FREQ).map(([k, label]) => `<option value="${k}"${k === f.frequency ? " selected" : ""}>${esc(label)}</option>`).join("")}
+          </select></div>
+      </div>
+      <div class="row2">
+        <div><label for="sr-times">Time(s) of day (24-hour)</label>
+          <input id="sr-times" name="times" value="${esc((f.times || []).join(", "))}" placeholder="09:00, 18:00" autocomplete="off">
+          <div class="hint">Comma-separated HH:MM. Several slots are allowed.</div></div>
+        <div><label for="sr-tz">Timezone</label>
+          <input id="sr-tz" name="timezone" value="${esc(f.timezone)}" list="srTzList" autocomplete="off">
+          <datalist id="srTzList">
+            <option value="Asia/Kolkata"></option><option value="Asia/Dubai"></option>
+            <option value="Europe/London"></option><option value="America/New_York"></option>
+            <option value="UTC"></option>
+          </datalist></div>
+      </div>
+      <div id="sr-weekly" class="hide"><label>Weekdays</label>
+        <div class="toolbar" style="padding:0;border:0;background:none;gap:12px">${dayBoxes}</div></div>
+      <div id="sr-monthly" class="hide">
+        <div class="row2">
+          <div><label for="sr-monthrule">Monthly rule</label>
+            <select id="sr-monthrule" name="month_rule">
+              <option value="day"${f.month_rule === "day" ? " selected" : ""}>A chosen day</option>
+              <option value="last_day"${f.month_rule === "last_day" ? " selected" : ""}>Last day of the month</option>
+              <option value="first_working_day"${f.month_rule === "first_working_day" ? " selected" : ""}>First working day</option>
+            </select></div>
+          <div id="sr-monthday"><label for="sr-monthdayin">Day</label>
+            <input id="sr-monthdayin" name="month_day" type="number" min="1" max="31" value="${esc(f.month_day == null ? 1 : f.month_day)}">
+            <div class="hint">29–31 on a shorter month uses that month's last day.</div></div>
+        </div>
+      </div>
+      <div id="sr-cron" class="hide"><label for="sr-cr">Custom cron (minute hour day month weekday)</label>
+        <input id="sr-cr" name="custom_cron" value="${esc(f.custom_cron || "")}" placeholder="0 9 * * 1-5" autocomplete="off"></div>
+      <label for="sr-holiday">If the slot falls on a company holiday</label>
+      <select id="sr-holiday" name="holiday_rule">
+        <option value="shift"${f.holiday_rule === "shift" ? " selected" : ""}>Move to the next working day</option>
+        <option value="skip"${f.holiday_rule === "skip" ? " selected" : ""}>Skip that run</option>
+      </select>
+      <h3>Recipient groups</h3>
+      <div class="toolbar" style="padding:0;border:0;background:none;gap:14px">${groupBoxes}</div>
+      <div class="hint">MD and Administrator groups are mandatory report mail. Extra recipients can unsubscribe.</div>
+      <h3>Named recipients</h3>
+      <div class="tw"><table><tbody>${people}</tbody></table></div>
+      <h3>Content</h3>
+      <div class="toolbar" style="padding:0;border:0;background:none;gap:16px">
+        <label style="font-weight:400"><input type="checkbox" name="include_attachments"${f.include_attachments ? " checked" : ""}> Attach PDF and Excel</label>
+        <label style="font-weight:400" id="srAccountsWrap"><input type="checkbox" name="include_accounts"${f.include_accounts ? " checked" : ""}> Include the Accounts summary</label>
+        <label style="font-weight:400"><input type="checkbox" name="enabled"${f.enabled ? " checked" : ""}> Schedule is on</label>
+      </div>
+      <div id="srCustomReports" class="hide"><label>Custom pack: reports to include</label>${reportBoxes || '<div class="hint">No report is available to this user.</div>'}</div>
+      <div class="note">Figures are built by the same services as the Reports screen and the dashboards, for the pack's own period. A figure with no data is shown as “No data yet”; nothing is estimated.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${s ? "Save schedule" : "Create schedule"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+  srFreqSync();
+  srPackSync();
+}
+
+function srFreqSync() {
+  const form = $("#srForm");
+  if (!form) return;
+  const freq = form.elements.frequency.value;
+  $("#sr-weekly").classList.toggle("hide", freq !== "weekly");
+  $("#sr-monthly").classList.toggle("hide", freq !== "monthly");
+  $("#sr-cron").classList.toggle("hide", freq !== "custom");
+  const rule = form.elements.month_rule.value;
+  $("#sr-monthday").classList.toggle("hide", freq !== "monthly" || rule !== "day");
+}
+function srPackSync() {
+  const form = $("#srForm");
+  if (!form) return;
+  const key = form.elements.pack_key.value;
+  const meta = state.sr.status.packs.find(p => p.key === key) || {};
+  const wrap = $("#srAccountsWrap");
+  if (wrap) wrap.classList.toggle("hide", !meta.accounts);
+  const custom = $("#srCustomReports");
+  if (custom) custom.classList.toggle("hide", key !== "custom");
+  const hint = $("#srPackHint");
+  if (hint) hint.textContent = meta.hint || "";
+}
+
+async function saveSchedule(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const times = String(f.times.value).split(",").map(t => t.trim()).filter(Boolean);
+  const weekdays = $$('input[name="wd"]:checked', form).map(x => Number(x.value));
+  const recipients = $$('input[name="rcpt"]:checked', form).map(x => ({
+    recipient_id: Number(x.value),
+    field: $(`[data-sr-field="${x.value}"]`, form).value
+  }));
+  const groups = $$('input[name="group"]:checked', form).map(x => x.value);
+  const customReports = $$('input[name="creport"]:checked', form).map(x => x.value);
+  const body = {
+    name: f.name.value.trim(),
+    pack_key: f.pack_key.value,
+    enabled: f.enabled.checked,
+    frequency: f.frequency.value,
+    timezone: f.timezone.value.trim() || "Asia/Kolkata",
+    weekdays,
+    times,
+    month_day: f.frequency.value === "monthly" && f.month_rule.value === "day"
+      ? Number(f.month_day.value) : null,
+    month_rule: f.frequency.value === "monthly" ? f.month_rule.value : null,
+    custom_cron: f.frequency.value === "custom" ? f.custom_cron.value.trim() : null,
+    holiday_rule: f.holiday_rule.value,
+    include_attachments: f.include_attachments.checked,
+    include_accounts: f.include_accounts ? f.include_accounts.checked : false,
+    custom_reports: customReports,
+    groups,
+    recipients
+  };
+  if (body.name.length < 2) { err.textContent = "Give the schedule a name."; return; }
+  if (!times.length || times.some(t => !/^\d{1,2}:\d{2}$/.test(t))) {
+    err.textContent = "Enter at least one time as HH:MM, for example 09:00."; return;
+  }
+  if (body.frequency === "weekly" && !weekdays.length) {
+    err.textContent = "A weekly schedule needs at least one weekday."; return;
+  }
+  if (!recipients.length && !groups.length) {
+    err.textContent = "Choose at least one recipient or group."; return;
+  }
+  btn.disabled = true;
+  const id = form.dataset.id;
+  const res = await api(id ? `/api/email-reports/schedules/${id}` : "/api/email-reports/schedules",
+    {method: id ? "PATCH" : "POST", body});
+  if (!res.ok) { err.textContent = detail(res.body); btn.disabled = false; return; }
+  toast(res, "Schedule saved");
+  closeDrawer();
+  await openScheduled();
+}
+
+function recipientForm(id) {
+  const r = id ? state.sr.recipients.find(x => x.id === Number(id)) : null;
+  if (id && !r) return;
+  openDrawer(r ? "Edit recipient" : "Add recipient",
+    "An address is verified only by the first delivered message. MD and Administrator recipients are mandatory.",
+    `<form id="srRecipientForm" data-id="${r ? r.id : ""}" novalidate>
+      <label for="sr-r-email">Email</label>
+      <input id="sr-r-email" name="email" type="email" value="${esc(r ? r.email : "")}" placeholder="name@company.com" autocomplete="off"${r ? " readonly" : ""}>
+      ${r ? '<div class="hint">An address cannot be changed. Remove it and add the new one instead.</div>' : ""}
+      <label for="sr-r-name">Name (optional)</label>
+      <input id="sr-r-name" name="name" value="${esc(r && r.name ? r.name : "")}" autocomplete="off">
+      <label for="sr-r-group">Group</label>
+      <select id="sr-r-group" name="group_key">
+        ${["md", "admin", "extra"].map(g => `<option value="${g}"${r && r.group === g ? " selected" : ""}>${SR_GROUP[g]}</option>`).join("")}
+      </select>
+      ${r ? `<label for="sr-r-active" style="font-weight:400;margin-top:14px"><input id="sr-r-active" type="checkbox" name="active"${r.active ? " checked" : ""}> Active</label>` : ""}
+      <div class="note">The unsubscribe link in every email works only for an extra recipient. Removing an address from this list does not erase the delivery log.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${r ? "Save recipient" : "Add recipient"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveRecipient(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const id = form.dataset.id;
+  if (!id && !f.email.value.trim()) { err.textContent = "Enter an email address."; return; }
+  btn.disabled = true;
+  const body = id
+    ? {name: f.name.value.trim() || null, group_key: f.group_key.value, active: f.active.checked}
+    : {email: f.email.value.trim(), name: f.name.value.trim() || null, group_key: f.group_key.value};
+  const res = await api(id ? `/api/email-reports/recipients/${id}` : "/api/email-reports/recipients",
+    {method: id ? "PATCH" : "POST", body});
+  if (!res.ok) { err.textContent = detail(res.body); btn.disabled = false; return; }
+  toast(res, "Recipient saved");
+  closeDrawer();
+  await openScheduled();
+}
+
+async function srRun(id) {
+  const s = state.sr.schedules.find(x => x.id === Number(id));
+  const live = state.sr.status && state.sr.status.mode === "live" && state.sr.status.send_enabled;
+  if (live && !confirm(`Queue “${s ? s.name : "this schedule"}” now? It will be sent to its real recipients.`)) return;
+  const res = await api(`/api/email-reports/schedules/${id}/run-now`, {method: "POST"});
+  toast(res, res.ok ? "Queued. The worker will send it." : "Not queued");
+  if (res.ok) { state.sr.tab = "log"; await openScheduled(); }
+}
+async function srTest(id) {
+  const res = await api(`/api/email-reports/schedules/${id}/test`, {method: "POST"});
+  toast(res, res.ok ? `Test queued. It goes only to ${(res.body && res.body.redirected_to) || "the Administrator"}.` : "Test not queued");
+  if (res.ok) { state.sr.tab = "log"; await openScheduled(); }
+}
+function srPreview(id) {
+  window.open(`/api/email-reports/schedules/${id}/preview`, "_blank", "noopener");
+}
+async function srToggle(id, enabled) {
+  const res = await api(`/api/email-reports/schedules/${id}/enable`,
+    {method: "POST", body: {enabled: !enabled}});
+  toast(res, res.ok ? (enabled ? "Schedule paused" : "Schedule resumed") : "Not changed");
+  if (res.ok) await openScheduled();
+}
+async function srDuplicate(id) {
+  const res = await api(`/api/email-reports/schedules/${id}/duplicate`, {method: "POST"});
+  toast(res, res.ok ? "Copy created, paused" : "Not copied");
+  if (res.ok) await openScheduled();
+}
+async function srDelete(id) {
+  const s = state.sr.schedules.find(x => x.id === Number(id));
+  if (!confirm(`Delete “${s ? s.name : "this schedule"}”? Past sends stay in the delivery log.`)) return;
+  const res = await api(`/api/email-reports/schedules/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Schedule deleted" : "Not deleted");
+  if (res.ok) await openScheduled();
+}
+async function srResend(id) {
+  const live = state.sr.status && state.sr.status.mode === "live" && state.sr.status.send_enabled;
+  if (live && !confirm("Resend this report now? It will be sent to its real recipients.")) return;
+  const res = await api(`/api/email-reports/deliveries/${id}/resend`, {method: "POST"});
+  toast(res, res.ok ? "Resend queued" : "Not queued");
+  if (res.ok) await loadDeliveries();
+}
+async function srRecipientDelete(id) {
+  const r = state.sr.recipients.find(x => x.id === Number(id));
+  if (r && r.in_use) {
+    alert("This address is used by a schedule. Remove it from that schedule first.");
+    return;
+  }
+  if (!confirm(`Remove ${r ? r.email : "this address"} from the recipient list?`)) return;
+  const res = await api(`/api/email-reports/recipients/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Recipient removed" : "Not removed");
+  if (res.ok) await openScheduled();
+}
+
 /* ---------- tax and discounts (Module Phase 3) ---------- */
 const taxNum = v => { const n = Number(String(v).trim()); return Number.isFinite(n) ? n : 0; };
 const stateOptions = sel => (state.tax.states || [])
@@ -4604,6 +5085,8 @@ document.addEventListener("click", e => {
   if (geoTile) return selectGeo(geoTile.dataset.geoCode);
   const geoSortBtn = e.target.closest("[data-geo-sort]");
   if (geoSortBtn) return setGeoSort(geoSortBtn.dataset.geoSort);
+  const srTabBtn = e.target.closest("[data-sr-tab]");
+  if (srTabBtn) return srTab(srTabBtn.dataset.srTab);
   const a = e.target.closest("[data-act]");
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
@@ -4699,6 +5182,19 @@ document.addEventListener("click", e => {
       const chosen = $("#printCopy");
       printDocument(a.dataset.kind, Number(a.dataset.id), chosen ? chosen.value : "ORIGINAL");
     }
+    else if (act === "sr-new") scheduleForm();
+    else if (act === "sr-edit") scheduleForm(a.dataset.id);
+    else if (act === "sr-preview") srPreview(a.dataset.id);
+    else if (act === "sr-test") srTest(a.dataset.id);
+    else if (act === "sr-run") srRun(a.dataset.id);
+    else if (act === "sr-toggle") srToggle(a.dataset.id, a.dataset.on === "1");
+    else if (act === "sr-duplicate") srDuplicate(a.dataset.id);
+    else if (act === "sr-delete") srDelete(a.dataset.id);
+    else if (act === "sr-resend") srResend(a.dataset.id);
+    else if (act === "sr-recipient-new") recipientForm();
+    else if (act === "sr-recipient-edit") recipientForm(a.dataset.id);
+    else if (act === "sr-recipient-delete") srRecipientDelete(a.dataset.id);
+    else if (act === "sr-refresh-log") loadDeliveries();
     return;
   }
   const tab = e.target.closest("[data-tab]");
@@ -4792,6 +5288,8 @@ document.addEventListener("submit", e => {
   else if (f.id === "hrLeaveForm") saveHrLeave(f);
   else if (f.id === "hrOdForm") saveHrOd(f);
   else if (f.id === "hrPeriodForm") saveHrPeriod(f);
+  else if (f.id === "srForm") saveSchedule(f);
+  else if (f.id === "srRecipientForm") saveRecipient(f);
 });
 document.addEventListener("input", e => {
   if (e.target.closest("#poForm")) syncPoLines();
@@ -4928,6 +5426,18 @@ document.addEventListener("change", e => {
   if (e.target.id !== "r-wh") return;
   const note = $("#rWhNote");
   if (note) note.textContent = warehouseCapacityNote(e.target.value);
+});
+// Scheduled reports: frequency and pack change which fields apply, a named
+// recipient's To/CC/BCC follows its checkbox, and the log filters reload it.
+document.addEventListener("change", e => {
+  if (e.target.id === "sr-freq" || e.target.id === "sr-monthrule") srFreqSync();
+  if (e.target.id === "sr-pack") srPackSync();
+  if (e.target.name === "rcpt" && e.target.closest("#srForm")) {
+    const sel = $(`[data-sr-field="${e.target.value}"]`, $("#srForm"));
+    if (sel) sel.disabled = !e.target.checked;
+  }
+  if (e.target.id === "srLogStatus") { state.sr.logStatus = e.target.value; loadDeliveries(); }
+  if (e.target.id === "srLogPack") { state.sr.logPack = e.target.value; loadDeliveries(); }
 });
 window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); closePalette(); route(); } });
 

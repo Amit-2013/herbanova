@@ -84,12 +84,17 @@ def _schedule_people(db: Session, schedule) -> dict[str, list[str]]:
     return people
 
 
-def resolve(db: Session, schedule) -> dict:
-    """The real recipients, and (in test mode) the single address used instead."""
+def resolve(db: Session, schedule, *, force_test: bool = False,
+            test_address: str | None = None) -> dict:
+    """The real recipients, and (in test mode) the single address used instead.
+
+    `force_test` is used by the "Send test to me" action: even a live session
+    must not mail the real list for a test.
+    """
     people = _schedule_people(db, schedule)
     real_count = sum(len(v) for v in people.values())
-    if not live_mode() or not settings.email_send_enabled:
-        address = test_recipient(db)
+    if force_test or not live_mode() or not settings.email_send_enabled:
+        address = test_address if valid_address(test_address) else test_recipient(db)
         if not address:
             raise MailError(
                 "Test mode: no Administrator email is configured. Add EMAIL_TEST_RECIPIENT "

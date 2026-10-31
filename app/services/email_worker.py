@@ -257,7 +257,10 @@ def process_one(db: Session, delivery_id: int, now: datetime | None = None) -> s
             base_url=settings.app_base_url, generated_at=now)
         data["include_attachments"] = bool(schedule.include_attachments)
         attachments = report_packs.build_attachments(db, data, delivery.pack_key)
-        people = mailer.resolve(db, schedule)
+        force_test = delivery.trigger == "test"
+        people = mailer.resolve(
+            db, schedule, force_test=force_test,
+            test_address=_actor_email(db, delivery.created_by) if force_test else None)
         mode = "test" if people["redirected"] else "live"
         rendered = email_render.render(
             data, attachments, mode=mode, test_recipient=people.get("test_address"),
@@ -282,6 +285,19 @@ def _owner_name(db: Session, schedule) -> str:
     from ..models.core import User
     user = db.get(User, schedule.created_by)
     return user.username if user else "the Administrator"
+
+
+def _actor_email(db: Session, actor_id) -> str | None:
+    """The requesting Administrator's own address, used by "Send test to me"."""
+    if not actor_id:
+        return None
+    from ..models.core import User
+    from ..models.users import Employee
+    user = db.get(User, actor_id)
+    if user is None or not user.employee_id:
+        return None
+    employee = db.get(Employee, user.employee_id)
+    return employee.email if employee and mailer.valid_address(employee.email) else None
 
 
 def process_due(db: Session, now: datetime | None = None, limit: int = CLAIM_LIMIT) -> list[str]:

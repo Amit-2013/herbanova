@@ -347,6 +347,11 @@ def render(data: dict, attachments: list[dict], *, mode: str = "test",
             f'font-size:13px;color:#7A4A00;text-align:center">'
             f'<b>TEST MODE.</b> This message was redirected to {_e(test_recipient or "the Administrator")}. '
             f'{real_recipients} real recipient(s) were not sent to.</div>')
+    elif mode == "preview":
+        test_banner = (
+            f'<div style="background:#EEF5F1;border-bottom:1px solid {GREEN};padding:10px 16px;'
+            f'font-size:13px;color:{GREEN};text-align:center">'
+            f'<b>PREVIEW.</b> Nothing was sent. This is how the email will look.</div>')
 
     logo_img = ('<img src="cid:logo" width="48" height="48" alt="Herbanova" '
                 'style="display:block;border:0">' if "logo" in images else "")
@@ -409,8 +414,8 @@ a{{color:{GREEN}}}
 {_top_table(data["states"]["top"], "State")}
 <p style="font-size:12px;color:{MUTED};margin:6px 0 0">{_e(data["states"]["note"])}</p>
 </td></tr>
-{_accounts(data)}
-{_attachments(attachments, attachments_note, data['to'])}
+{('<tr><td>' + _accounts(data) + '</td></tr>') if data.get("accounts") else ""}
+{('<tr><td>' + _attachments(attachments, attachments_note, data['to']) + '</td></tr>') if attachments or attachments_note else ""}
 <tr><td style="padding:8px 28px 26px;text-align:center">
 <a href="{_e(url)}" style="display:inline-block;background:{GREEN};color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 24px;border-radius:10px;min-height:44px;line-height:1.4">View full dashboard</a>
 <p style="font-size:12px;color:{MUTED};margin-top:10px">Login required</p>

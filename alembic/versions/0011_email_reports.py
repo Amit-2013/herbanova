@@ -1,8 +1,9 @@
 """Scheduled email reports: recipients, schedules, schedule recipients, deliveries.
 
-Four additive tables. Nothing existing is altered except one role key: the
-Administrator gains `accounts:reports`, the additive gate for the Accounts
-dashboard and its email block. No existing permission is removed or re-scoped.
+Four additive tables. Nothing existing is altered except two role keys: the
+Administrator gains `accounts:reports` (the additive gate for the Accounts
+dashboard and its email block) and `email:manage` (the Administrator-only
+scheduled-reports screen). No existing permission is removed or re-scoped.
 
 `email_deliveries.run_key` is unique. It is the duplicate guard: whoever inserts
 the row for a slot owns that send, and a second worker (or a restart) loses the
@@ -22,9 +23,10 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 ACCOUNTS_REPORTS = "accounts:reports"
+EMAIL_MANAGE = "email:manage"
 
 
-def _grant_accounts_reports(add: bool) -> None:
+def _grant_admin_keys(add: bool) -> None:
     bind = op.get_bind()
     roles = sa.table("roles", sa.column("name", sa.String),
                      sa.column("permissions", sa.JSON))
@@ -34,10 +36,11 @@ def _grant_accounts_reports(add: bool) -> None:
         return
     current = list(row[0] or [])
     if add:
-        if ACCOUNTS_REPORTS not in current:
-            current.append(ACCOUNTS_REPORTS)
+        for key in (ACCOUNTS_REPORTS, EMAIL_MANAGE):
+            if key not in current:
+                current.append(key)
     else:
-        current = [k for k in current if k != ACCOUNTS_REPORTS]
+        current = [k for k in current if k not in (ACCOUNTS_REPORTS, EMAIL_MANAGE)]
     bind.execute(roles.update().where(roles.c.name == "admin")
                  .values(permissions=current))
 
@@ -154,11 +157,11 @@ def upgrade() -> None:
     op.create_index("ix_email_deliveries_schedule_id", "email_deliveries", ["schedule_id"])
     op.create_index("ix_email_deliveries_status", "email_deliveries", ["status"])
 
-    _grant_accounts_reports(add=True)
+    _grant_admin_keys(add=True)
 
 
 def downgrade() -> None:
-    _grant_accounts_reports(add=False)
+    _grant_admin_keys(add=False)
     op.drop_index("ix_email_deliveries_status", table_name="email_deliveries")
     op.drop_index("ix_email_deliveries_schedule_id", table_name="email_deliveries")
     op.drop_table("email_deliveries")

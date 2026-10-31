@@ -221,3 +221,13 @@ This file records every decision taken without the owner present, so each one ca
 
 **Decision.** Charts are drawn with Pillow (no chart service, no JavaScript, no remote image) and attached in the message as CID images with alt text. The same figures always follow as an HTML table, and a chart that fails to draw is dropped without failing the email. Table-only charts also make the plain-text part complete.
 **Why.** Outlook and Gmail block images by default for unknown senders; a chart-only figure would be invisible. A drawing bug must not stop a report the owner is waiting for.
+
+## D-37. One tabbed Administrator screen, gated twice
+
+**Decision.** Schedules, Recipients and the Delivery log are three tabs of one view (`#/scheduled`). The nav link and the route are shown only when the signed-in user is the seeded Administrator *and* holds `email:manage`; the API repeats the same test with `require_admin("email:manage")`. A custom role granted the key still sees nothing and is refused. A schedule cannot be saved without a group or a named recipient, so an enabled schedule always has somewhere to go. A recipient that a schedule names cannot be removed from the list until it is detached, because deleting it would silently change what that schedule sends. Deleting a schedule keeps its deliveries in the log.
+**Why.** The owner restricted the scheduler screen to the Administrator. Hiding the link is convenience; the second check is the guarantee. Refusing an empty schedule, and refusing to detach a recipient by deletion, prevents a configuration change from quietly stopping or redirecting mail.
+
+## D-38. Every email block is a table row
+
+**Decision.** The Accounts summary and Attached reports blocks are emitted as `<tr><td>` rows of the message table. No `<div>`, `<hr>` or heading is placed directly inside a `<table>`.
+**Why.** A browser hoists non-row content out of a table to keep the table valid. The preview showed the Accounts heading and period line above the green header, and some mail clients apply the same repair. A structural test now parses every rendered email and fails if a table contains anything but rows, so the message order cannot regress.
