@@ -29,6 +29,7 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
                dashFrom: "", dashTo: "", dashPreset: "month", dashDateError: "", dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
+               compare: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0},
                expiry: {bucket: "all", loading: false, data: null},
                palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
                hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: []}};
@@ -67,6 +68,12 @@ try {
     state.dashFrom = from; state.dashTo = to;
     state.dashPreset = localStorage.getItem("hb.dashPreset") || "";
   }
+} catch (e) { /* storage blocked */ }
+try {
+  const mode = localStorage.getItem("hb.cmpMode");
+  const month = localStorage.getItem("hb.cmpMonth");
+  if (mode === "full_month" || mode === "mtd") state.compare.mode = mode;
+  if (/^\d{4}-\d{2}$/.test(month || "")) state.compare.month = month;
 } catch (e) { /* storage blocked */ }
 const can = p => state.perms.has(p);
 const dashQuery = () => `from_date=${encodeURIComponent(state.dashFrom)}&to_date=${encodeURIComponent(state.dashTo)}`;
@@ -313,7 +320,8 @@ const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", 
                 approvals: "Approvals", distributors: "Distributors", customers: "Customers",
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
-                users: "Users and rights", audit: "Audit trail"};
+                users: "Users and rights", audit: "Audit trail",
+                compare: "MoM & YoY dashboard"};
 const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
                    customers: "sales:read", users: "user:manage", audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
@@ -324,7 +332,8 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
 function route() {
   const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
   // Staff with only self-service attendance still reach the HR page for their own day.
-  const allowed = !VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"));
+  const allowed = !VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
+    || (v === "compare" && (can("sales:read") || can("stock:read")));
   state.view = TITLES[v] && allowed ? v : "dash";
   $("#shell").dataset.view = state.view;
   if (state.view === "inventory") state.tab = ["stock", "ledger", "warehouses"].includes(sub) ? sub : "stock";
@@ -340,6 +349,7 @@ function route() {
   if (state.view === "customers") renderCustomers();
   if (state.view === "settings") renderSettings();
   if (state.view === "hr") { if (can("hr:read")) openHr(); else renderHr(); }
+  if (state.view === "compare") loadCompare();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
 function showTab() {
@@ -352,6 +362,9 @@ function renderHead() {
   if (v === "dash") {
     sub = "Every figure is counted by the server over the whole database. Open a tile to see the records behind it.";
     if (can("db:reset")) act = `<button class="btn" data-act="reset-db" type="button">Reset database</button>`;
+  }
+  if (v === "compare") {
+    sub = "One month beside the previous month and the same month last year. Every figure is counted by the server.";
   }
   if (v === "products") {
     sub = `${plural(state.products.length, "product")} on file, ${state.products.filter(x => x.status === "active").length} active.`;
@@ -468,7 +481,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -1250,6 +1263,273 @@ function applyDashDates(from, to, preset) {
 function setDashPreset(key) {
   const w = dashWindow(key);
   applyDashDates(w.from, w.to, key);
+}
+
+/* ---------- MoM & YoY comparison ---------- */
+const CMP_MODES = {full_month: "Full month", mtd: "Month to date"};
+const CMP_STATE = {current: "Current month (incomplete)", past: "Complete month",
+                   future: "Not started"};
+const cmpAmount = (unit, value) => unit === "amount" ? `₹ ${money(value)}` : qty(value);
+
+function cmpDelta(value) {
+  if (value === null || value === undefined) {
+    return `<span class="cmp-delta flat">no prior figure</span>`;
+  }
+  const n = Number(value);
+  if (!isFinite(n)) return `<span class="cmp-delta flat">no prior figure</span>`;
+  if (n === 0) return `<span class="cmp-delta flat">no change</span>`;
+  const dir = n > 0 ? "up" : "down";
+  return `<span class="cmp-delta ${dir}">${n > 0 ? "▲" : "▼"} ${Math.abs(n).toFixed(1)}%</span>`;
+}
+
+function cmpCard(c, future) {
+  if (!c.available) {
+    return `<div class="kpi cmp-card-gap">
+      <span class="kpi-label">${esc(c.label)}<span class="chip off">Gap ${esc(c.gap)}</span></span>
+      <span class="kpi-value">No data yet</span>
+      <span class="kpi-note">${esc(c.note)}</span>
+    </div>`;
+  }
+  const tag = c.href ? "a" : "div";
+  const href = c.href ? ` href="${esc(c.href)}"` : "";
+  return `<${tag} class="kpi"${href}>
+    <span class="kpi-label">${esc(c.label)}</span>
+    <span class="kpi-value">${future ? "No data yet" : esc(cmpAmount(c.unit, c.current))}</span>
+    <span class="kpi-note">${esc(c.note)}</span>
+    <div class="cmp-split">
+      <span>Previous month<b>${esc(cmpAmount(c.unit, c.previous))}</b>${cmpDelta(c.previous_change)}</span>
+      <span>Same month last year<b>${esc(cmpAmount(c.unit, c.last_year))}</b>${cmpDelta(c.last_year_change)}</span>
+    </div>
+  </${tag}>`;
+}
+
+function cmpRange(label, window, on) {
+  return `<div class="cmp-range${on ? " on" : ""}">
+    <small>${esc(label)}</small>
+    <b>${esc(window.label)}</b>
+    <span>${esc(plural(window.days, "day"))}</span>
+  </div>`;
+}
+
+function cmpTrend(months, selected, sales, purchases) {
+  if (!sales && !purchases) {
+    return `<p class="gap-note">Your role may not read sales or purchases.</p>`;
+  }
+  const head = ["Month"];
+  if (sales) head.push("Sales (incl. GST)", "Same month last year", "YoY");
+  if (purchases) head.push("Purchases", "Prior year");
+  if (sales) head.push("3-month average");
+  const body = months.map(r => {
+    const cells = [`<td>${esc(r.label)}</td>`];
+    if (sales) {
+      cells.push(`<td class="n">${r.sales === null ? "–" : esc(money(r.sales))}</td>`);
+      cells.push(`<td class="n">${r.prior_sales === null ? "–" : esc(money(r.prior_sales))}</td>`);
+      cells.push(`<td class="n">${cmpDelta(r.yoy_change)}</td>`);
+    }
+    if (purchases) {
+      cells.push(`<td class="n">${r.purchases === null ? "–" : esc(money(r.purchases))}</td>`);
+      cells.push(`<td class="n">${r.prior_purchases === null ? "–" : esc(money(r.prior_purchases))}</td>`);
+    }
+    if (sales) {
+      cells.push(`<td class="n">${r.moving_average === null ? "–" : esc(money(r.moving_average))}</td>`);
+    }
+    return `<tr${r.month === selected ? ` class="on"` : ""}>${cells.join("")}</tr>`;
+  }).join("");
+  return `<thead><tr>${head.map((h, i) => `<th${i ? ` class="n"` : ""}>${esc(h)}</th>`).join("")}</tr></thead>`
+    + `<tbody>${body}</tbody>`;
+}
+
+function cmpMoves(trend) {
+  const blocks = [];
+  const add = (label, g) => {
+    if (!g) return;
+    blocks.push(`<div class="cmp-move">
+      <div><span>${esc(label)} in the window</span><b>₹ ${esc(money(g.current))}</b></div>
+      <div><span>Previous month</span><b>₹ ${esc(money(g.previous))}</b>${cmpDelta(g.mom)}</div>
+      <div><span>Same month last year</span><b>₹ ${esc(money(g.last_year))}</b>${cmpDelta(g.yoy)}</div>
+    </div>`);
+  };
+  add("Sales", trend.sales_visible ? trend.growth.sales : null);
+  add("Purchases", trend.purchases_visible ? trend.growth.purchases : null);
+  return blocks.join("") || `<p class="gap-note">No movement figure is available to your role.</p>`;
+}
+
+function cmpExtremes(trend) {
+  if (!trend.sales_visible) {
+    return `<li><div><span class="gap-note">The best and worst month need the sales figure.</span></div></li>`;
+  }
+  if (!trend.best || !trend.worst) {
+    return `<li><div><span class="gap-note">No issued invoices in the twelve months shown, so there is no best or worst month yet.</span></div></li>`;
+  }
+  return [[`Best month`, trend.best], [`Weakest month`, trend.worst]].map(([label, row]) =>
+    `<li><div><b>${esc(label)}</b><small>${esc(row.label)}</small></div>`
+    + `<span class="num">₹ ${esc(money(row.sales))}</span></li>`).join("");
+}
+
+function cmpBreakdown(table, emptyText) {
+  const rows = table.rows || [];
+  if (!rows.length) return `<tbody><tr><td colspan="5"><span class="gap-note">${esc(emptyText)}</span></td></tr></tbody>`;
+  return `<thead><tr><th>Name</th><th class="n">This window</th><th class="n">Previous</th>`
+    + `<th class="n">Change</th><th class="n">Share</th></tr></thead><tbody>`
+    + rows.map(r => `<tr><td>${esc(r.label)}</td><td class="n">${esc(money(r.current))}</td>`
+      + `<td class="n">${esc(money(r.previous))}</td><td class="n">${cmpDelta(r.change)}</td>`
+      + `<td class="n">${r.share === null ? "–" : esc(r.share.toFixed(1)) + "%"}</td></tr>`).join("")
+    + `</tbody>`;
+}
+
+function renderCompare() {
+  const s = state.compare, d = s.data;
+  const monthEl = $("#cmpMonth");
+  if (monthEl && document.activeElement !== monthEl) {
+    monthEl.value = s.month || (d ? d.month : "");
+  }
+  $$("[data-cmp-mode]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.cmpMode === s.mode)));
+  $("#cmpSkeleton").classList.toggle("hide", !(s.loading && !d));
+  $("#cmpError").classList.toggle("hide", !s.error);
+  $("#cmpContent").classList.toggle("hide", !d);
+  $("#cmpContent").setAttribute("aria-busy", s.loading ? "true" : "false");
+  if (s.error) {
+    $("#cmpErrText").textContent = d
+      ? ` The last figures loaded are shown. ${s.error}`
+      : ` ${s.error}`;
+  }
+  if (!d) {
+    $("#cmpNote").textContent = s.loading ? "Loading figures from the server…" : "";
+    return;
+  }
+
+  $("#cmpNote").innerHTML = `${esc(CMP_MODES[d.mode])} · ${esc(CMP_STATE[d.month_state])}`
+    + ` · ${esc(d.month_label)}${s.loading ? " · refreshing…" : ""}`;
+
+  const ranges = d.ranges;
+  $("#cmpRanges").innerHTML =
+    cmpRange(`Selected window · ${CMP_MODES[d.mode]}`, ranges.current, true)
+    + cmpRange("Previous month", ranges.previous, false)
+    + cmpRange("Same month last year", ranges.last_year, false);
+
+  $("#cmpCards").innerHTML = d.cards.map(c => cmpCard(c, d.month_state === "future")).join("");
+
+  const trend = d.trend;
+  $("#cmpTrend").innerHTML = cmpTrend(trend.months, d.month,
+                                      trend.sales_visible, trend.purchases_visible);
+  $("#cmpTrendNote").textContent = "The selected month is highlighted. Purchases are valued at order cost.";
+  $("#cmpGrowth").innerHTML = cmpMoves(trend);
+  $("#cmpExtremes").innerHTML = cmpExtremes(trend);
+  const seasons = (trend.seasonality || []).filter(x => x.index !== null);
+  $("#cmpSeason").innerHTML = seasons.length
+    ? seasons.map(x => `<span>${esc(x.label)}<b>${Number(x.index).toFixed(2)}×</b></span>`).join("")
+    : `<p class="gap-note">No prior-year sales figure to divide by for these months.</p>`;
+
+  const b = d.breakdowns;
+  $("#cmpBreakdowns").classList.toggle("hide", !b);
+  if (b) {
+    $("#cmpProdNote").textContent = "Taxable value, before GST";
+    $("#cmpDistNote").textContent = "Taxable value, before GST";
+    $("#cmpProducts").innerHTML = cmpBreakdown(b.sales_by_product,
+      "No issued invoices in the selected window.");
+    $("#cmpDists").innerHTML = cmpBreakdown(b.sales_by_distributor,
+      "No issued invoices in the selected window.");
+  }
+
+  const p = d.projection;
+  const estimate = p.is_estimate && p.state === "current";
+  $("#cmpProjLabel").innerHTML = estimate
+    ? `<span class="cmp-est">Estimate</span>${esc(p.label)}` : esc(p.label);
+  const stat = (value, label) => `<div><b>${estimate ? "≈ " : ""}₹ ${esc(money(value))}</b>`
+    + `<span>${esc(label)}</span></div>`;
+  const stats = [];
+  const suffix = p.complete ? ", recorded" : estimate ? ", run rate" : "";
+  if (p.sales !== null) stats.push(stat(p.sales, `Sales${suffix}`));
+  if (p.purchases !== null) stats.push(stat(p.purchases, `Purchases${suffix}`));
+  stats.push(`<div><b>${esc(qty(p.elapsed_days))} of ${esc(qty(p.days_in_month))}</b><span>days elapsed in the month</span></div>`);
+  $("#cmpProjection").innerHTML = stats.join("");
+  $("#cmpProjNote").textContent = p.note;
+
+  $("#cmpFooter").textContent =
+    `Counted ${fmtStamp(d.generated_at)} in Asia/Kolkata · `
+    + `rolling three-month average over the twelve months ending ${d.month_label}.`;
+  $("#cmpNotes").innerHTML = (d.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+}
+
+async function loadCompare() {
+  const s = state.compare;
+  const seq = ++s.seq;
+  s.loading = true;
+  s.error = null;
+  renderCompare();
+  const params = new URLSearchParams({mode: s.mode});
+  if (s.month) params.set("month", s.month);
+  const res = await api(`/api/dashboard/compare?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    s.data = res.body;
+    s.error = null;
+  } else {
+    s.error = detail(res.body);
+  }
+  renderCompare();
+}
+
+function setCompareMode(mode) {
+  if (!CMP_MODES[mode]) return;
+  state.compare.mode = mode;
+  try { localStorage.setItem("hb.cmpMode", mode); } catch (e) { /* storage blocked */ }
+  loadCompare();
+}
+
+function setCompareMonth(value) {
+  state.compare.month = /^\d{4}-\d{2}$/.test(value || "") ? value : "";
+  try {
+    if (state.compare.month) localStorage.setItem("hb.cmpMonth", state.compare.month);
+    else localStorage.removeItem("hb.cmpMonth");
+  } catch (e) { /* storage blocked */ }
+  loadCompare();
+}
+
+function downloadCsv(name, rows) {
+  const cell = v => {
+    const s = String(v ?? "");
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = rows.map(r => r.map(cell).join(",")).join("\r\n");
+  const blob = new Blob(["\ufeff" + csv], {type: "text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function exportCompareCsv() {
+  const d = state.compare.data;
+  if (!d) return;
+  const t = d.trend;
+  const head = ["Month"];
+  if (t.sales_visible) head.push("Sales incl. GST", "Same month last year", "YoY %");
+  if (t.purchases_visible) head.push("Purchases", "Prior year purchases");
+  if (t.sales_visible) head.push("3-month average");
+  const rows = [
+    ["HERBANOVA MoM and YoY comparison"],
+    ["Mode", CMP_MODES[d.mode]],
+    ["Selected window", d.ranges.current.from, d.ranges.current.to],
+    ["Previous month", d.ranges.previous.from, d.ranges.previous.to],
+    ["Same month last year", d.ranges.last_year.from, d.ranges.last_year.to],
+    ["Generated", d.generated_at],
+    [],
+    head,
+  ];
+  t.months.forEach(r => {
+    const row = [r.month];
+    if (t.sales_visible) row.push(r.sales, r.prior_sales, r.yoy_change);
+    if (t.purchases_visible) row.push(r.purchases, r.prior_purchases);
+    if (t.sales_visible) row.push(r.moving_average);
+    rows.push(row);
+  });
+  downloadCsv(`herbanova-mom-yoy-${d.month}.csv`, rows);
 }
 
 /* ---------- command palette ---------- */
@@ -4012,6 +4292,8 @@ async function doQuote(form) {
 
 /* ---------- events ---------- */
 document.addEventListener("click", e => {
+  const modeBtn = e.target.closest("[data-cmp-mode]");
+  if (modeBtn) return setCompareMode(modeBtn.dataset.cmpMode);
   const a = e.target.closest("[data-act]");
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
@@ -4019,6 +4301,8 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "load-ageing") return loadAgeing();
   if (a && a.dataset.act === "open-search") return openPalette();
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
+  if (a && a.dataset.act === "reload-compare") return loadCompare();
+  if (a && a.dataset.act === "cmp-csv") return exportCompareCsv();
   if (a && a.dataset.act === "toggle-series") return toggleSeries(a.dataset.series);
   if (a && a.dataset.act === "dash-ap") return dashOpenApproval(a.dataset.id);
   if (a && a.dataset.act === "dash-approve") return dashApprove(a.dataset.id);
@@ -4212,6 +4496,7 @@ document.addEventListener("change", e => {
   if (e.target.id === "dashFrom" || e.target.id === "dashTo") {
     applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
   }
+  if (e.target.id === "cmpMonth") setCompareMonth(e.target.value);
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {

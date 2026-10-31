@@ -294,6 +294,8 @@ Every card below can be correct today; where data is absent the card shows **"No
 | Orders | `sales_orders` by `created_at` | **VERIFIED** |
 | New leads / customers | `leads.created_at`; `distributors` has **no** `created_at` | **PARTIAL** — new customers per period cannot be measured |
 
+**Built in v2.** `GET /api/dashboard/compare?mode=full_month|mtd&month=YYYY-MM` reuses these sources unchanged: sales from issued invoices, purchases from the goods-receipt register at order cost, returns from issued credit notes, receipts from receipt payments, orders from `sales_orders.created_at` and new leads from `leads.created_at`, each in the explicit current, previous and same-month-last-year windows. Gross margin and new customers stay "No data yet" (GAP-D04, GAP-V16). Every card and table is filtered by the caller's permissions before it is returned, so a viewer never receives a figure it may not read. The date columns these queries group and filter on (`sales_orders.created_at`, `credit_notes.note_date`, `goods_receipts.received_at`, `leads.created_at`) are indexed by migration `0010`, which has a downgrade.
+
 ## A4. Warehouse capacity
 
 **MISSING.** `warehouses` has only `id` and `name`; no capacity, unit or location. `batches.on_hand` gives live units per warehouse, so used/percentage needs only a capacity column. No transfer endpoint exists (`StockMovement.movement_type='transfer'` is modelled but no route posts it). Receiving (`POST /api/purchase-orders/{id}/receive`) and dispatch (`POST /api/sales-orders/{id}/dispatch`) do not check capacity.
