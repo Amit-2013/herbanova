@@ -189,7 +189,8 @@ class Distributor(Base):
 class SalesOrder(Base):
     """draft -> (pending_approval) -> approved -> dispatched; or cancelled / rejected."""
     __tablename__ = "sales_orders"
-    __table_args__ = (Index("ix_sales_orders_status_created", "status", "created_at"),)
+    __table_args__ = (Index("ix_sales_orders_status_created", "status", "created_at"),
+                      Index("ix_sales_orders_created_at", "created_at"))
     id: Mapped[int] = mapped_column(primary_key=True)
     so_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     distributor_id: Mapped[int] = mapped_column(ForeignKey("distributors.id"))
@@ -264,6 +265,7 @@ class Lead(Base):
         CheckConstraint("phone_key IS NOT NULL OR email_key IS NOT NULL", name="ck_lead_has_contact"),
         Index("ix_leads_owner_followup", "owner_id", "next_follow_up"),
         Index("ix_leads_status_followup", "status", "next_follow_up"),
+        Index("ix_leads_created_at", "created_at"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     lead_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
@@ -403,6 +405,7 @@ class CreditNote(Base):
     __table_args__ = (
         UniqueConstraint("credit_note_number", "financial_year", name="uq_credit_note_number_fy"),
         CheckConstraint("status IN ('issued','cancelled')", name="ck_credit_note_status"),
+        Index("ix_credit_notes_note_date", "note_date"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     credit_note_number: Mapped[str] = mapped_column(String(16), index=True)

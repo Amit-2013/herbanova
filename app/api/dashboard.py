@@ -859,6 +859,430 @@ def activity_feed(limit: int = Query(20, ge=1, le=100),
     return _activity(db, limit)
 
 
+# ------------------------------------------------------------ comparison
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December")
+COMPARE_MODES = ("full_month", "mtd")
+
+
+def _month_start(day: date) -> date:
+    return day.replace(day=1)
+
+
+def _shift_month(first: date, months: int) -> date:
+    """The first day of a month offset from another month's first day."""
+    index = first.year * 12 + (first.month - 1) + months
+    return date(index // 12, index % 12 + 1, 1)
+
+
+def _month_bounds(first: date) -> tuple[date, date]:
+    return first, _shift_month(first, 1) - timedelta(days=1)
+
+
+def _parse_month(month: str | None, today: date) -> date:
+    if not month:
+        return _month_start(today)
+    try:
+        parsed = datetime.strptime(month, "%Y-%m").date()
+    except ValueError:
+        raise HTTPException(422, "month must be written as YYYY-MM")
+    if not 2000 <= parsed.year <= 2100:
+        raise HTTPException(422, "month is outside the supported range")
+    return parsed
+
+
+def _window_label(start: date, end: date) -> str:
+    if start > end:
+        return "No days in this window yet"
+    if (start.year, start.month) == (end.year, end.month):
+        return f"{start.day}–{end.day} {MONTH_NAMES[start.month - 1]} {start.year}"
+    return (f"{start.day} {MONTH_NAMES[start.month - 1]} {start.year} – "
+            f"{end.day} {MONTH_NAMES[end.month - 1]} {end.year}")
+
+
+def _compare_windows(mode: str, first: date, today: date) -> dict:
+    """The current, previous-month and same-month-last-year windows.
+
+    Full-month compares whole calendar months. Month-to-date compares day 1 to
+    the same day number in each comparison month, capped at that month's end.
+    """
+    month_end = _month_bounds(first)[1]
+    prev_first = _shift_month(first, -1)
+    prev_end = _month_bounds(prev_first)[1]
+    last_first = _shift_month(first, -12)
+    last_end = _month_bounds(last_first)[1]
+    state = ("future" if first > today else
+             "current" if today <= month_end else "past")
+
+    if mode == "full_month":
+        current, previous, last_year = ((first, month_end),
+                                        (prev_first, prev_end),
+                                        (last_first, last_end))
+    else:
+        if state == "future":
+            current = (first, first - timedelta(days=1))
+        else:
+            current = (first, min(today, month_end))
+        elapsed = (current[1].day if current[1] >= current[0] else 0)
+        if elapsed == 0:
+            previous = (prev_first, prev_first - timedelta(days=1))
+            last_year = (last_first, last_first - timedelta(days=1))
+        else:
+            previous = (prev_first,
+                        min(prev_first + timedelta(days=elapsed - 1), prev_end))
+            last_year = (last_first,
+                         min(last_first + timedelta(days=elapsed - 1), last_end))
+
+    def describe(window: tuple[date, date]) -> dict:
+        start, end = window
+        return {"from": start.isoformat(), "to": end.isoformat(),
+                "days": (end - start).days + 1 if end >= start else 0,
+                "label": _window_label(start, end)}
+
+    # Days of the selected month that have actually happened. A full-month window
+    # still covers the whole calendar in the figures, but the run rate may only
+    # divide by the days elapsed so far.
+    elapsed_days = (0 if state == "future" else
+                    today.day if state == "current" else month_end.day)
+    return {"current": describe(current), "previous": describe(previous),
+            "last_year": describe(last_year), "state": state,
+            "elapsed_days": elapsed_days, "days_in_month": month_end.day}
+
+
+def _period_stats(db: Session, start: date, end: date, perms: set[str]) -> dict:
+    """Every comparison figure for one window, from the source tables."""
+    out = {"sales": Decimal(0), "purchases": Decimal(0), "orders": 0,
+           "receipts": 0, "returns": Decimal(0), "return_count": 0, "leads": 0}
+    if start > end:
+        return out
+    if "sales:read" in perms:
+        issued = (Invoice.status == "issued", Invoice.invoice_date >= start,
+                  Invoice.invoice_date <= end)
+        out["sales"] = (db.scalar(select(func.coalesce(func.sum(Invoice.grand_total), 0))
+                                  .where(*issued)) or Decimal(0))
+        order_day = _business_day(SalesOrder.created_at)
+        out["orders"] = db.scalar(select(func.count())
+                                  .where(order_day >= start, order_day <= end)) or 0
+        returned = (CreditNote.status == "issued", CreditNote.note_date >= start,
+                    CreditNote.note_date <= end)
+        out["returns"] = (db.scalar(select(func.coalesce(func.sum(CreditNote.grand_total), 0))
+                                    .where(*returned)) or Decimal(0))
+        out["return_count"] = db.scalar(select(func.count()).where(*returned)) or 0
+    if "stock:read" in perms:
+        out["purchases"] = sum(_purchases_by_day(db, start, end).values(), Decimal(0))
+        receipt_day = _business_day(GoodsReceipt.received_at)
+        out["receipts"] = db.scalar(select(func.count())
+                                    .where(receipt_day >= start,
+                                           receipt_day <= end)) or 0
+    if "lead:read" in perms:
+        lead_day = _business_day(Lead.created_at)
+        out["leads"] = db.scalar(select(func.count())
+                                 .where(lead_day >= start, lead_day <= end)) or 0
+    return out
+
+
+def _card(key: str, label: str, unit: str, current, previous, last_year,
+          href: str, note: str = "") -> dict:
+    return {"key": key, "label": label, "unit": unit,
+            "current": current, "previous": previous, "last_year": last_year,
+            "previous_change": _change(current, previous),
+            "last_year_change": _change(current, last_year),
+            "available": True, "gap": None, "href": href, "note": note}
+
+
+def _unavailable(key: str, label: str, gap: str, note: str) -> dict:
+    return {"key": key, "label": label, "unit": "amount",
+            "current": None, "previous": None, "last_year": None,
+            "previous_change": None, "last_year_change": None,
+            "available": False, "gap": gap, "href": "", "note": note}
+
+
+def _monthly_totals(daily: dict[date, Decimal]) -> dict[tuple[int, int], Decimal]:
+    out: dict[tuple[int, int], Decimal] = {}
+    for day, value in daily.items():
+        key = (day.year, day.month)
+        out[key] = out.get(key, Decimal(0)) + Decimal(value)
+    return out
+
+
+def _trend(db: Session, first: date, perms: set[str]) -> dict:
+    """Twelve selected months, each beside the same month a year earlier."""
+    months = [_shift_month(first, offset - 11) for offset in range(12)]
+    window_start = _shift_month(first, -23)
+    window_end = _month_bounds(first)[1]
+    sales_visible = "sales:read" in perms
+    purchases_visible = "stock:read" in perms
+    monthly_sales = (_monthly_totals(_sales_by_day(db, window_start, window_end))
+                     if sales_visible else {})
+    monthly_purchases = (_monthly_totals(_purchases_by_day(db, window_start, window_end))
+                         if purchases_visible else {})
+
+    def month_key(day: date) -> tuple[int, int]:
+        return day.year, day.month
+
+    rows = []
+    for index, month in enumerate(months):
+        prior = _shift_month(month, -12)
+        current_sales = monthly_sales.get(month_key(month), Decimal(0)) if sales_visible else None
+        prior_sales = monthly_sales.get(month_key(prior), Decimal(0)) if sales_visible else None
+        moving = None
+        if sales_visible:
+            span = months[max(0, index - 2):index + 1]
+            values = [monthly_sales.get(month_key(m), Decimal(0)) for m in span]
+            moving = _money(sum(values, Decimal(0)) / len(values))
+        rows.append({
+            "month": f"{month:%Y-%m}", "label": f"{month:%b %Y}",
+            "sales": (_money(current_sales) if sales_visible else None),
+            "purchases": (_money(monthly_purchases.get(month_key(month), Decimal(0)))
+                          if purchases_visible else None),
+            "prior_sales": (_money(prior_sales) if sales_visible else None),
+            "prior_purchases": (_money(monthly_purchases.get(month_key(prior), Decimal(0)))
+                                if purchases_visible else None),
+            "moving_average": moving,
+            "yoy_change": (_change(current_sales, prior_sales) if sales_visible else None),
+        })
+
+    def extreme(pick) -> dict | None:
+        if not sales_visible:
+            return None
+        measured = [r for r in rows if Decimal(r["sales"] or 0) > 0]
+        if not measured:
+            return None
+        row = pick(measured, key=lambda r: Decimal(r["sales"]))
+        return {"month": row["month"], "label": row["label"], "sales": row["sales"]}
+
+    selected_sales = monthly_sales.get(month_key(first), Decimal(0)) if sales_visible else Decimal(0)
+    previous_sales = (monthly_sales.get(month_key(_shift_month(first, -1)), Decimal(0))
+                      if sales_visible else Decimal(0))
+    last_year_sales = (monthly_sales.get(month_key(_shift_month(first, -12)), Decimal(0))
+                       if sales_visible else Decimal(0))
+    selected_purchases = (monthly_purchases.get(month_key(first), Decimal(0))
+                          if purchases_visible else Decimal(0))
+    previous_purchases = (monthly_purchases.get(month_key(_shift_month(first, -1)), Decimal(0))
+                          if purchases_visible else Decimal(0))
+    last_year_purchases = (monthly_purchases.get(month_key(_shift_month(first, -12)), Decimal(0))
+                           if purchases_visible else Decimal(0))
+
+    seasons = []
+    if sales_visible:
+        for row in rows:
+            current = Decimal(row["sales"] or 0)
+            prior = Decimal(row["prior_sales"] or 0)
+            seasons.append({
+                "month": row["month"], "label": row["label"][:3],
+                "current": row["sales"], "prior_year": row["prior_sales"],
+                "index": (round(float(current / prior), 2) if prior > 0 else None)})
+
+    return {
+        "months": rows,
+        "sales_visible": sales_visible, "purchases_visible": purchases_visible,
+        "best": extreme(max), "worst": extreme(min),
+        "growth": {
+            "sales": {"current": _money(selected_sales),
+                      "previous": _money(previous_sales),
+                      "last_year": _money(last_year_sales),
+                      "mom": _change(selected_sales, previous_sales),
+                      "yoy": _change(selected_sales, last_year_sales)},
+            "purchases": {"current": _money(selected_purchases),
+                          "previous": _money(previous_purchases),
+                          "last_year": _money(last_year_purchases),
+                          "mom": _change(selected_purchases, previous_purchases),
+                          "yoy": _change(selected_purchases, last_year_purchases)},
+        },
+        "seasonality": seasons,
+        "note": ("A three-month moving average smooths one-off months. The "
+                 "seasonality index is this year divided by the same calendar "
+                 "month last year; with one prior year it is a comparison, not a "
+                 "fitted seasonal model."),
+    }
+
+
+def _projection(stats: dict, windows: dict, perms: set[str]) -> dict:
+    sales = Decimal(stats["sales"])
+    purchases = Decimal(stats["purchases"])
+    month_days = windows["days_in_month"]
+    state = windows["state"]
+
+    def pack(s, p, **rest) -> dict:
+        return {"sales": _money(s) if "sales:read" in perms else None,
+                "purchases": _money(p) if "stock:read" in perms else None, **rest}
+
+    if state == "future":
+        return pack(Decimal(0), Decimal(0), is_estimate=False, complete=False,
+                    state=state, elapsed_days=0, days_in_month=month_days,
+                    label="Not started",
+                    note="The month has not started yet, so there is nothing to project.")
+    if state == "past":
+        return pack(sales, purchases, is_estimate=False, complete=True,
+                    state=state, elapsed_days=month_days,
+                    days_in_month=month_days, label="Complete month",
+                    note="The month is complete, so the projection is the recorded total.")
+    elapsed = max(windows["elapsed_days"], 1)
+    factor = Decimal(month_days) / Decimal(elapsed)
+    return pack(sales * factor, purchases * factor, is_estimate=True, complete=False,
+                state=state, elapsed_days=elapsed, days_in_month=month_days,
+                label="Run-rate estimate (not a forecast)",
+                note=(f"The month-to-date total projected from {elapsed} of "
+                      f"{month_days} days at the current run rate. Actual trading "
+                      "may differ; this is an estimate, not a forecast."))
+
+
+def _grouped_sales(db: Session, start: date, end: date,
+                   group_column, label_column, label_join=None) -> dict:
+    if start > end:
+        return {}
+    stmt = (select(group_column, label_column,
+                   func.coalesce(func.sum(InvoiceLine.taxable_value), 0))
+            .select_from(InvoiceLine)
+            .join(Invoice, Invoice.id == InvoiceLine.invoice_id)
+            .where(Invoice.status == "issued", Invoice.invoice_date >= start,
+                   Invoice.invoice_date <= end)
+            .group_by(group_column, label_column))
+    if label_join is not None:
+        stmt = stmt.join(*label_join)
+    return {row[0]: (row[1], Decimal(row[2])) for row in db.execute(stmt).all()}
+
+
+def _breakdowns(db: Session, current: dict, previous: dict,
+                perms: set[str]) -> dict | None:
+    if "sales:read" not in perms:
+        return None
+    start, end = date.fromisoformat(current["from"]), date.fromisoformat(current["to"])
+    prev_start, prev_end = (date.fromisoformat(previous["from"]),
+                            date.fromisoformat(previous["to"]))
+
+    def build(group_column, label_column, combine, label_join=None) -> dict:
+        now = _grouped_sales(db, start, end, group_column, label_column, label_join)
+        before = _grouped_sales(db, prev_start, prev_end, group_column,
+                                label_column, label_join)
+        ranked = sorted(now.items(), key=lambda item: item[1][1], reverse=True)[:5]
+        total = sum((value for _, value in now.values()), Decimal(0))
+        return {"rows": [{
+            "key": str(key), "label": combine(label),
+            "current": _money(value),
+            "previous": _money(before.get(key, (None, Decimal(0)))[1]),
+            "change": _change(value, before.get(key, (None, Decimal(0)))[1]),
+            "share": round(float(value / total * 100), 1) if total > 0 else None,
+        } for key, (label, value) in ranked],
+            "previous_from": previous["from"], "previous_to": previous["to"]}
+
+    return {
+        "sales_by_product": {
+            **build(InvoiceLine.product_id,
+                   func.concat(InvoiceLine.sku, " · ", InvoiceLine.product_name),
+                   lambda label: label or "Unnamed product"),
+            "note": ("Top 5 products by taxable value (before GST) in the selected "
+                     "window; the previous column uses the comparable window.")},
+        "sales_by_distributor": {
+            **build(Invoice.distributor_id, Distributor.name,
+                   lambda label: label or "Unnamed distributor",
+                   (Distributor, Distributor.id == Invoice.distributor_id)),
+            "note": ("Top 5 distributors by taxable value (before GST) in the "
+                     "selected window; the previous column uses the comparable "
+                     "window.")},
+    }
+
+
+@router.get("/compare")
+def compare(mode: str = "full_month", month: str | None = None,
+            db: Session = Depends(get_db), user=Depends(require_login)):
+    """Month-on-month and year-on-year figures for one explicit mode."""
+    if mode not in COMPARE_MODES:
+        raise HTTPException(422, "mode must be full_month or mtd")
+    perms = role_permissions(db, user)
+    today = date.today()
+    first = _parse_month(month, today)
+    windows = _compare_windows(mode, first, today)
+
+    key = (user.id, tuple(sorted(perms)), "compare", mode, first.isoformat(),
+           _CACHE_GENERATION)
+    now = datetime.now(timezone.utc).timestamp()
+    if _cache_enabled(db):
+        hit = _CACHE.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+
+    stats = {name: _period_stats(db, date.fromisoformat(window["from"]),
+                                 date.fromisoformat(window["to"]), perms)
+             for name, window in (("current", windows["current"]),
+                                  ("previous", windows["previous"]),
+                                  ("last_year", windows["last_year"]))}
+    cur, prev, last = stats["current"], stats["previous"], stats["last_year"]
+
+    cards = []
+    if "sales:read" in perms:
+        cards.append(_card(
+            "sales", "Sales (issued invoices)", "amount",
+            _money(cur["sales"]), _money(prev["sales"]), _money(last["sales"]),
+            "#/billing", "Issued tax invoices, including GST."))
+    if "stock:read" in perms:
+        cards.append(_card(
+            "purchases", "Purchases (goods received)", "amount",
+            _money(cur["purchases"]), _money(prev["purchases"]),
+            _money(last["purchases"]), "#/purchasing",
+            "Goods receipts valued at the purchase-order cost; a line without a "
+            "price counts as zero."))
+    if "sales:read" in perms:
+        cards.append(_card(
+            "orders", "Sales orders raised", "count",
+            cur["orders"], prev["orders"], last["orders"], "#/sales",
+            "Every order created in the window, whatever its status today."))
+        cards.append(_unavailable(
+            "gross_margin", "Gross margin", "GAP-D04",
+            "No batch cost or invoice-line cost is stored, so margin cannot be "
+            "computed without inventing a cost."))
+    if "stock:read" in perms:
+        cards.append(_card(
+            "receipts", "Goods receipts posted", "count",
+            cur["receipts"], prev["receipts"], last["receipts"], "#/purchasing",
+            "Goods receipt notes posted in the window."))
+    if "sales:read" in perms:
+        cards.append(_card(
+            "returns", "Returns (credit notes)", "amount",
+            _money(cur["returns"]), _money(prev["returns"]),
+            _money(last["returns"]), "#/billing",
+            f"{cur['return_count']} issued credit note"
+            f"{'' if cur['return_count'] == 1 else 's'} in the selected window."))
+    if "lead:read" in perms:
+        cards.append(_card(
+            "new_leads", "New leads", "count",
+            cur["leads"], prev["leads"], last["leads"], "#/leads",
+            "Leads created in the window."))
+    if "sales:read" in perms:
+        cards.append(_unavailable(
+            "new_customers", "New customers", "GAP-V16",
+            "Distributors carry no creation timestamp, so a customer cannot be "
+            "dated as new in a period."))
+
+    out = {
+        "mode": mode, "month": f"{first:%Y-%m}",
+        "month_label": f"{MONTH_NAMES[first.month - 1]} {first.year}",
+        "month_state": windows["state"],
+        "ranges": {"current": windows["current"],
+                   "previous": windows["previous"],
+                   "last_year": windows["last_year"],
+                   "mode": mode, "state": windows["state"],
+                   "elapsed_days": windows["elapsed_days"],
+                   "days_in_month": windows["days_in_month"]},
+        "cards": cards,
+        "trend": _trend(db, first, perms),
+        "projection": _projection(cur, windows, perms),
+        "breakdowns": _breakdowns(db, windows["current"], windows["previous"], perms),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "notes": [
+            ("Each card compares the selected window with the previous calendar "
+             "month and with the same month last year."),
+            ("Month-to-date windows end on the same day number in each comparison "
+             "month, capped at that month's last day."),
+            ("Gross margin and new customers are shown as gaps because the "
+             "database holds no cost and no customer creation date."),
+        ],
+    }
+    if _cache_enabled(db):
+        _CACHE[key] = (now + DASHBOARD_TTL_SECONDS, out)
+    return out
+
+
 # ------------------------------------------------------------ dashboard
 def _period(from_date: date | None, to_date: date | None,
             range_days: int | None, today: date) -> tuple[date, date, int]:

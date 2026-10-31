@@ -275,6 +275,84 @@
       </div>
     </section>
 
+    <!-- MoM & YoY dashboard -->
+    <section id="v-compare" class="view compare hide">
+      <div class="panel cmp-toolbar">
+        <div class="cmp-controls">
+          <div class="seg" role="group" aria-label="Comparison mode">
+            <button type="button" data-cmp-mode="full_month" aria-pressed="true">Full month</button>
+            <button type="button" data-cmp-mode="mtd" aria-pressed="false">Month to date</button>
+          </div>
+          <label class="cmp-month" for="cmpMonth">Month
+            <input type="month" id="cmpMonth" aria-label="Month to compare">
+          </label>
+          <a class="btn ghost sm" href="#/dash">Back to Overview</a>
+        </div>
+        <p class="muted" id="cmpNote">Loading figures from the server…</p>
+      </div>
+
+      <div id="cmpError" class="dash-error hide" role="alert">
+        <div><b>This comparison could not be loaded.</b><span id="cmpErrText"></span></div>
+        <button class="btn ghost" type="button" data-act="reload-compare">Try again</button>
+      </div>
+
+      <div id="cmpSkeleton" class="dash-skeleton" aria-hidden="true">
+        <div class="sk-row">
+          <div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div>
+        </div>
+        <div class="sk-row"><div class="sk sk-chart"></div><div class="sk sk-chart"></div></div>
+      </div>
+
+      <div id="cmpContent" class="dash-content hide" aria-busy="false">
+        <div class="cmp-ranges" id="cmpRanges"></div>
+        <div class="kpis cmp-cards" id="cmpCards"></div>
+
+        <div class="panel dash-panel cmp-trend-panel" id="cmpTrendPanel">
+          <div class="panel-h">
+            <h2>Twelve-month trend</h2>
+            <div class="cmp-h-tools">
+              <span class="muted" id="cmpTrendNote"></span>
+              <button class="btn ghost sm" type="button" data-act="cmp-csv">Export CSV</button>
+            </div>
+          </div>
+          <div class="tw"><table id="cmpTrend" class="cmp-table"></table></div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Movement</h2><span class="muted">Month on month and year on year</span></div>
+            <div id="cmpGrowth" class="cmp-moves"></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Best, worst and seasonality</h2><span class="muted">Twelve months shown</span></div>
+            <ul class="rows" id="cmpExtremes"></ul>
+            <h3 class="ins-h">Seasonality index</h3>
+            <div class="cmp-season" id="cmpSeason"></div>
+          </div>
+        </div>
+
+        <div class="dash-grid" id="cmpBreakdowns">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top products</h2><span class="muted" id="cmpProdNote"></span></div>
+            <div class="tw"><table id="cmpProducts" class="cmp-table"></table></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top distributors</h2><span class="muted" id="cmpDistNote"></span></div>
+            <div class="tw"><table id="cmpDists" class="cmp-table"></table></div>
+          </div>
+        </div>
+
+        <div class="panel dash-panel" id="cmpProjectionPanel">
+          <div class="panel-h"><h2>Run-rate</h2><span class="muted" id="cmpProjLabel"></span></div>
+          <div class="cmp-proj" id="cmpProjection"></div>
+          <p class="gap-note" id="cmpProjNote"></p>
+        </div>
+
+        <p class="muted cmp-foot" id="cmpFooter"></p>
+        <ul class="cmp-notes" id="cmpNotes"></ul>
+      </div>
+    </section>
+
     <!-- Products -->
     <section id="v-products" class="view hide">
       <div class="panel flush">
