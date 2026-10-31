@@ -355,3 +355,109 @@ Gaps: **GAP-V11** no district/city/pincode capture; **GAP-V12** territory is fre
 6. **Geography** — state-level table and ranked lists from invoice snapshots, a locally drawn state tile map (no external map service), "Location not recorded" row; district/city drill-down is not possible without GAP-V11.
 
 No figure in v2 will be invented. Missing inputs are returned as `null` with a gap code and rendered as "No data yet".
+
+---
+
+# Part B — Scheduled email reports and Accounts reporting (audit before build)
+
+**Audited:** 1 November 2026, branch `feature/scheduled-reports`, Alembic head `0010_comparison_indexes`.
+**Rule:** the same rule as Part A — a figure is either read from a table or shown as "No data yet" with a gap code. Nothing is estimated, typed in by hand or copied from the sample email.
+
+## B1. Email, scheduler and alerting — what exists
+
+| Area | State today | Evidence |
+|---|---|---|
+| Outbound email | **MISSING** | `grep -ri "smtp\|sendmail\|email" app` finds no mail client. No library in the dependency list. |
+| Email settings | **MISSING** | `app/core/config.py` has Telegram only. There is no `SMTP_*` setting, no sender address and no test recipient. |
+| Scheduler / background jobs | **MISSING** | The app starts no background task; `app/main.py` registers routers and static files only. No cron, Celery, APScheduler or worker process. |
+| Stored schedules | **MISSING** | No schedule, recipient or delivery table. |
+| Delivery log / retries | **MISSING** | Nothing records an attempted send, its recipients, size, outcome or error. |
+| Report generation | **VERIFIED** | `app/services/reports.py` (`CATALOG`, `build()`), `exports.to_csv/to_xlsx`, `reports_pdf.to_pdf`. Tables carry columns, totals, reconciliation checks and limitations. |
+| Dashboard aggregates | **VERIFIED** | `app/api/dashboard.py` provides `_period_stats`, `_sales_by_day`, `_purchases_by_day`, `_top_products`, `_geo_states`, `_customers`, `ageing_rows`, `trial_balance`. |
+| Audit trail | **VERIFIED** | `audit()` writes `audit_logs` and strips secret keys; every existing module uses it. |
+| Alert channel | **PARTIAL** | `services/telegram.py` queues after commit and never raises. It has **no retry, no delivery record and no per-message history**; it is not an email channel. |
+| Holidays | **VERIFIED** | `hr_holidays` stores a date, name, branch and location — reusable for "first working day" and holiday shifting. |
+| Image/PDF generation | **VERIFIED** | Pillow 12.3 and ReportLab (including `renderPM`) import successfully, so PNG charts can be drawn without a new dependency. |
+| User email address | **PARTIAL** | `User` has **no** email column. `Employee.email` exists (120 chars, optional). Recipients therefore need their own verified list; a login is not an email address. |
+| Recipient consent / unsubscribe | **MISSING** | No token, no opt-out record. |
+
+**Consequence.** Scheduled email needs four additive tables, a worker process and a mail client. It cannot reuse a scheduler or a mailer because neither exists. It can and must reuse the report, export, PDF, ledger, audit and holiday services so the numbers are the same numbers.
+
+## B2. What a report pack can honestly contain
+
+| Pack | Sources that exist | What must be shown as a gap |
+|---|---|---|
+| Daily Business Summary | Orders, invoices, receipts, GRNs, leads, approvals, expiry, audit — all dated | Gross margin (no cost, GAP-D04) |
+| Weekly Management Report | The above plus ageing, top products, credit use, PO ageing | Net profit, expenses (GAP-A02/A03) |
+| Monthly MD Report | Month windows from `_compare_windows`, 12-month trend, top 5 products/customers/states, Accounts block | Gross margin, net profit, expenses, new customers (GAP-V16) |
+| Alerts digest | Expiry, capacity, approvals, overdue follow-ups, >60-day receivables | Nothing new |
+| Accounts pack | Revenue, collections, outstanding/ageing, payables outstanding, GST output, trial balance, credit exposure | P&L net profit, balance sheet, expenses by head, input GST, TDS, due dates, bank reconciliation, vouchers, period locks (GAP-A01..A12) |
+| Custom pack | Any existing report in the catalog, by key | Whichever report already declares |
+
+`tests/test_email_reports.py` compares the pack's sales, purchases, returns, receipts and outstanding against the same dashboard service and the same ledger function, so a pack cannot drift from the screens.
+
+## B3. Accounts module — what exists and what does not
+
+| Capability | State | Detail |
+|---|---|---|
+| Money in and out | **VERIFIED** | `payments` (receipt/payment, cash/bank/upi/cheque/neft/other, date, party, optional invoice/PO). Append-only. |
+| Receivables | **VERIFIED** | Derived from issued invoices minus notes and receipts (`ledger.receivable_rows`). |
+| Ageing | **VERIFIED** | Four buckets as of a selected date (`ledger.ageing_rows`). |
+| Payables | **PARTIAL** | Derived from received goods at order cost minus payments. **No invoice, no due date, no supplier terms.** |
+| Party ledgers | **VERIFIED** | `distributor_ledger`, `supplier_ledger`. |
+| Credit/debit notes | **VERIFIED** | Issued notes with reason, tax and stock return. |
+| GST outward | **VERIFIED** | Invoice and note tax split; `gst_register`. |
+| GST inward / net payable | **MISSING** | Purchase tax is not captured anywhere. A net payable figure would be invented. |
+| Trial balance | **PARTIAL** | Derived double-entry summary from documents (`ledger.trial_balance`), balanced check included. It is **not** a posted ledger: no opening balances, no expense or TDS accounts. |
+| Chart of accounts / vouchers / journal | **MISSING** | No account, voucher or journal table. |
+| Day book / cash book / bank book | **PARTIAL** | A dated payment book can be produced; opening balances and running closing balances cannot. |
+| Expenses / expense heads | **MISSING** | No expense table, no head, no cost centre. |
+| P&L / balance sheet | **MISSING** | Revenue and output GST are computable; cost, expenses and closing stock valuation are not. A P&L or balance sheet would be fabricated. |
+| Financial-year / period locks | **MISSING** | No lock date, no locked-period flag on any document. |
+| TDS / statutory dues | **MISSING** | No TDS section, rate, deduction or challan. |
+| Bank reconciliation / unposted vouchers | **MISSING** | No bank statement import, no posting state. |
+| Invoice due dates | **MISSING** | No due date or payment term on an invoice, so "due this week" cannot be computed. |
+| Discounts | **PARTIAL** | Invoice/discount fields exist on documents and the discount-slab master; a period discount total is computable only from stored fields, not from free text. |
+| Post-billing changes | **VERIFIED** | Audit log records issued-invoice amendments and approval decisions. |
+| Accounts permission | **PARTIAL** | `accounts:read` is held by Administrator **and sales**; there is no separate gate for full accounts reporting. A new, additive `accounts:reports` key is required so the Administrator can allow an Accounts head without giving every sales user P&L-style visibility. |
+
+**Measured today (development database):** 2 issued invoices, ₹ 70,00,000.00 outstanding (both inside 0–30 days), 0 payments recorded in the current month, 0 credit notes in October, trial balance balanced. The sample email's figures (₹ 96.2 L sales, 31.8% margin, ₹ 14.6 L net profit) are **sample data only** and must not appear in a real email.
+
+## B4. New gap register
+
+| ID | Gap | Blocks | Handling |
+|---|---|---|---|
+| GAP-E01 | No SMTP client or settings | Any email | Add `app/services/mailer.py`; secrets from environment only |
+| GAP-E02 | No scheduler or worker | Scheduled runs | DB-backed worker with unique run key; separate process |
+| GAP-E03 | No schedule/recipient/delivery tables | Admin screens, log | Migration `0011` with rollback |
+| GAP-E04 | No email address on `User` | Test recipient | Recipient list; test mode also reads `Employee.email` of active Administrators |
+| GAP-E05 | No tokenised public dashboard link | Expiring secure link | "View full dashboard" points at the login page; link expiry not built |
+| GAP-E06 | No attachment encryption | Oversized packs | Hard 9.5 MB budget, drop detail files, never email a password |
+| GAP-E07 | No unsubscribe endpoint | Extras opt-out | Token stored per recipient; mandatory groups are removed only by an Administrator |
+| GAP-E08 | No per-message Telegram history | Failure alert | Worker writes the failure to the delivery log **and** sends one Telegram alert |
+| GAP-E09 | No email delivery provider/reputation handling | Rate limits | Send in batches of 20 with a pause; provider-specific APIs not integrated |
+| GAP-A01 | No expense table or heads | Expenses, P&L, net profit | "No data yet" with the gap code; no invented head |
+| GAP-A02 | No cost on stock or invoice lines | COGS, gross profit, margin | "No data yet" (also GAP-D04) |
+| GAP-A03 | No closed-period lock | Locked-period enforcement | Display "No period lock is configured"; no lock is pretended |
+| GAP-A04 | No invoice due date | Payables/receivables due this week | Show outstanding ageing only |
+| GAP-A05 | No purchase-side tax | Input GST, net GST, GSTR-3B | Show output GST only, labelled |
+| GAP-A06 | No GSTR-1/3B filings | Reconciliation | Not shown |
+| GAP-A07 | No TDS records | TDS/statutory dues | "No data yet" |
+| GAP-A08 | No vouchers/journal/day book posting | Day book, unposted vouchers | Payment book only; "unposted vouchers" is not a concept yet |
+| GAP-A09 | No bank statement/reconciliation | Bank reconciliation status | "Not available" |
+| GAP-A10 | No opening balances | Cash/bank balance, balance sheet | Show net movement recorded, labelled |
+| GAP-A11 | No balance-sheet asset/liability capture | Balance sheet | "No data yet"; the trial balance is shown instead |
+| GAP-A12 | No MD login role | MD dashboard access | MD receives email; the Administrator can grant `accounts:reports` to a role |
+
+## B5. Build order for Part B
+
+1. Audit and decisions (this document and `DASHBOARD_DECISIONS.md`).
+2. Migration `0011` — schedules, recipients, schedule recipients, delivery log; downgrade.
+3. Schedule maths (timezone, slots, monthly rules, holidays) with unit tests.
+4. Accounts service with honest gaps, then the Accounts dashboard and Overview section.
+5. Pack builder, HTML/text renderer, PNG charts, PDF/XLSX attachments.
+6. Mailer with test mode, worker with retries and duplicate protection.
+7. Administrator screens (scheduled reports, recipients, delivery log) and API.
+8. Reconciliation, permission, failure and schedule tests; docs and samples.
+
+Anything blocked by a missing input stays a gap; the email and the screen say so rather than showing a zero.

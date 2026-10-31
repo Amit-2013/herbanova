@@ -64,6 +64,13 @@ def queue(db: Session, action: str, record: str, actor: str, changes: dict) -> N
     db.info.setdefault(_PENDING, []).append(_format(action, record, actor, changes))
 
 
+def notify_text(text: str) -> None:
+    """Send an already HTML-formatted alert now; never raises."""
+    if not enabled():
+        return
+    threading.Thread(target=_send, args=(text,), daemon=True).start()
+
+
 @event.listens_for(Session, "after_commit")
 def _flush_after_commit(session: Session) -> None:
     for text in session.info.pop(_PENDING, []):

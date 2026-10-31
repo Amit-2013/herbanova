@@ -135,3 +135,89 @@ This file records every decision taken without the owner present, so each one ca
 
 **Decision.** No new demo rows are seeded on this branch. The existing marked demo seed and its rollback remain the only synthetic records.
 **Why.** The owner's data-safety rules; v2 changes are verified against the existing demo set and the isolated test database.
+
+## D-21. Email is off by default and test mode is the only mode until the owner approves
+
+**Decision.** `EMAIL_MODE` defaults to `test` and `EMAIL_SEND_ENABLED` defaults to `false`. A send happens only when `EMAIL_SEND_ENABLED=true` **and** SMTP settings are present; in `test` mode every message is redirected to one Administrator address (`EMAIL_TEST_RECIPIENT`, else the email of an active Administrator's employee record). If no test address exists the delivery is recorded as failed with "Test mode: no Administrator email configured" — it is never sent to a real recipient. The subject is prefixed `[TEST]` in test mode and the footer says who the real recipients would have been.
+**Why.** The owner's instruction: do not send a real email until SMTP settings and the recipient list are approved. Two independent switches make an accidental live send impossible; a missing recipient fails closed.
+**How to reverse.** Set `EMAIL_MODE=live` and `EMAIL_SEND_ENABLED=true` after approving the settings, then add recipients. No code change is needed.
+
+## D-22. Scheduling is a separate DB-backed worker, not an in-process timer
+
+**Decision.** Add `python -m app.email_worker` (loop) and `--once` (single tick). It claims due schedules with `SELECT … FOR UPDATE SKIP LOCKED`, writes one delivery row per slot keyed uniquely by `schedule_id + slot UTC`, and runs generation outside the claim transaction. A process restart or a second worker cannot send the same slot twice because the insert loses the unique-key race.
+**Why.** The app has no scheduler; an in-process timer would run once per web worker and duplicate sends. A database is already the shared, durable store.
+**Consequence.** The worker must be started by the owner (documented in `docs/EMAIL_REPORTS.md`). If it is not running, nothing is generated and the screen shows the next run as overdue.
+
+## D-23. Packs are built from the same services as the screens and reports
+
+**Decision.** A pack calls `reports.build`, the dashboard's period helpers, `ledger.ageing_rows`, `ledger.trial_balance` and the new accounts service. It does not copy a query. Charts are drawn from the same rows shown in the table beneath them. Missing values become `available: false` with a gap code and render as "No data yet".
+**Why.** The requirement is that email figures match the Reports and dashboards for the same dates. One source is the only way to guarantee it; `tests/test_email_reports.py` pins it.
+**Consequence.** Gross margin, net profit and expenses stay "No data yet" (GAP-A01/A02) even though the sample email shows them.
+
+## D-24. Attachments are capped, named and never carry a password
+
+**Decision.** Up to five attachments: the pack PDF and the detail XLSX files built from the report catalog. Total budget 9.5 MB (below the 10 MB requirement, leaving room for headers). Files are named `HERBANOVA_<Pack>_<YYYY-MM>.pdf` / `<Report>_<YYYY-MM>.xlsx`. When the budget is exceeded, detail files are dropped first, the email says which and links to Reports; no archive, no password, no split email in v2.
+**Why.** Mail providers reject large messages unpredictably; a password-protected archive is both a security anti-pattern and unreadable on a phone. A secure expiring link needs a tokenised public dashboard that does not exist (GAP-E05), so it is recorded, not faked.
+
+## D-25. Recipients are a managed list with groups; MD has no login
+
+**Decision.** `email_recipients` stores address, name, group (`md`, `admin`, `extra`) and an unsubscribe token. A schedule selects recipients per field (To/CC/BCC) plus optional group membership computed at send time (so a new Administrator is included without editing every schedule). The MD group exists only for email; there is no MD login role, and one is not invented. Only `extra` recipients may unsubscribe; MD and Administrator mail is mandatory and removed only by an Administrator.
+**Why.** A role cannot be attached to a person who never signs in. Groups keep the list maintainable without silently mailing a stale address.
+
+## D-26. Calendar rules, timezone and working days
+
+**Decision.** Default timezone `Asia/Kolkata`. Frequencies: daily, weekdays, weekly (chosen days), monthly (a chosen day, the last day, or the first working day), and a five-field cron subset. Multiple `HH:MM` slots per schedule. A working day is Monday–Friday and not in `hr_holidays`. When a slot falls on a holiday the schedule's `holiday_rule` applies: `skip`, or `shift` to the next working day at the same times. Monthly day 29–31 falls on the last day of a short month. Timezone conversion uses `zoneinfo`, so a DST zone would be handled; India has none.
+**Why.** The requirement names month-end, leap years, holidays and time zones. Defining a working day is necessary because the system's holiday table does not mark weekends.
+
+## D-27. Accounts visibility uses one additive permission; existing permissions are unchanged
+
+**Decision.** Add `accounts:reports` to the catalogue and grant it to the Administrator in migration `0011`. No existing key is removed or re-scoped (`accounts:read` stays as it is for the existing Accounts screens). The Accounts dashboard, Accounts API, Accounts email block and Accounts pack require `accounts:reports`; the Administrator can grant it to an Accounts head through the existing roles screen.
+**Why.** The owner asked that Accounts data be limited to Administrator, MD and roles the Administrator allows. Sales currently holds `accounts:read`, so reusing it would expose the new reporting to every sales user. The MD has no login, so MD access is the email.
+**Consequence.** `BASELINE_ROLE_PERMS["admin"]` grows by one key; the parity test explicitly allows additive growth and fails if an existing role loses anything.
+
+## D-28. Accounts reports state only what the books can prove
+
+**Decision.** The Accounts page, email block and pack show: revenue (taxable and gross), output GST split, receipts, returns, outstanding and ageing, overdue-60, payables outstanding, cash/bank **net movement**, credit exposure, trial balance and post-billing audit activity. They show "No data yet" for expenses, COGS, gross profit, net profit, balance sheet, input GST/net GST, TDS, due-this-week, vouchers, bank reconciliation and period locks.
+**Why.** There is no expense table, no purchase tax, no due date and no lock date. Deriving any of those would invent a number. The trial balance is labelled "derived from documents, no opening balances".
+**Period locks.** Because no lock exists (GAP-A03), the page states that no financial year or period is locked and every document date is accepted as recorded. The server cannot enforce a lock that is not stored; this is recorded rather than simulated.
+**Cash.** The trial balance carries net cash/bank debits, not a closing balance, because opening balances are not captured (GAP-A10). The card says "net movement recorded".
+
+## D-29. Delivery log is kept indefinitely
+
+**Decision.** `email_deliveries` rows are never deleted by the application, so the log always covers at least the required twelve months. An Administrator can resend a failed or sent delivery; a resend creates a new row with trigger `resend` and its own run key, leaving the original intact.
+**Why.** Deleting a delivery record destroys the evidence that a message was or was not sent. Storage for text rows is negligible.
+
+## D-30. Every change and every send is audited
+
+**Decision.** Schedule create/edit/pause/duplicate/delete, recipient changes, manual runs, test sends and worker sends write an `audit_logs` row (`email.*`) with the actor (the schedule owner for a system send, recorded as such) and a record reference. Routine sends do **not** post to Telegram; a final delivery failure posts one Telegram alert and writes the error to the delivery log.
+**Why.** The owner asked for an audit of all sends and changes. Telegram on every send would train people to ignore the channel; failures are the signal that matters.
+
+## D-31. Accounts cards follow the existing comparison rules
+
+**Decision.** The Accounts dashboard reuses `_compare_windows` (full month or month-to-date) and states the exact window on every card. Snapshot values (outstanding, payables, cash movement) are "as at the window end"; flows (revenue, receipts, returns) follow the window. A comparison against zero is `null` and reads "No prior figure", never infinity.
+**Why.** Consistency with the MoM/YoY page (D-12) and the same refusal to fabricate a percentage.
+
+## D-32. The worker sends the slot it owes, not a backlog
+
+**Decision.** When the worker wakes, `enqueue_due` creates one delivery for the schedule's due slot and then advances `next_run_at` to the first slot strictly after now, skipping any slots missed while the worker was down. The delivery's pack window is computed from the slot's own local date, so a late send still reports the period that slot owns.
+**Why.** A worker stopped for a week should not send seven daily summaries. Sending the owed slot preserves the record and the report period; the log shows the delay. The catch-up rule is deterministic and testable, unlike "send whatever is due".
+
+## D-33. Retries cover transient failures only
+
+**Decision.** A delivery gets the first try plus three retries, 5, 15 and 45 minutes later. Errors the worker classifies as permanent — missing SMTP configuration, sending disabled, no active recipients, an invalid address, an unknown pack, a deleted schedule — fail on the first attempt. Any other error (connection refused, timeout, SMTP exception) is retried. The fourth failure is final and posts one Telegram alert; the delivery row keeps the error either way.
+**Why.** Retrying a configuration error delays the guarantee that already proves it cannot succeed, and buries the real cause under three waits. SMTP being down is exactly the case the owner asked to retry.
+
+## D-34. Duplicate protection and crash recovery are in the database
+
+**Decision.** `email_deliveries.run_key` is unique (`schedule:<id>:<slot in UTC>`), so two workers racing for the same slot cannot both insert it. A worker claims work with `SELECT ... FOR UPDATE SKIP LOCKED`, and the claim is released back to `retry` after 30 minutes if the process died mid-send. There is no in-process timer and no lock file.
+**Why.** The owner asked for a lock and a unique run key that survive a restart and two workers. A unique index and a row lock are the only two guarantees that hold across processes and restarts.
+
+## D-35. Comparison windows in an email are measured from the pack's real window
+
+**Decision.** `report_packs.build` computes the previous period as the equally long window immediately before the pack's window, and last year as the same window shifted back one year, rather than re-deriving both from the window's end date. For a full month this is the previous month; for a month-to-date window it is the equally long previous-month window.
+**Why.** Re-deriving from the end date shifted a weekly pack by a day and could quietly compare different lengths. The email states the rule in plain words under the comparison table.
+
+## D-36. Charts are local PNGs with a mandatory table fallback
+
+**Decision.** Charts are drawn with Pillow (no chart service, no JavaScript, no remote image) and attached in the message as CID images with alt text. The same figures always follow as an HTML table, and a chart that fails to draw is dropped without failing the email. Table-only charts also make the plain-text part complete.
+**Why.** Outlook and Gmail block images by default for unknown senders; a chart-only figure would be invisible. A drawing bug must not stop a report the owner is waiting for.
