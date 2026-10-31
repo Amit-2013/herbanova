@@ -15,6 +15,7 @@ from ..core.rbac import require
 from ..core.rules import DISCOUNT_APPROVAL_PCT
 from ..models.core import (ApprovalRequest, Distributor, Product, SalesOrder, SalesOrderLine,
                            User, Warehouse)
+from ..services import capacity
 from ..services.audit import audit
 from ..services.discounts import best_slab
 from ..services.inventory import post_movement
@@ -109,9 +110,22 @@ class AllocOut(BaseModel):
     qty: Decimal
 
 
+class WarehousePositionOut(BaseModel):
+    id: int
+    name: str
+    used_units: Decimal
+    capacity_units: int | None = None
+    capacity_note: str | None = None
+    free_units: Decimal | None = None
+    utilisation_pct: float | None = None
+    capacity_state: str = "not_configured"
+
+
 class DispatchOut(BaseModel):
     order: SOOut
     allocations: list[AllocOut]
+    # The source warehouse after the issue, so the operator sees its position.
+    source_warehouse: WarehousePositionOut | None = None
 
 
 # ---------------------------------------------------------------- helpers
@@ -389,4 +403,5 @@ def dispatch_order(order_id: int, body: DispatchIn, db: Session = Depends(get_db
         audit_kw["expiry_changes"] = expiry_changes
     audit(db, user.id, "so.dispatch", f"so:{so.id}", audit_kw)
     db.commit()
-    return DispatchOut(order=_build(db, [so])[0], allocations=out)
+    return DispatchOut(order=_build(db, [so])[0], allocations=out,
+                       source_warehouse=capacity.warehouse_position(db, wh.id))

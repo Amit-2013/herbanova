@@ -869,16 +869,32 @@ function renderDashWarehouses(list) {
     el.innerHTML = `<li class="gap-note">Stock by warehouse is not available to your role.</li>`;
     return;
   }
-  const total = list.reduce((s, w) => s + Number(w.units), 0);
+  const total = list.reduce((s, w) => s + Number(w.units || w.used_units || 0), 0);
+  const configured = list.filter(w => w.capacity_units !== null && w.capacity_units !== undefined);
+  const tight = configured.filter(w => ["high", "over", "full"].includes(w.capacity_state));
   el.innerHTML = (list.length ? list.map(w => {
-    const units = Number(w.units);
+    const units = Number(w.units || w.used_units || 0);
     const share = total > 0 ? units / total * 100 : 0;
     const shareText = units > 0 && share < 0.5 ? "<1%" : `${share.toFixed(0)}%`;
+    const hasCap = w.capacity_units !== null && w.capacity_units !== undefined;
+    const pct = hasCap ? Math.max(0, Math.min(100, Number(w.utilisation_pct) || 0)) : share;
+    const tone = hasCap && ["high", "over", "full"].includes(w.capacity_state) ? ` ${w.capacity_state}` : "";
+    const detail = hasCap
+      ? `${esc(qty(units))} of ${esc(qty(w.capacity_units))} units · ${Number(w.utilisation_pct).toFixed(1)}%`
+      : `${esc(qty(units))} units`;
+    const under = hasCap
+      ? `${esc(qty(w.free_units))} units free`
+      : `${shareText} of stock · capacity not set`;
     return `<li><div class="wh-top"><span><b>${esc(w.name)}</b><small>${plural(w.batches, "batch")} in stock</small></span>
-      <span class="num">${esc(qty(units))} units<small>${shareText} of stock</small></span></div>
-      <div class="wh-bar" aria-hidden="true"><i style="width:${share.toFixed(1)}%"></i></div></li>`;
+      <span class="num">${detail}<small>${under}</small></span></div>
+      <div class="wh-bar" aria-hidden="true"><i class="${tone.trim()}" style="width:${pct.toFixed(1)}%"></i></div></li>`;
   }).join("") : `<li><span class="none">No warehouse has been added yet.</span></li>`)
-  + `<li><span class="gap-note">Capacity is not captured (GAP-D03), so a fill level against capacity cannot be shown.</span></li>`;
+  + (tight.length
+    ? `<li><span class="gap-note">${tight.length === 1 ? "One warehouse is" : `${tight.length} warehouses are`} above 80% of capacity: ${esc(tight.map(w => w.name).join(", "))}.</span></li>`
+    : "")
+  + (!configured.length
+    ? `<li><span class="gap-note">Capacity is not set for any warehouse (GAP-D03), so a fill level against capacity cannot be shown.</span></li>`
+    : "");
 }
 
 function renderOpenPos(o) {
@@ -1977,10 +1993,30 @@ function renderLedger() {
     rows.length ? "" : " Every stock change is recorded here, with who made it and why.");
 }
 
+function warehouseCapacityNote(id) {
+  const w = state.warehouses.find(x => String(x.id) === String(id));
+  if (!w) return "";
+  if (w.capacity_units === null || w.capacity_units === undefined)
+    return "Capacity has not been set for this warehouse (GAP-D03), so the fill level cannot be checked.";
+  const free = Number(w.free_units);
+  const space = free < 0 ? `${qty(-free)} units over capacity` : `${qty(free)} units free`;
+  return `${qty(w.used_units)} of ${qty(w.capacity_units)} units used; ${space}. A receipt beyond the free space is blocked unless an Administrator overrides it.`;
+}
+
 function renderWarehouses() {
+  const CAP_STATE = {ok: ["Within capacity", "ok"], high: ["Above 80%", "warn"],
+                     over: ["Over capacity", "bad"], full: ["Full", "warn"]};
   const rows = state.warehouses.map(w => {
-    const bs = state.batches.filter(b => b.warehouse_id === w.id && Number(b.on_hand) > 0);
-    return `<tr><td class="strong">${esc(w.name)}</td><td class="n">${bs.length}</td><td class="n">${esc(qty(bs.reduce((s, b) => s + Number(b.on_hand), 0)))}</td></tr>`;
+    const used = Number(w.used_units ?? 0);
+    const hasCap = w.capacity_units !== null && w.capacity_units !== undefined;
+    const st = hasCap ? (CAP_STATE[w.capacity_state] || [w.capacity_state, "off"]) : ["Not set", "off"];
+    const pct = hasCap ? `<span class="strong">${Number(w.utilisation_pct).toFixed(1)}%</span>` : `<span class="muted">No data yet</span>`;
+    return `<tr><td class="strong">${esc(w.name)}${w.capacity_note ? `<small>${esc(w.capacity_note)}</small>` : ""}</td>
+      <td class="n">${Number(w.batches ?? 0)}</td><td class="n">${esc(qty(used))}</td>
+      <td class="n">${hasCap ? esc(qty(w.capacity_units)) : `<span class="muted">Not set</span>`}</td>
+      <td class="n">${hasCap ? esc(qty(w.free_units)) : `<span class="muted">—</span>`}</td>
+      <td class="n">${pct} <span class="chip ${st[1]}">${esc(st[0])}</span></td>
+      <td class="n">${can("stock:write") ? `<button class="btn ghost sm" type="button" data-act="edit-capacity" data-id="${w.id}">Edit capacity</button>` : ""}</td></tr>`;
   });
   $("#wrows").innerHTML = rows.join("");
   empty($("#wempty"), !rows.length, "No warehouses yet.", can("stock:write") ? " Select “New warehouse” to add the first one." : "");
@@ -2165,16 +2201,62 @@ function warehouseForm() {
   openDrawer("New warehouse", "Goods are received into a warehouse, so add one before the first receipt.", `
     <form id="whForm" novalidate>
       <label for="f-wh">Warehouse name</label><input id="f-wh" name="name" placeholder="Main store" autocomplete="off">
+      <div class="row2">
+        <div><label for="f-wh-cap">Capacity in units (optional)</label><input id="f-wh-cap" name="capacity_units" inputmode="numeric" placeholder="Leave blank if not measured" autocomplete="off"></div>
+        <div><label for="f-wh-note">Capacity note (optional)</label><input id="f-wh-note" name="capacity_note" maxlength="40" placeholder="e.g. rack space" autocomplete="off"></div>
+      </div>
+      <p class="note">Blank capacity means it has not been measured; it never means zero.</p>
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">Save warehouse</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`);
 }
+function capacityInput(form, name) {
+  const raw = form.elements[name].value.trim();
+  if (!raw) return {ok: true, value: null};
+  if (!/^\d+$/.test(raw)) return {ok: false, error: "Capacity must be a whole number of units."};
+  return {ok: true, value: Number(raw)};
+}
 async function saveWarehouse(form) {
   const err = $(".err", form), btn = $("button[type=submit]", form);
   err.textContent = ""; btn.disabled = true;
-  const res = await api("/api/warehouses", {method: "POST", body: {name: new FormData(form).get("name")}});
+  const cap = capacityInput(form, "capacity_units");
+  if (!cap.ok) { err.textContent = cap.error; btn.disabled = false; form.elements.capacity_units.focus(); return; }
+  const body = {name: form.elements.name.value.trim(), capacity_units: cap.value,
+                capacity_note: form.elements.capacity_note.value.trim() || null};
+  const res = await api("/api/warehouses", {method: "POST", body});
   btn.disabled = false;
   toast(res, res.ok ? "Warehouse saved" : "Warehouse not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadAll();
+}
+function capacityForm(id) {
+  const w = state.warehouses.find(x => Number(x.id) === Number(id));
+  if (!w) return;
+  const hasCap = w.capacity_units !== null && w.capacity_units !== undefined;
+  openDrawer("Warehouse capacity", w.name, `
+    <p class="note">${hasCap
+      ? `${esc(qty(w.used_units))} units are on hand, ${esc(qty(w.free_units))} free of ${esc(qty(w.capacity_units))}.`
+      : `${esc(qty(w.used_units))} units are on hand. Capacity has not been set for this warehouse.`}</p>
+    <form id="capForm" data-id="${w.id}" novalidate>
+      <div class="row2">
+        <div><label for="c-units">Capacity in units</label><input id="c-units" name="capacity_units" inputmode="numeric" value="${hasCap ? w.capacity_units : ""}" placeholder="Leave blank to clear" autocomplete="off"></div>
+        <div><label for="c-note">Capacity note (optional)</label><input id="c-note" name="capacity_note" maxlength="40" value="${esc(w.capacity_note || "")}" placeholder="e.g. rack space" autocomplete="off"></div>
+      </div>
+      <p class="note">Clearing the capacity records that it is not known; it never means zero.</p>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save capacity</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+async function saveCapacity(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const cap = capacityInput(form, "capacity_units");
+  if (!cap.ok) { err.textContent = cap.error; btn.disabled = false; form.elements.capacity_units.focus(); return; }
+  const res = await api(`/api/warehouses/${Number(form.dataset.id)}/capacity`, {
+    method: "PUT", body: {capacity_units: cap.value,
+                          capacity_note: form.elements.capacity_note.value.trim() || null}});
+  btn.disabled = false;
+  toast(res, res.ok ? "Capacity saved" : "Capacity not saved");
   if (!res.ok) { err.textContent = detail(res.body); return; }
   closeDrawer(); loadAll();
 }
@@ -2283,7 +2365,9 @@ function poDetail(id, result) {
       <div class="note">Enter what actually arrived in this delivery. The order stays open until every line is received in full, and each receipt posts its own stock-ledger movements.</div>
       <form id="rcvForm" data-po="${po.id}" novalidate>
         <label for="r-wh">Warehouse</label>
-        <select id="r-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join("")}</select>
+        <select id="r-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}${w.capacity_units != null ? ` — ${esc(qty(w.used_units))} of ${esc(qty(w.capacity_units))} units` : " — capacity not set"}</option>`).join("")}</select>
+        <p class="note" id="rWhNote">${warehouseCapacityNote(state.warehouses.length === 1 ? state.warehouses[0].id : "")}</p>
+        <div class="hide" id="rOverBox"><label class="check"><input type="checkbox" name="allow_over_capacity"> Receive over capacity (Administrator only; recorded in the audit log)</label></div>
         <div class="row2"><div><label for="r-dn">Supplier delivery-note number</label><input id="r-dn" name="delivery_note" placeholder="Optional, blocks a repeat" autocomplete="off"></div>
         <div><label for="r-own">Who owns the stock</label><select id="r-own" name="owner"><option value="HERBANOVA">HERBANOVA</option><option value="MANUFACTURER">Manufacturer</option></select></div></div>
         <div class="rcv">${po.lines.map((l, i) => { const rest = Math.max(Number(l.qty) - Number(l.received_qty || 0), 0);
@@ -2324,6 +2408,8 @@ async function postReceipt(form) {
   }
   if (!lines.length) { err.textContent = "Enter a received quantity for at least one line."; return; }
   const body = {warehouse_id: Number(wh), lines, owner: form.elements.owner.value};
+  if (form.elements.allow_over_capacity && form.elements.allow_over_capacity.checked)
+    body.allow_over_capacity = true;
   const dn = form.elements.delivery_note.value.trim();
   if (dn) body.delivery_note = dn;
   const id = Number(form.dataset.po);
@@ -2331,7 +2417,17 @@ async function postReceipt(form) {
   const res = await api(`/api/purchase-orders/${id}/receive`, {method: "POST", body});
   btn.disabled = false;
   toast(res, res.ok ? `Receipt ${res.body.grn_number} posted` : "Receipt not posted");
-  if (!res.ok) { err.textContent = detail(res.body); return; }
+  if (!res.ok) {
+    const msg = detail(res.body);
+    err.textContent = msg;
+    // Only the server decides who may override; the control is merely revealed
+    // after the block so an Administrator can choose to record the overage.
+    if (res.status === 409 && /capacity/i.test(msg)) {
+      const box = $("#rOverBox", form);
+      if (box) box.classList.remove("hide");
+    }
+    return;
+  }
   await loadAll();
   poDetail(id, res.body);
 }
@@ -2524,8 +2620,13 @@ function soDetail(id, result, err) {
   let foot = "";
   if (err) foot += `<div class="err" role="alert">${esc(err)}</div>`;
   if (result) {
+    const src = result.source_warehouse;
+    const space = src
+      ? `<p class="muted">${esc(src.name)} now holds ${esc(qty(src.used_units))} units${src.capacity_units != null
+          ? ` of ${esc(qty(src.capacity_units))} (${Number(src.utilisation_pct).toFixed(1)}%)` : ""}.</p>`
+      : "";
     foot += `<div class="done"><b>Dispatched. Stock has been issued, earliest expiry first.</b><ul>${result.allocations.map(x =>
-      `<li>${esc(qty(x.qty))} of ${esc(x.sku)} from batch ${esc(x.batch_no)}${x.expiry ? `, expires ${esc(fmtDate(x.expiry))}` : ""}.</li>`).join("")}</ul></div>
+      `<li>${esc(qty(x.qty))} of ${esc(x.sku)} from batch ${esc(x.batch_no)}${x.expiry ? `, expires ${esc(fmtDate(x.expiry))}` : ""}.</li>`).join("")}</ul>${space}</div>
       <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`;
   } else if (o.status === "draft") {
     foot += can("sales:write")
@@ -2541,7 +2642,7 @@ function soDetail(id, result, err) {
         <div class="note">Check the discount slab and the GST shown above first: they are what the invoice will charge. Stock is taken from the chosen warehouse, earliest expiry first. Credit and stock are checked again now. An order is dispatched once.</div>
         <form id="dispForm" data-id="${o.id}" novalidate>
           <label for="d-wh">Warehouse</label>
-          <select id="d-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join("")}</select>
+          <select id="d-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}${w.capacity_units != null ? ` — ${esc(qty(w.used_units))} of ${esc(qty(w.capacity_units))} units` : ""}</option>`).join("")}</select>
           <div class="err" role="alert"></div>
           <div class="actions"><button class="btn" type="submit">Dispatch goods</button><button class="btn ghost" type="button" data-act="close">Close</button></div></form>`
         : `<div class="note">Add a warehouse before dispatching.</div>`;
@@ -3960,6 +4061,7 @@ document.addEventListener("click", e => {
     else if (act === "pay-paid") hrPayrollAction("paid", a.dataset.id);
     else if (act === "pay-open") hrPayrollOpen(a.dataset.id);
     else if (act === "new-warehouse") warehouseForm();
+    else if (act === "edit-capacity") capacityForm(a.dataset.id);
     else if (act === "new-po") poForm();
     else if (act === "open-po") poDetail(a.dataset.id);
     else if (act === "cancel-po") cancelPoForm(a.dataset.id);
@@ -4051,6 +4153,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "changePwForm") changePassword(f);
   else if (f.id === "prodForm") saveProduct(f);
   else if (f.id === "whForm") saveWarehouse(f);
+  else if (f.id === "capForm") saveCapacity(f);
   else if (f.id === "poForm") savePO(f);
   else if (f.id === "rcvForm") postReceipt(f);
   else if (f.id === "poCancel") cancelPo(f);
@@ -4196,8 +4299,7 @@ $("#biq").addEventListener("input", renderBilling);
 $("#ldq").addEventListener("input", renderLeads);
 $("#rateq").addEventListener("input", renderTax);
 document.addEventListener("change", e => {
-  if (e.target.id === "rpFrom" || e.target.id === "rpTo") { state.rp.from = $("#rpFrom").value; state.rp.to = $("#rpTo").value; markPreset(""); loadReport(); }
-  if (["rpEmployee", "rpDepartment", "rpBranch"].includes(e.target.id)) {
+  if (e.target.id === "rpFrom" || e.target.id === "rpTo") { state.rp.from = $("#rpFrom").value; state.rp.to = $("#rpTo").value; markPreset(""); loadReport(); }  if (["rpEmployee", "rpDepartment", "rpBranch"].includes(e.target.id)) {
     const key = {rpEmployee: "employee_id", rpDepartment: "department", rpBranch: "branch_id"}[e.target.id];
     state.rp.filters[key] = e.target.value;
     state.rpPage = 1;
@@ -4220,6 +4322,12 @@ document.addEventListener("change", e => {
   if (e.target.id !== "dists-filter") return;
   state.distFilter = e.target.value;
   renderDists();   // the header's own copy of the select keeps the chosen value
+});
+// The receipt drawer's warehouse choice shows the capacity it is going into.
+document.addEventListener("change", e => {
+  if (e.target.id !== "r-wh") return;
+  const note = $("#rWhNote");
+  if (note) note.textContent = warehouseCapacityNote(e.target.value);
 });
 window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); closePalette(); route(); } });
 

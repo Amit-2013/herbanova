@@ -27,6 +27,7 @@ from ..models.core import (
     PurchaseOrderLine,
     SalesOrder,
     StockMovement,
+    Warehouse,
 )
 from ..models.accounts import RECEIPT, Payment
 from ..models.hr import (
@@ -47,7 +48,7 @@ from ..models.hr import (
 )
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
 from ..models.users import Employee
-from . import ledger
+from . import capacity, ledger
 
 
 # Catalog tuple:
@@ -76,6 +77,10 @@ CATALOG = {
     "goods_receipts": (
         "Goods Receipt Register", "Goods receipts recorded during the selected period.",
         "period", "stock:read", "goods_receipts", "Purchase Reports",
+    ),
+    "warehouse_utilisation": (
+        "Warehouse Utilisation", "Units on hand, capacity and fill level per warehouse.",
+        "snapshot", "stock:read", "warehouses", "Inventory Reports",
     ),
     "suppliers": (
         "Supplier Register", "Supplier master records.",
@@ -174,6 +179,7 @@ FILTER_KEYS = {
     "leads": [],
     "purchases": [],
     "goods_receipts": [],
+    "warehouse_utilisation": [],
     "suppliers": [],
     "distributors": [],
     "receivables": [],
@@ -225,6 +231,8 @@ def _columns(rows, preferred=None):
                 "cgst_total", "sgst_total", "igst_total", "cess_total",
                 "gross_total", "discount_total", "received_value",
                 "taxable", "cgst", "sgst", "igst", "total", "amount",
+                "capacity_units", "used_units", "free_units", "utilisation_pct",
+                "batches",
             } else "text",
         }
         for key in keys
@@ -1099,6 +1107,47 @@ def build(
         } for r in query.order_by(GoodsReceipt.received_at).all()]
         table = _table("goods_receipts", "Goods Receipt Register", rows)
         return _empty_reconciled(key, date_from, date_to, table)
+
+    if key == "warehouse_utilisation":
+        state_label = {"not_configured": "Not configured", "ok": "Within capacity",
+                       "high": "Above 80%", "full": "Full", "over": "Over capacity"}
+        positions = capacity.warehouse_positions(db)
+        rows = [{
+            "name": r["name"],
+            "capacity_units": r["capacity_units"],
+            "capacity_note": r["capacity_note"],
+            "used_units": _num(_decimal(r["used_units"])),
+            "free_units": (None if r["free_units"] is None
+                           else _num(_decimal(r["free_units"]))),
+            "utilisation_pct": r["utilisation_pct"],
+            "capacity_state": state_label.get(r["capacity_state"], r["capacity_state"]),
+            "batches": r["batches"],
+        } for r in positions]
+        report_used = sum((_decimal(r["used_units"]) for r in rows), Decimal("0"))
+        table = _table(
+            "warehouses", "Warehouse Utilisation", rows,
+            ["name", "capacity_units", "capacity_note", "used_units",
+             "free_units", "utilisation_pct", "capacity_state", "batches"],
+            {"used_units": _num(report_used)},
+        )
+        source_warehouses = db.scalar(
+            select(func.count()).select_from(Warehouse)) or 0
+        source_used = _decimal(db.scalar(
+            select(func.coalesce(func.sum(Batch.on_hand), 0))))
+        configured = db.scalar(
+            select(func.count()).select_from(Warehouse)
+            .where(Warehouse.capacity_units.is_not(None))) or 0
+        report_configured = sum(
+            1 for r in positions if r["capacity_units"] is not None)
+        return _envelope(key, date_from, date_to, [table], [
+            _check("warehouse_count", "Warehouses in report", len(rows),
+                   "Warehouses in the database", source_warehouses),
+            _check("used_units", "Report units on hand", report_used,
+                   "Units on hand in the batch table", source_used, "units"),
+            _check("configured_count", "Warehouses with capacity set",
+                   report_configured, "Warehouses with a capacity in the database",
+                   configured),
+        ])
 
     if key == "suppliers":
         rows = [{

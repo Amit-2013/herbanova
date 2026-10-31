@@ -17,23 +17,49 @@ from ..core.rbac import require
 from ..models.core import (Batch, Product, PurchaseOrder, StockMovement, User,
                            Warehouse)
 from ..models.suppliers import GoodsReceipt
+from ..services import capacity
 from ..services.audit import audit
 
 router = APIRouter(prefix="/api", tags=["inventory"])
 
 
+def _clean_note(v):
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
 class WarehouseIn(BaseModel):
     name: str = Field(min_length=2, max_length=100)
+    capacity_units: int | None = Field(default=None, ge=0)
+    capacity_note: str | None = Field(default=None, max_length=40)
 
     @field_validator("name")
     @classmethod
     def strip(cls, v): return v.strip()
 
+    @field_validator("capacity_note")
+    @classmethod
+    def strip_note(cls, v): return _clean_note(v)
+
+
+class CapacityIn(BaseModel):
+    capacity_units: int | None = Field(default=None, ge=0)
+    capacity_note: str | None = Field(default=None, max_length=40)
+
+    @field_validator("capacity_note")
+    @classmethod
+    def strip_note(cls, v): return _clean_note(v)
+
 
 class WarehouseOut(BaseModel):
     id: int
     name: str
-    model_config = {"from_attributes": True}
+    capacity_units: int | None = None
+    capacity_note: str | None = None
+    used_units: Decimal = Decimal(0)
+    free_units: Decimal | None = None
+    utilisation_pct: float | None = None
+    capacity_state: str = "not_configured"
+    batches: int = 0
 
 
 class BatchOut(BaseModel):
@@ -67,7 +93,7 @@ class MovementOut(BaseModel):
 
 @router.get("/warehouses", response_model=list[WarehouseOut])
 def list_warehouses(db: Session = Depends(get_db), _=Depends(require("stock:read"))):
-    return db.scalars(select(Warehouse).order_by(Warehouse.name)).all()
+    return capacity.warehouse_positions(db)
 
 
 @router.post("/warehouses", response_model=WarehouseOut, status_code=201)
@@ -76,16 +102,35 @@ def create_warehouse(body: WarehouseIn, db: Session = Depends(get_db),
     exists = db.scalar(select(Warehouse).where(Warehouse.name.ilike(body.name)))
     if exists:
         raise HTTPException(409, "Warehouse name already exists")
-    w = Warehouse(name=body.name)
+    w = Warehouse(name=body.name, capacity_units=body.capacity_units,
+                  capacity_note=body.capacity_note)
     db.add(w)
     try:
         db.flush()
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "Warehouse name already exists")
-    audit(db, user.id, "warehouse.create", f"warehouse:{w.id}", {"name": w.name})
+    audit(db, user.id, "warehouse.create", f"warehouse:{w.id}",
+          {"name": w.name, "capacity_units": w.capacity_units,
+           "capacity_note": w.capacity_note})
     db.commit()
-    return w
+    return capacity.warehouse_position(db, w.id)
+
+
+@router.put("/warehouses/{warehouse_id}/capacity", response_model=WarehouseOut)
+def set_capacity(warehouse_id: int, body: CapacityIn, db: Session = Depends(get_db),
+                 user=Depends(require("stock:write"))):
+    """Set or clear a warehouse's capacity. Clearing is explicit and audited."""
+    w = db.get(Warehouse, warehouse_id)
+    if not w:
+        raise HTTPException(404, "Warehouse not found")
+    before = {"capacity_units": w.capacity_units, "capacity_note": w.capacity_note}
+    w.capacity_units, w.capacity_note = body.capacity_units, body.capacity_note
+    audit(db, user.id, "warehouse.capacity", f"warehouse:{w.id}",
+          {"name": w.name, "from": before,
+           "to": {"capacity_units": w.capacity_units, "capacity_note": w.capacity_note}})
+    db.commit()
+    return capacity.warehouse_position(db, w.id)
 
 
 @router.get("/inventory/batches", response_model=list[BatchOut])
