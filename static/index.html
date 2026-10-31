@@ -127,17 +127,25 @@
             <span>Search everything</span>
             <kbd>Ctrl K</kbd>
           </button>
-          <div class="seg compact" role="group" aria-label="Period covered">
-            <button type="button" data-dash-range="7" aria-pressed="false">7D</button>
-            <button type="button" data-dash-range="30" aria-pressed="true">30D</button>
-            <button type="button" data-dash-range="90" aria-pressed="false">90D</button>
+          <div class="dash-dates" role="group" aria-label="Date range">
+            <label for="dashFrom">From <input id="dashFrom" type="date" aria-label="From date"></label>
+            <label for="dashTo">To <input id="dashTo" type="date" aria-label="To date"></label>
+          </div>
+          <div class="seg compact" role="group" aria-label="Date presets">
+            <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
+            <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
+            <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
+            <button type="button" data-dash-preset="month" aria-pressed="true">This month</button>
+            <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
+            <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
           </div>
           <button class="btn ghost hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
           <button class="btn ghost" id="dashTheme" type="button" aria-pressed="false">Dark theme</button>
-          <button class="btn" id="dashNewSo" data-act="new-so" type="button">New sales order</button>
+          <a class="btn" id="dashCompare" href="#/compare">MoM &amp; YoY dashboard</a>
         </div>
       </div>
       <p class="dash-updated" id="dashUpdated">Loading figures…</p>
+      <p class="dash-dateerr hide" id="dashDateErr" role="alert"></p>
 
       <div class="callout hide" id="whCallout">
         <div><b>No warehouse has been added yet.</b> Goods cannot be received until one exists.</div>
