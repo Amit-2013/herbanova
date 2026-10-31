@@ -30,6 +30,8 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
                dashFrom: "", dashTo: "", dashPreset: "month", dashDateError: "", dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
                compare: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0},
+               geo: {from: "", to: "", data: null, loading: false, error: null, dateError: "", seq: 0,
+                     sort: {key: "sales", dir: "desc"}, selected: null},
                expiry: {bucket: "all", loading: false, data: null},
                palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
                hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: []}};
@@ -74,6 +76,16 @@ try {
   const month = localStorage.getItem("hb.cmpMonth");
   if (mode === "full_month" || mode === "mtd") state.compare.mode = mode;
   if (/^\d{4}-\d{2}$/.test(month || "")) state.compare.month = month;
+} catch (e) { /* storage blocked */ }
+{ const w = dashWindow("month"); state.geo.from = w.from; state.geo.to = w.to; }
+try {
+  const from = localStorage.getItem("hb.geoFrom");
+  const to = localStorage.getItem("hb.geoTo");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from || "") && /^\d{4}-\d{2}-\d{2}$/.test(to || "")
+      && from <= to) {
+    state.geo.from = from;
+    state.geo.to = to;
+  }
 } catch (e) { /* storage blocked */ }
 const can = p => state.perms.has(p);
 const dashQuery = () => `from_date=${encodeURIComponent(state.dashFrom)}&to_date=${encodeURIComponent(state.dashTo)}`;
@@ -163,6 +175,7 @@ function enter(u) {
   showView("products", can("product:read"));
   showView("inventory", can("stock:read"));
   showView("distributors", can("sales:read"));
+  showView("geo", can("sales:read"));
   showView("reports", ["accounts:read", "hr:reports", "sales:read", "stock:read",
                        "supplier:read", "tax:read"].some(k => can(k)));
   $$(".nav-group").forEach(g => g.classList.toggle("hide", !g.querySelector("a.nav:not(.hide)")));
@@ -321,8 +334,9 @@ const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", 
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
                 users: "Users and rights", audit: "Audit trail",
-                compare: "MoM & YoY dashboard"};
+                compare: "MoM & YoY dashboard", geo: "Geography"};
 const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
+                   geo: "sales:read",
                    customers: "sales:read", users: "user:manage", audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
                    products: "product:read", inventory: "stock:read", purchasing: "stock:read",
@@ -350,6 +364,7 @@ function route() {
   if (state.view === "settings") renderSettings();
   if (state.view === "hr") { if (can("hr:read")) openHr(); else renderHr(); }
   if (state.view === "compare") loadCompare();
+  if (state.view === "geo") loadGeo();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
 function showTab() {
@@ -365,6 +380,9 @@ function renderHead() {
   }
   if (v === "compare") {
     sub = "One month beside the previous month and the same month last year. Every figure is counted by the server.";
+  }
+  if (v === "geo") {
+    sub = "Sales, returns and GST by the buyer state frozen on each issued invoice. District and city are not recorded, so the page stops at state.";
   }
   if (v === "products") {
     sub = `${plural(state.products.length, "product")} on file, ${state.products.filter(x => x.status === "active").length} active.`;
@@ -481,7 +499,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderCompare(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -1530,6 +1548,294 @@ function exportCompareCsv() {
     rows.push(row);
   });
   downloadCsv(`herbanova-mom-yoy-${d.month}.csv`, rows);
+}
+
+/* ---------- geography ---------- */
+// A fixed local tile layout: roughly north to south, west to east. It is a
+// schematic, not a geographic outline, and is labelled as such on screen.
+const GEO_LAYOUT = {
+  "38": [0, 2],
+  "01": [1, 0],
+  "02": [2, 0], "04": [2, 1], "05": [2, 2],
+  "03": [3, 0], "06": [3, 1], "07": [3, 2], "09": [3, 3], "11": [3, 6], "12": [3, 7],
+  "08": [4, 0], "23": [4, 2], "10": [4, 3], "20": [4, 4], "18": [4, 5], "13": [4, 6],
+  "24": [5, 0], "27": [5, 1], "22": [5, 2], "21": [5, 3], "19": [5, 4],
+  "14": [5, 5], "17": [5, 6], "15": [5, 7],
+  "26": [6, 0], "30": [6, 1], "36": [6, 2], "37": [6, 3], "16": [6, 4], "35": [6, 7],
+  "31": [7, 0], "29": [7, 1],
+  "32": [8, 0], "33": [8, 1], "34": [8, 2],
+  "97": [9, 4],
+};
+const GEO_SHORT = {
+  "01": "JK", "02": "HP", "03": "PB", "04": "CH", "05": "UK", "06": "HR", "07": "DL",
+  "08": "RJ", "09": "UP", "10": "BR", "11": "SK", "12": "AR", "13": "NL", "14": "MN",
+  "15": "MZ", "16": "TR", "17": "ML", "18": "AS", "19": "WB", "20": "JH", "21": "OD",
+  "22": "CG", "23": "MP", "24": "GJ", "26": "DN", "27": "MH", "29": "KA", "30": "GA",
+  "31": "LD", "32": "KL", "33": "TN", "34": "PY", "35": "AN", "36": "TS", "37": "AP",
+  "38": "LA", "97": "OT",
+};
+const GEO_SORTABLE = new Set(["name", "sales", "share", "invoice_count", "customers",
+                              "taxable", "return_value"]);
+
+function applyGeoDates(from, to) {
+  const today = dayIso(new Date());
+  let problem = "";
+  if (!from || !to) problem = "Choose both dates.";
+  else if (from > to) problem = "The From date cannot be after the To date.";
+  else if (to > today) problem = "The To date cannot be in the future.";
+  state.geo.dateError = problem;
+  if (problem) { renderGeo(); return; }
+  state.geo.from = from;
+  state.geo.to = to;
+  try {
+    localStorage.setItem("hb.geoFrom", from);
+    localStorage.setItem("hb.geoTo", to);
+  } catch (e) { /* storage blocked */ }
+  renderGeo();
+  loadGeo();
+}
+
+function setGeoSort(key) {
+  if (!GEO_SORTABLE.has(key)) return;
+  const cur = state.geo.sort;
+  if (cur.key === key) cur.dir = cur.dir === "asc" ? "desc" : "asc";
+  else state.geo.sort = {key, dir: key === "name" ? "asc" : "desc"};
+  renderGeo();
+}
+
+function selectGeo(key) {
+  state.geo.selected = state.geo.selected === key ? null : key;
+  renderGeo();
+}
+
+function geoRows() {
+  const d = state.geo.data;
+  if (!d) return [];
+  const {key, dir} = state.geo.sort;
+  const value = r => {
+    if (key === "name") return r.name.toLowerCase();
+    if (key === "share") return r.share === null ? -1 : Number(r.share);
+    return Number(r[key] || 0);
+  };
+  return [...d.states].sort((a, b) => {
+    const va = value(a), vb = value(b);
+    const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+    return dir === "asc" ? cmp : -cmp;
+  });
+}
+
+function renderGeo() {
+  const s = state.geo, d = s.data;
+  const today = dayIso(new Date());
+  const fromEl = $("#geoFrom"), toEl = $("#geoTo");
+  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = s.from; }
+  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = s.to; }
+  const dateErr = $("#geoDateErr");
+  if (dateErr) {
+    dateErr.textContent = s.dateError;
+    dateErr.classList.toggle("hide", !s.dateError);
+  }
+  $("#geoSkeleton").classList.toggle("hide", !(s.loading && !d));
+  $("#geoError").classList.toggle("hide", !s.error);
+  $("#geoContent").classList.toggle("hide", !d);
+  $("#geoContent").setAttribute("aria-busy", s.loading ? "true" : "false");
+  if (s.error) {
+    $("#geoErrText").textContent = d
+      ? ` The last figures loaded are shown. ${s.error}`
+      : ` ${s.error}`;
+  }
+  if (!d) {
+    $("#geoNote").textContent = s.loading ? "Loading figures from the server…" : "";
+    return;
+  }
+
+  $("#geoNote").innerHTML = `${esc(d.range_label)} · ${esc(qty(d.days))} ${d.days === 1 ? "day" : "days"}`
+    + (s.loading ? " · refreshing…" : "");
+
+  const level = l => `<div class="geo-level ${l.available ? "" : "off"}">`
+    + `<b>${esc(l.level)}</b><span>${l.available
+        ? esc(l.note) : `No data yet · ${esc(l.gap)}`}</span></div>`;
+  $("#geoLevels").innerHTML = d.levels.map(level).join("");
+
+  const t = d.totals;
+  const kpi = (label, value, note) => `<div class="kpi">`
+    + `<span class="kpi-label">${esc(label)}</span>`
+    + `<span class="kpi-value">${esc(value)}</span>`
+    + `<span class="kpi-trend off"><em>${esc(note)}</em></span></div>`;
+  const cards = [
+    kpi("Sales", `₹ ${money(t.sales)}`, "Issued invoices, including GST."),
+    kpi("Invoices", qty(t.invoice_count), "Issued in the selected window."),
+    kpi("States with sales", qty(t.states), "States or territories with at least one issued invoice."),
+  ];
+  if (d.gst.available) {
+    cards.push(kpi("Taxable value", `₹ ${money(t.taxable)}`,
+                   "Before GST; the tax split is in the table below."));
+  } else if (d.returns.available) {
+    cards.push(kpi("Returns", `₹ ${money(t.returns)}`,
+                   `${plural(t.return_count, "issued credit note")}.`));
+  } else {
+    cards.push(kpi("Location not recorded", qty(d.basis.unrecorded),
+                   "Invoices with no state on the snapshot or the distributor."));
+  }
+  $("#geoKpis").innerHTML = cards.join("");
+
+  const max = d.map.reduce((m, x) => Math.max(m, Number(x.sales)), 0);
+  $("#geoMap").innerHTML = d.map.map(m => {
+    const at = GEO_LAYOUT[m.code] || [9, 7];
+    const value = Number(m.sales);
+    const alpha = m.recorded && max > 0 ? 0.12 + 0.66 * Math.sqrt(value / max) : 0;
+    const style = `grid-row:${at[0] + 1};grid-column:${at[1] + 1};`
+      + (alpha ? `background:rgba(31,107,68,${alpha.toFixed(2)});` : "")
+      + (alpha > 0.55 ? "color:#fff;" : "");
+    const label = m.recorded ? `₹ ${money(m.sales)}` : "no issued invoice";
+    return `<button type="button" class="geo-tile ${m.recorded ? "" : "zero"}`
+      + `${s.selected === m.code ? " on" : ""}" style="${style}"`
+      + ` data-geo-code="${esc(m.code)}" title="${esc(m.name)} · ${esc(label)}"`
+      + ` aria-label="${esc(m.name)}: ${esc(label)}">`
+      + `<b>${esc(GEO_SHORT[m.code] || m.code)}</b>`
+      + `${m.recorded ? `<span>₹ ${esc(money(m.sales))}</span>` : ""}</button>`;
+  }).join("");
+  $("#geoMapNote").textContent = "Tiles are a fixed local layout, not a geographic outline. "
+    + "Select a tile to highlight its row in the table."
+    + (d.unrecorded ? ` ${plural(d.unrecorded.invoice_count, "invoice")} have no recorded state and are not on the map.` : "");
+
+  const rank = rows => rows.length
+    ? rows.map((r, i) => `<li><button type="button" data-geo-code="${esc(r.key)}">`
+        + `<b>${i + 1}. ${esc(r.name)}</b>`
+        + `<em>₹ ${esc(money(r.sales))}</em>`
+        + `<span>${plural(r.invoice_count, "invoice")} · ${r.share === null ? "–" : esc(r.share.toFixed(2)) + "%"} of sales</span>`
+        + `</button></li>`).join("")
+    : `<li class="geo-sub">No state has a recorded sale in this window.</li>`;
+  $("#geoTop").innerHTML = rank(d.top);
+  $("#geoBottom").innerHTML = rank(d.bottom);
+
+  const rows = geoRows();
+  const cols = [
+    {key: "name", label: "State"},
+    {key: "sales", label: "Sales (incl. GST)", num: true},
+    {key: "share", label: "Share", num: true},
+    {key: "invoice_count", label: "Invoices", num: true},
+    {key: "customers", label: "Customers", num: true},
+  ];
+  if (d.gst.available) cols.push({key: "taxable", label: "Taxable", num: true});
+  if (d.returns.available) cols.push({key: "return_value", label: "Returns", num: true});
+  const head = cols.map(c => {
+    const on = s.sort.key === c.key;
+    const aria = on ? (s.sort.dir === "asc" ? "ascending" : "descending") : "none";
+    return `<th class="${c.num ? "n" : ""}" aria-sort="${aria}">`
+      + `<button type="button" class="geo-sort ${on ? "on" : ""}"`
+      + ` data-geo-sort="${c.key}">${esc(c.label)}`
+      + `${on ? (s.sort.dir === "asc" ? " ↑" : " ↓") : ""}</button></th>`;
+  }).join("");
+  const body = rows.map(r => {
+    const cells = cols.map(c => {
+      if (c.key === "name") {
+        return `<td><b>${esc(r.name)}</b>${r.recorded ? ""
+          : ` <span class="muted">· no state recorded</span>`}</td>`;
+      }
+      if (c.key === "share") {
+        return `<td class="n">${r.share === null ? "–" : esc(r.share.toFixed(2)) + "%"}</td>`;
+      }
+      if (["sales", "taxable", "return_value"].includes(c.key)) {
+        return `<td class="n">₹ ${esc(money(r[c.key]))}</td>`;
+      }
+      return `<td class="n">${esc(qty(r[c.key]))}</td>`;
+    }).join("");
+    return `<tr class="${r.recorded ? "" : "geo-unrecorded"}`
+      + `${s.selected === r.key ? " on" : ""}" data-geo-row="${esc(r.key)}">${cells}</tr>`;
+  }).join("");
+  $("#geoTable").innerHTML = `<thead><tr>${head}</tr></thead><tbody>`
+    + (body || `<tr><td colspan="${cols.length}" class="muted">No issued invoices in this window.</td></tr>`)
+    + `</tbody>`;
+  $("#geoTableNote").textContent = `${plural(t.invoice_count, "invoice")} across `
+    + `${plural(t.states, "state")}${d.unrecorded ? " plus a location-not-recorded row" : ""}.`;
+
+  if (!d.returns.available) {
+    $("#geoReturns").innerHTML = `<div class="geo-gap"><b>No data yet · ${esc(d.returns.gap)}</b><br>`
+      + `${esc(d.returns.note)}</div>`;
+  } else if (!d.returns.rows.length) {
+    $("#geoReturns").innerHTML = `<p class="geo-sub">No issued credit notes in this window.</p>`;
+  } else {
+    const rrows = d.returns.rows.map(r => {
+      const reasons = r.reasons.length ? r.reasons.map(esc).join("; ") : "No reason text recorded";
+      const more = r.reasons_total > r.reasons.length
+        ? ` <em>Showing ${r.reasons.length} of ${r.reasons_total} reasons.</em>` : "";
+      return `<tr><td><b>${esc(r.name)}</b></td>`
+        + `<td class="n">₹ ${esc(money(r.value))}</td>`
+        + `<td class="n">${esc(qty(r.count))}</td>`
+        + `<td><span class="geo-reasons" title="${esc(r.reasons.join("; "))}">${reasons}</span>${more}</td></tr>`;
+    }).join("");
+    $("#geoReturns").innerHTML = `<div class="tw"><table class="cmp-table"><thead><tr>`
+      + `<th>State</th><th class="n">Returns</th><th class="n">Notes</th><th>Reason as recorded</th>`
+      + `</tr></thead><tbody>${rrows}</tbody></table></div>`
+      + `<p class="geo-sub">${esc(d.returns.note)}</p>`;
+  }
+
+  if (!d.gst.available) {
+    $("#geoGst").innerHTML = `<div class="geo-gap"><b>No data yet · ${esc(d.gst.gap)}</b><br>`
+      + `${esc(d.gst.note)}</div>`;
+  } else if (!d.gst.rows.length) {
+    $("#geoGst").innerHTML = `<p class="geo-sub">No issued invoices in this window.</p>`;
+  } else {
+    const grows = d.gst.rows.map(r => `<tr><td><b>${esc(r.name)}</b></td>`
+      + `<td class="n">₹ ${esc(money(r.taxable))}</td>`
+      + `<td class="n">₹ ${esc(money(r.cgst))}</td>`
+      + `<td class="n">₹ ${esc(money(r.sgst))}</td>`
+      + `<td class="n">₹ ${esc(money(r.igst))}</td>`
+      + `<td class="n">₹ ${esc(money(r.cess))}</td>`
+      + `<td class="n">₹ ${esc(money(r.tax))}</td></tr>`).join("");
+    $("#geoGst").innerHTML = `<div class="tw"><table class="cmp-table"><thead><tr>`
+      + `<th>State</th><th class="n">Taxable</th><th class="n">CGST</th><th class="n">SGST</th>`
+      + `<th class="n">IGST</th><th class="n">Cess</th><th class="n">Tax</th>`
+      + `</tr></thead><tbody>${grows}</tbody></table></div>`
+      + `<p class="geo-sub">${esc(d.gst.note)}</p>`;
+  }
+
+  $("#geoFooter").textContent = `Counted ${fmtStamp(d.generated_at)} in Asia/Kolkata`
+    + ` · ${d.range_label}.`;
+  $("#geoNotes").innerHTML = (d.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+}
+
+async function loadGeo() {
+  const s = state.geo;
+  const seq = ++s.seq;
+  s.loading = true;
+  s.error = null;
+  renderGeo();
+  const params = new URLSearchParams({from_date: s.from, to_date: s.to});
+  const res = await api(`/api/dashboard/geo?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    s.data = res.body;
+    s.error = null;
+    if (!s.data.states.some(r => r.key === s.selected)) s.selected = null;
+  } else {
+    s.error = detail(res.body);
+  }
+  renderGeo();
+}
+
+function exportGeoCsv() {
+  const d = state.geo.data;
+  if (!d) return;
+  const cols = ["State", "State code", "Sales incl. GST", "Share %", "Invoices", "Customers"];
+  if (d.gst.available) cols.push("Taxable value", "CGST", "SGST", "IGST", "Cess", "Tax");
+  if (d.returns.available) cols.push("Returns", "Credit notes", "Reasons as recorded");
+  const rows = [
+    ["HERBANOVA sales by state"],
+    ["From", d.from], ["To", d.to], ["Generated", d.generated_at], [],
+    cols,
+  ];
+  d.states.forEach(r => {
+    const row = [r.name, r.code || "not recorded", r.sales, r.share ?? "",
+                 r.invoice_count, r.customers];
+    if (d.gst.available) row.push(r.taxable, r.cgst, r.sgst, r.igst, r.cess, r.tax);
+    if (d.returns.available) row.push(r.return_value, r.return_count, r.reasons.join("; "));
+    rows.push(row);
+  });
+  rows.push(["Total", "", d.totals.sales, "", d.totals.invoice_count, ""]);
+  downloadCsv(`herbanova-geography-${d.from}-to-${d.to}.csv`, rows);
 }
 
 /* ---------- command palette ---------- */
@@ -4294,6 +4600,10 @@ async function doQuote(form) {
 document.addEventListener("click", e => {
   const modeBtn = e.target.closest("[data-cmp-mode]");
   if (modeBtn) return setCompareMode(modeBtn.dataset.cmpMode);
+  const geoTile = e.target.closest("[data-geo-code]");
+  if (geoTile) return selectGeo(geoTile.dataset.geoCode);
+  const geoSortBtn = e.target.closest("[data-geo-sort]");
+  if (geoSortBtn) return setGeoSort(geoSortBtn.dataset.geoSort);
   const a = e.target.closest("[data-act]");
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
@@ -4303,6 +4613,8 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
   if (a && a.dataset.act === "reload-compare") return loadCompare();
   if (a && a.dataset.act === "cmp-csv") return exportCompareCsv();
+  if (a && a.dataset.act === "reload-geo") return loadGeo();
+  if (a && a.dataset.act === "geo-csv") return exportGeoCsv();
   if (a && a.dataset.act === "toggle-series") return toggleSeries(a.dataset.series);
   if (a && a.dataset.act === "dash-ap") return dashOpenApproval(a.dataset.id);
   if (a && a.dataset.act === "dash-approve") return dashApprove(a.dataset.id);
@@ -4497,6 +4809,9 @@ document.addEventListener("change", e => {
     applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
   }
   if (e.target.id === "cmpMonth") setCompareMonth(e.target.value);
+  if (e.target.id === "geoFrom" || e.target.id === "geoTo") {
+    applyGeoDates($("#geoFrom").value, $("#geoTo").value);
+  }
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
