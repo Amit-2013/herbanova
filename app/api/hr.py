@@ -1218,16 +1218,13 @@ def salary_slip(entry_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/payroll/periods/{period_id}/corrections", status_code=201)
-def request_correction(period_id: int, body: CorrectionIn2, db: Session = Depends(get_db),
+def request_payroll_correction(period_id: int, body: CorrectionIn2, db: Session = Depends(get_db),
                        actor=Depends(require("hr:payroll_prepare"))):
     p = db.get(PayrollPeriod, period_id)
     if not p:
         raise HTTPException(404, "Payroll period not found")
     if p.status in ("draft", "under_review"):
         raise HTTPException(409, "Correct the draft before it is approved")
-    entry = db.scalar(select(PayrollEntry).where(PayrollEntry.period_id == p.id,
-                                                 PayrollEntry.employee_id == body.employee_id)) \
-        if body.employee_id else None
     audit(db, actor.id, "hr.payroll.correction_request", f"payroll:{p.id}",
           {"employee_id": body.employee_id, "reason": body.reason.strip()})
     db.commit()

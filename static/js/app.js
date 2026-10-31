@@ -18,7 +18,7 @@ const fmtDay = s => s ? parseTs(s).toLocaleDateString("en-IN", {day: "2-digit", 
 const daysUntil = iso => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((new Date(iso + "T00:00:00") - t) / 86400000); };
 const poValue = po => Math.round(po.lines.reduce((s, l) => s + Number(l.qty) * Number(l.unit_cost), 0) * 100) / 100;
 
-const state = {user: null, perms: new Set(), modules: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
+const state = {user: null, perms: new Set(), modules: null, dashboard: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
                suppliers: [], bankChanges: [], supFilter: "all",
                dists: [], orders: [], approvals: [], leads: [], rp: {cat: [], key: "stock", from: "", to: "", data: null, tok: 0}, soFilter: "all", apFilter: "pending", ldFilter: "open", ldOwner: "all", distFilter: "all",
                users: [], roles: [], employees: [], permCatalog: [], audit: {rows: [], actions: [], actors: [], total: 0},
@@ -133,7 +133,7 @@ async function loadAll() {
   const canTax = can("tax:read");
   const canSales = can("sales:read");
   const canAccounts = can("accounts:read");
-  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag] = await Promise.all([
+  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da] = await Promise.all([
     api("/api/health"), api("/api/modules"), api("/api/products?page=1&page_size=200"), api("/api/warehouses"),
     api("/api/inventory/batches"), api("/api/purchase-orders?page=1&page_size=200"),
     api("/api/distributors?page=1&page_size=200"), api("/api/sales-orders?page=1&page_size=200"), api("/api/approvals?page=1&page_size=200"),
@@ -149,11 +149,15 @@ async function loadAll() {
     canSales ? api("/api/debit-notes") : none,
     canAccounts ? api("/api/accounts/outstanding") : none,
     canAccounts ? api("/api/accounts/payments") : none,
-    canAccounts ? api("/api/accounts/ageing") : none]);
+    canAccounts ? api("/api/accounts/ageing") : none,
+    api("/api/dashboard")]);
   if (!state.user) return;
   // The register is load-bearing for the Overview: keep the last good copy if a
   // refresh fails rather than blanking the module panel.
   if (mo.ok && mo.body) state.modules = mo.body;
+  // Overview figures are counted by the server over the whole database; the lists
+  // below are capped at 200 rows and must never be used to compute a tile.
+  state.dashboard = da.ok && da.body && !Array.isArray(da.body) ? da.body : null;
   state.products = p.ok ? p.body : [];
   state.warehouses = w.ok ? w.body : [];
   state.batches = b.ok ? b.body : [];
@@ -356,32 +360,41 @@ function renderAll() { renderHead(); renderDash(); renderProducts(); renderStock
 // there is no second copy to drift from it (COR-007).
 
 function renderDash() {
-  const inStock = state.batches.filter(b => Number(b.on_hand) > 0);
-  const units = inStock.reduce((s, b) => s + Number(b.on_hand), 0);
-  const watch = inStock.filter(b => b.expiry && daysUntil(b.expiry) <= 90).sort((a, b) => a.expiry.localeCompare(b.expiry));
-  const open = state.pos.filter(p => p.status === "open" || p.status === "partially_received");
-  $("#stats").innerHTML = [
-    [qty(units), "Units on hand"], [inStock.length, "Batches in stock"],
-    [state.products.filter(x => x.status === "active").length, "Active products"],
-    [open.length, "Purchase orders awaiting goods"], [watch.length, "Batches expiring within 90 days"],
-    [state.orders.filter(o => o.status === "approved").length, "Orders ready to dispatch"],
-    [state.approvals.filter(a => a.status === "pending").length, "Approvals waiting"],
-    ...(can("lead:read") ? [[state.leads.filter(l => l.follow_up_state === "overdue").length, "Follow-ups overdue"],
-      [state.leads.filter(l => l.follow_up_state === "today").length, "Follow-ups due today"]] : [])]
-    .map(s => `<div class="stat"><b>${esc(s[0])}</b><span>${esc(s[1])}</span></div>`).join("");
+  const d = state.dashboard;
+  const tiles = [];
+  if (d) {
+    if (d.stock) tiles.push([qty(d.stock.units_on_hand), "Units on hand"], [d.stock.batches_in_stock, "Batches in stock"]);
+    if (d.active_products !== null) tiles.push([d.active_products, "Active products"]);
+    if (d.purchase_orders) tiles.push([d.purchase_orders.open_count, "Purchase orders awaiting goods"]);
+    if (d.stock) tiles.push([d.stock.expiring_count, "Batches expiring within 90 days"]);
+    if (d.orders_ready !== null) tiles.push([d.orders_ready, "Orders ready to dispatch"]);
+    if (d.approvals_waiting !== null) tiles.push([d.approvals_waiting, "Approvals waiting"]);
+    if (d.leads) tiles.push([d.leads.overdue, "Follow-ups overdue"], [d.leads.due_today, "Follow-ups due today"]);
+  }
+  // A failed load is shown as such. It must never be drawn as zeros.
+  $("#stats").innerHTML = d
+    ? tiles.map(s => `<div class="stat"><b>${esc(s[0])}</b><span>${esc(s[1])}</span></div>`).join("")
+    : `<div class="stat"><b>–</b><span>Dashboard figures could not be loaded. Refresh to try again.</span></div>`;
 
-  $("#whCallout").classList.toggle("hide", state.warehouses.length > 0 || !can("stock:write"));
+  $("#whCallout").classList.toggle("hide", !d || d.warehouse_count !== 0 || !can("stock:write"));
 
-  $("#watchNote").textContent = watch.length > 6 ? `Showing 6 of ${watch.length}` : "";
-  $("#watch").innerHTML = watch.length ? watch.slice(0, 6).map(b => {
-    const d = daysUntil(b.expiry);
-    const chip = d < 0 ? "bad" : "warn";
-    const txt = d < 0 ? `Expired ${plural(-d, "day")} ago` : d === 0 ? "Expires today" : `${plural(d, "day")} left`;
+  const watch = d && d.stock ? d.stock.expiring : [];
+  const watchTotal = d && d.stock ? d.stock.expiring_count : 0;
+  $("#watchNote").textContent = watchTotal > watch.length ? `Showing ${watch.length} of ${watchTotal}` : "";
+  $("#watch").innerHTML = watch.length ? watch.map(b => {
+    const dl = b.days_left;
+    const chip = dl < 0 ? "bad" : "warn";
+    const txt = dl < 0 ? `Expired ${plural(-dl, "day")} ago` : dl === 0 ? "Expires today" : `${plural(dl, "day")} left`;
     return `<li><div>${esc(b.product_name)}<small>Batch ${esc(b.batch_no)} in ${esc(b.warehouse)}, ${esc(qty(b.on_hand))} on hand</small></div><span class="chip ${chip}">${esc(txt)}</span></li>`;
   }).join("") : `<li><span class="none">Nothing in stock expires in the next 90 days.</span></li>`;
 
-  $("#openpos").innerHTML = open.length ? open.slice(0, 6).map(p => `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button><small>${esc(p.supplier)}, ${esc(openLine(p))}</small></div>
-    <div class="r"><span class="num">₹ ${money(poValue(p))}</span></div></li>`).join("")
+  const open = d && d.purchase_orders ? d.purchase_orders.open : [];
+  const openTotal = d && d.purchase_orders ? d.purchase_orders.open_count : 0;
+  const poLine = p => p.status === "partially_received"
+    ? `${qty(p.remaining_units)} unit${Number(p.remaining_units) === 1 ? "" : "s"} still to come`
+    : `${plural(p.receipt_count, "receipt")} so far`;
+  $("#openpos").innerHTML = open.length ? open.map(p => `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button><small>${esc(p.supplier)}, ${esc(poLine(p))}</small></div>
+    <div class="r"><span class="num">₹ ${money(p.value)}</span></div></li>`).join("")
     : `<li><span class="none">No purchase orders are waiting for goods.</span></li>`;
 
   // The module list and every figure come from GET /api/modules, which is built
@@ -403,7 +416,7 @@ function renderDash() {
     }).join("");
   }
 
-  const n = open.length, c = $("#poCount");
+  const n = openTotal, c = $("#poCount");
   c.textContent = n; c.classList.toggle("hide", !n);
   c.setAttribute("aria-label", `${n} open purchase orders`);
 }
