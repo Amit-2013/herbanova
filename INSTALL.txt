@@ -1,0 +1,37 @@
+﻿HERBANOVA Business Control System - install guide (Windows / PowerShell)
+=======================================================================
+
+Requirements: Python 3.12 or 3.13, PostgreSQL 15+ (running on the server).
+
+1. Create the database and a dedicated user in PostgreSQL, e.g.:
+     CREATE USER herbanova_app WITH PASSWORD 'a-strong-password';
+     CREATE DATABASE herbanova_bcs OWNER herbanova_app;
+   Do NOT expose PostgreSQL's port (5432) to the internet.
+
+2. Unzip this package, open PowerShell in the folder that contains app\ and
+   alembic.ini, then:
+     Copy-Item .env.example .env
+     notepad .env          # fill in DATABASE_URL, APP_SECRET, CORS_ORIGINS
+   Keep DEMO_MODE=false and APP_ENV=production.
+
+3. Create the virtual environment and install packages:
+     python -m venv .venv
+     .\.venv\Scripts\Activate.ps1
+     python -m pip install -r requirements.txt
+
+4. Create the database tables:
+     python -m alembic upgrade head
+
+5. Create the first accounts (passwords are printed ONCE - save them) and set
+   the admin secondary password:
+     python seed.py
+     python seed_admin_secondary.py "a-different-strong-password"
+   Then sign in and change every seeded password.
+
+6. Start the server (no --reload in production):
+     python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+   Open http://SERVER-ADDRESS:8000/ui/
+
+7. For real use, put it behind HTTPS (Caddy or nginx), start it automatically
+   with Windows (Task Scheduler or NSSM), open only the HTTPS port in the
+   firewall, and schedule regular pg_dump backups. Test a restore.
