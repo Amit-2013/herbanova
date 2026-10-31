@@ -165,3 +165,49 @@ def test_inline_decision_refreshes_card_kpi_and_writes_audit(client, world):
                                                  AuditLog.record == f"approval:{approval_id}"))
         assert entry is not None
         assert entry.actor_id is not None
+
+
+def test_purchase_series_reconciles_with_goods_receipts(client, world):
+    from datetime import datetime, time, timezone
+
+    from sqlalchemy import func
+
+    from app.models.core import PurchaseOrder, PurchaseOrderLine
+    from app.models.suppliers import GoodsReceipt, GoodsReceiptLine
+
+    day = TODAY - timedelta(days=3)
+    at = datetime.combine(day, time(12), tzinfo=timezone.utc)
+    suffix = uuid4().hex[:6].upper()
+    with SessionLocal() as db:
+        actor = db.scalar(select(User).where(User.username == "admin"))
+        po = PurchaseOrder(po_number=f"T-PO-{suffix}", supplier="Test supplier",
+                           status="received", created_by=actor.id, created_at=at)
+        db.add(po)
+        db.flush()
+        db.add(PurchaseOrderLine(po_id=po.id, product_id=world["product_id"],
+                                 qty=Decimal("10"), unit_cost=Decimal("50")))
+        grn = GoodsReceipt(grn_number=f"T-GRN-{suffix}", po_id=po.id,
+                           warehouse_id=world["warehouse_id"], received_by=actor.id,
+                           received_at=at)
+        db.add(grn)
+        db.flush()
+        db.add(GoodsReceiptLine(grn_id=grn.id, product_id=world["product_id"],
+                                batch_id=world["batch_id"], qty=Decimal("10")))
+        db.commit()
+
+    body = _dash(client, from_date=day.isoformat(), to_date=day.isoformat())
+    with SessionLocal() as db:
+        independent = db.scalar(
+            select(func.coalesce(func.sum(GoodsReceiptLine.qty
+                                          * func.coalesce(PurchaseOrderLine.unit_cost, 0)), 0))
+            .select_from(GoodsReceiptLine)
+            .join(GoodsReceipt, GoodsReceipt.id == GoodsReceiptLine.grn_id)
+            .join(PurchaseOrderLine,
+                  (PurchaseOrderLine.po_id == GoodsReceipt.po_id)
+                  & (PurchaseOrderLine.product_id == GoodsReceiptLine.product_id))
+            .where(GoodsReceipt.received_at >= at.replace(hour=0),
+                   GoodsReceipt.received_at < at.replace(hour=23, minute=59, second=59)))
+    assert _dec(body["sales_vs_purchases"]["purchases_total"]) == _dec(independent)
+    assert _dec(body["sales_vs_purchases"]["purchases_total"]) >= Decimal("500")
+    point = body["sales_vs_purchases"]["series"][0]
+    assert _dec(point["purchases"]) == _dec(body["sales_vs_purchases"]["purchases_total"])

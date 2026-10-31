@@ -131,7 +131,7 @@ function enter(u) {
   state.dashLoading = true;
   state.dashError = null;
   state.expiry = {bucket: "all", loading: false, data: null};
-  state.chart.index = -1;
+  state.chart = {index: -1, off: {}};
   closePalette();
   $("#mustChange").classList.add("hide");
   $("#login").classList.add("hide");
@@ -642,9 +642,11 @@ function chartTip(i) {
   if (!svg || !tip) return;
   state.chart.index = i;
   $$(".hit", svg).forEach((h, j) => h.classList.toggle("on", j === i));
+  const sOn = c.sales_visible && !(state.chart.off && state.chart.off.sales);
+  const pOn = c.purchases_visible && !(state.chart.off && state.chart.off.purchases);
   tip.innerHTML = `<b>${esc(fmtDate(pt.date))}</b>`
-    + (c.sales_visible ? `<span><i class="sales"></i>Sales ₹ ${money(pt.sales)}</span>` : "")
-    + (c.purchases_visible ? `<span><i class="purchases"></i>Purchases ₹ ${money(pt.purchases)}</span>` : "");
+    + (sOn ? `<span><i class="key sales"></i>Sales ₹ ${money(pt.sales)}</span>` : "")
+    + (pOn ? `<span><i class="key purchases"></i>Purchases ₹ ${money(pt.purchases)}</span>` : "");
   tip.classList.remove("hide");
   const ratio = n > 1 ? i / (n - 1) : 0.5;
   const left = 58 + ratio * (744 - 58);
@@ -665,10 +667,15 @@ function renderChart(c) {
   const from = fmtDate(c.from), to = fmtDate(c.to);
   note.textContent = `${from} to ${to}; the previous period is `
     + `${fmtDate(c.previous_from)} to ${fmtDate(c.previous_to)}.`;
-  title.textContent = c.sales_visible && c.purchases_visible ? "Sales and purchases"
-    : c.sales_visible ? "Sales" : "Purchases received";
-  legend.innerHTML = (c.sales_visible ? `<span class="sales"><i></i>Sales</span>` : "")
-    + (c.purchases_visible ? `<span class="purchases"><i></i>Purchases</span>` : "");
+  state.chart.off = state.chart.off || {};
+  const sOn = !!c.sales_visible && !state.chart.off.sales;
+  const pOn = !!c.purchases_visible && !state.chart.off.purchases;
+  title.textContent = sOn && pOn ? "Sales and purchases"
+    : sOn ? "Sales" : pOn ? "Purchases received" : "Sales and purchases";
+  const onlyOne = (sOn ? 1 : 0) + (pOn ? 1 : 0) === 1;
+  legend.innerHTML =
+    (c.sales_visible ? `<button class="legend-pill sales" type="button" data-act="toggle-series" data-series="sales" aria-pressed="${sOn}"${onlyOne && sOn ? " aria-disabled=\"true\" title=\"One line must stay visible\"" : ""}><i></i>Sales</button>` : "")
+    + (c.purchases_visible ? `<button class="legend-pill purchases" type="button" data-act="toggle-series" data-series="purchases" aria-pressed="${pOn}"${onlyOne && pOn ? " aria-disabled=\"true\" title=\"One line must stay visible\"" : ""}><i></i>Purchases</button>` : "");
 
   const series = c.series || [];
   if (!series.length) {
@@ -680,8 +687,8 @@ function renderChart(c) {
   const W = 760, x0 = 58, x1 = 744, y0 = 14, y1 = 218;
   const vals = [];
   series.forEach(p => {
-    if (c.sales_visible && p.sales != null) vals.push(Number(p.sales));
-    if (c.purchases_visible && p.purchases != null) vals.push(Number(p.purchases));
+    if (sOn && p.sales != null) vals.push(Number(p.sales));
+    if (pOn && p.purchases != null) vals.push(Number(p.purchases));
   });
   const max = niceMax(Math.max(...vals, 0));
   const x = i => x0 + (series.length === 1 ? 0.5 : i / (series.length - 1)) * (x1 - x0);
@@ -702,7 +709,7 @@ function renderChart(c) {
     `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[key] ?? 0).toFixed(1)}`).join(" ");
   const dots = key => series.map((p, i) =>
     `<circle class="dot ${key}" cx="${x(i).toFixed(1)}" cy="${y(p[key] ?? 0).toFixed(1)}" r="2.6"/>`).join("");
-  const area = c.sales_visible
+  const area = sOn
     ? `<path d="${line("sales")} L${x(series.length - 1).toFixed(1)},${y1} L${x0},${y1} Z" fill="url(#salesFill)" stroke="none"/>`
     : "";
 
@@ -717,21 +724,34 @@ function renderChart(c) {
       <stop offset="0" stop-color="var(--moss)" stop-opacity=".20"/>
       <stop offset="1" stop-color="var(--moss)" stop-opacity="0"/>
     </linearGradient></defs>${grid}${xlabels}
-    ${c.sales_visible ? area + `<path class="series-sales" d="${line("sales")}"/>` + dots("sales") : ""}
-    ${c.purchases_visible ? `<path class="series-purchases" d="${line("purchases")}"/>` + dots("purchases") : ""}
+    ${sOn ? area + `<path class="series-sales" d="${line("sales")}"/>` + dots("sales") : ""}
+    ${pOn ? `<path class="series-purchases" d="${line("purchases")}"/>` + dots("purchases") : ""}
     ${hits}`;
   svg.setAttribute("aria-label",
     `${title.textContent} from ${from} to ${to}. `
-    + (c.sales_visible ? `Sales total ${money(c.sales_total)} rupees. ` : "")
-    + (c.purchases_visible ? `Purchases total ${money(c.purchases_total)} rupees. ` : "")
+    + (sOn ? `Sales total ${money(c.sales_total)} rupees. ` : "")
+    + (pOn ? `Purchases total ${money(c.purchases_total)} rupees. ` : "")
     + "Use the left and right arrow keys to read each day.");
   state.chart.index = -1;
 
   const bits = [];
-  if (c.sales_visible) bits.push(`<span><b>Sales</b> ₹ ${money(c.sales_total)} ${deltaText(c.sales_change)}</span>`);
-  if (c.purchases_visible) bits.push(`<span><b>Purchases</b> ₹ ${money(c.purchases_total)} ${deltaText(c.purchases_change)}</span>`);
+  if (sOn) bits.push(`<span><b>Sales</b> ₹ ${money(c.sales_total)} ${deltaText(c.sales_change)}</span>`);
+  if (pOn) bits.push(`<span><b>Purchases</b> ₹ ${money(c.purchases_total)} ${deltaText(c.purchases_change)}</span>`);
   bits.push(`<span class="source-line">${esc(c.note || "")}</span>`);
   totals.innerHTML = bits.join("");
+}
+
+function toggleSeries(key) {
+  const c = state.dashboard && state.dashboard.sales_vs_purchases;
+  if (!c) return;
+  state.chart.off = state.chart.off || {};
+  const sOn = !!c.sales_visible && !state.chart.off.sales;
+  const pOn = !!c.purchases_visible && !state.chart.off.purchases;
+  const on = key === "sales" ? sOn : pOn;
+  const other = key === "sales" ? pOn : sOn;
+  if (on && !other) return; // the last visible line stays on
+  state.chart.off[key] = !state.chart.off[key];
+  renderChart(c);
 }
 
 function renderDashAgeing(a) {
@@ -3898,6 +3918,7 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "load-ageing") return loadAgeing();
   if (a && a.dataset.act === "open-search") return openPalette();
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
+  if (a && a.dataset.act === "toggle-series") return toggleSeries(a.dataset.series);
   if (a && a.dataset.act === "dash-ap") return dashOpenApproval(a.dataset.id);
   if (a && a.dataset.act === "dash-approve") return dashApprove(a.dataset.id);
   if (a && a.dataset.act === "dash-reject") {

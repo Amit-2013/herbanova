@@ -218,9 +218,10 @@ def _sales_purchases(db: Session, start: date, end: date) -> dict:
         "sales_change": _change(current_sales, prev_sales),
         "purchases_change": _change(current_purchases, prev_purchases),
         "previous_from": prev_start.isoformat(), "previous_to": prev_end.isoformat(),
-        "note": ("Sales are issued tax invoices (including GST). Purchases are goods "
-                 "received against purchase orders, valued at the order cost; a line "
-                 "without a price counts as zero."),
+        "note": ("Sales are issued tax invoices (including GST) and total the Sales "
+                 "Invoice Register. Purchases are goods received against purchase "
+                 "orders, valued at the order cost, and total the Goods Receipt "
+                 "Register's receipts; a line without a price counts as zero."),
     }
 
 
