@@ -232,7 +232,7 @@ def _post_returns(db: Session, *, note: CreditNote, invoice: Invoice, prepared,
 
     Restores the original dispatch expiry date from the invoice line onto the
     batch, so returned stock carries the same expiry the goods had when they
-    were originally despatched.
+    were originally dispatched.
     """
     for inv_line, qty, _amounts in prepared:
         batches = _return_batches(db, invoice, inv_line.product_id)

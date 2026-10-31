@@ -64,6 +64,8 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 .formbox{width:100%;max-width:360px}
 .formbox h2{font:600 28px/1.2 var(--serif);letter-spacing:-.01em}
 .formbox .sub{color:var(--mute);margin:4px 0 14px}
+#mustChange{min-height:100%;display:grid;place-items:center;padding:32px;background:var(--surface)}
+#mustChange .mark{margin-bottom:22px}
 .mark{display:flex;gap:10px;align-items:center;font-weight:700;letter-spacing:.02em}
 .logo{width:32px;height:32px;border-radius:8px;background:var(--turmeric);display:grid;place-items:center;color:var(--forest);font:600 18px var(--serif)}
 

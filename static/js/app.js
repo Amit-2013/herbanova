@@ -87,13 +87,14 @@ const drawerOpen = () => !$("#drawer").classList.contains("hide");
 function enter(u) {
   state.user = u;
   state.perms = new Set(u.permissions || []);
+  if (u.must_change_password) { showPasswordChange(u); return; }
+  $("#mustChange").classList.add("hide");
   $("#login").classList.add("hide");
   $("#shell").classList.remove("hide");
   $("#who").textContent = u.username;
   const show = (id, on) => { const el = $(id); if (el) el.classList.toggle("hide", !on); };
   show("#navLeads", can("lead:read"));
   show("#navSuppliers", can("supplier:read"));
-  show("#navTax", can("tax:read"));
   show("#navBilling", can("sales:read"));
   show("#navAccounts", can("accounts:read"));
   show("#navHr", can("hr:read") || can("hr:attendance_self"));
@@ -105,10 +106,43 @@ function enter(u) {
 function leave(msg) {
   state.user = null; state.perms = new Set(); state.movements = null;
   closeDrawer();
+  $("#mustChange").classList.add("hide");
+  $("#changePwForm").reset();
   $("#shell").classList.add("hide");
   $("#login").classList.remove("hide");
   $("#lerr").textContent = msg || "";
   $("#u").focus();
+}
+function showPasswordChange(u) {
+  closeDrawer();
+  $("#changePwForm").reset();
+  $("#mcErr").textContent = "";
+  $("#mcUser").textContent = u.username || "";
+  $("#login").classList.add("hide");
+  $("#shell").classList.add("hide");
+  $("#mustChange").classList.remove("hide");
+  $("#mcCurrent").focus();
+}
+async function changePassword(form) {
+  const f = form.elements, err = $("#mcErr"), btn = $("#mcBtn");
+  err.textContent = "";
+  const current = f.current_password.value, next = f.new_password.value;
+  if (!current) { err.textContent = "Enter your current password."; return; }
+  if (next !== f.confirm_password.value) { err.textContent = "The new passwords do not match."; return; }
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(re => re.test(next)).length;
+  if (next.length < 12 || next.length > 128 || classes < 3) {
+    err.textContent = "Use 12 to 128 characters with at least three of: lowercase, uppercase, digits, symbols.";
+    return;
+  }
+  if (next === current) { err.textContent = "The new password must differ from the current password."; return; }
+  btn.disabled = true;
+  const res = await api("/api/auth/change-password", {method: "POST",
+    body: {current_password: current, new_password: next}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  form.reset();
+  toast(res, "Password changed");
+  enter(res.body);
 }
 async function login(e) {
   e.preventDefault();
@@ -133,10 +167,12 @@ async function loadAll() {
   const canTax = can("tax:read");
   const canSales = can("sales:read");
   const canAccounts = can("accounts:read");
+  const canApprovals = can("approval:read");
   const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da] = await Promise.all([
     api("/api/health"), api("/api/modules"), api("/api/products?page=1&page_size=200"), api("/api/warehouses"),
     api("/api/inventory/batches"), api("/api/purchase-orders?page=1&page_size=200"),
-    api("/api/distributors?page=1&page_size=200"), api("/api/sales-orders?page=1&page_size=200"), api("/api/approvals?page=1&page_size=200"),
+    api("/api/distributors?page=1&page_size=200"), api("/api/sales-orders?page=1&page_size=200"),
+    canApprovals ? api("/api/approvals?page=1&page_size=200") : none,
     can("lead:read") ? api("/api/leads?page=1&page_size=200") : none,
     canUsers ? api("/api/users") : none, canUsers ? api("/api/roles") : none,
     can("employee:read") ? api("/api/employees") : none,
@@ -183,7 +219,7 @@ async function loadAll() {
   state.accounts.entries = ae.ok ? ae.body : [];
   if (ag.ok) state.accounts.ageing = ag.body;
   $("#env").textContent = h.ok ? `Environment: ${h.body.env}` : "Service unreachable";
-  const failed = [p, w, b, o, ds, so, ap, ld, sp].find(r => !r.ok);
+  const failed = [p, w, b, o, ds, so, canApprovals ? ap : null, ld, sp].find(r => r && !r.ok);
   if (failed) toast(failed, "Some data could not be loaded");
   renderAll();
   if (state.movements) loadMovements();
@@ -489,7 +525,7 @@ function renderGstRegister() {
     " Choose a wider range, or leave both dates blank for everything.");
   if (reg) {
     const t = reg.totals;
-    $("#gstTot").textContent = `Taxable ${money(t.taxable)} · CGST ${money(t.cgst)} · SGST ${money(t.sgst)} · IGST ${money(t.igst)} · Total ${money(t.total)} · ${plural(reg.credit_notes.length, "credit note")}`;
+    $("#gstTot").textContent = `Taxable ${money(t.taxable)} · CGST ${money(t.cgst)} · SGST ${money(t.sgst)} · IGST ${money(t.igst)} · Total ${money(t.total)} · ${plural(reg.credit_notes.length, "credit note")} · ${plural(reg.debit_notes.length, "debit note")}`;
   }
 }
 
@@ -585,7 +621,7 @@ function renderFollowups() {
   }).sort((a, b) => String(a.next_follow_up || "").localeCompare(String(b.next_follow_up || "")));
   $("#furows").innerHTML = list.map(l => `<tr class="go" data-ld="${l.id}"><td><button class="rowbtn" data-act="open-lead" data-id="${l.id}" type="button">${esc(l.name)}</button><small>${esc(l.lead_no)}</small></td>
     <td>${esc(l.company || "–")}<small>${esc(l.phone || l.email || "")}</small></td><td>${esc(l.owner)}</td>
-    <td>${esc(l.closed_reason || "–")}</td><td>${followCell(l)}</td>
+    <td>${esc(l.last_remark || l.closed_reason || "–")}</td><td>${followCell(l)}</td>
     <td><button class="btn ghost sm" type="button" data-act="lead-panel" data-id="${l.id}" data-panel="activity">Log remark</button></td></tr>`).join("");
   empty($("#fuempty"), !list.length, "Nothing in this follow-up window.", "Follow-ups appear here once a lead has a next date.");
 }
@@ -662,7 +698,6 @@ async function hrEmployeeForm(id) {
       <div><label>Office / work location</label><select name="office_id"><option value="">—</option>${opts(o, x ? x.office_id : null, v => v.name)}</select></div></div>
       <div class="row2"><div><label>Shift</label><select name="shift_id"><option value="">—</option>${opts(s, x ? x.shift_id : null, v => v.name)}</select></div>
       <div><label>Status</label><select name="status"><option value="active"${x && x.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${x && x.status === "inactive" ? " selected" : ""}>Inactive</option></select></div></div>
-      ${x ? "" : "<label>Date of joining</label>"}
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">${x ? "Save employee" : "Create employee"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`, true);
@@ -757,7 +792,7 @@ async function hrAttendance() {
   const [a, o] = await Promise.all([api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
     can("hr:read") ? api("/api/hr/offices") : Promise.resolve({ok: false, body: []})]);
   const rows = a.ok ? a.body : [];
-  const officeOpts = (o.ok ? o.body : []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("");
+  const offices = o.ok ? o.body : [];
   openDrawer("Attendance — today", "GPS is requested only for check-in/out and never tracked in the background.", `
     <div class="actions">
       ${can("hr:attendance_self") ? `<button class="btn" type="button" data-act="hr-checkin">Check in</button><button class="btn ghost" type="button" data-act="hr-checkout">Check out</button>` : ""}
@@ -772,7 +807,7 @@ async function hrAttendance() {
       <label>Remarks (required)</label><input name="remarks" autocomplete="off">
       <div class="note">A manual entry is audited with your name, the old value and the new value.</div>
       <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Save manual attendance</button></div></form>` : ""}
-    ${officeOpts ? `<div class="note">Configured offices: ${officeOpts.length}. Geofence validation runs on the server.</div>` : ""}`, true);
+    ${offices.length ? `<div class="note">Configured offices: ${offices.length}. Geofence validation runs on the server.</div>` : ""}`, true);
 }
 async function hrCheckIn() {
   const body = {source: "gps"};
@@ -1229,7 +1264,7 @@ async function decideBank(form, decision) {
   if (reason.length < 3) { err.textContent = "Give a short reason for the decision."; form.elements.reason.focus(); return; }
   const res = await api(`/api/suppliers/bank-changes/${Number(form.dataset.ap)}/decide`,
                         {method: "POST", body: {decision, reason}});
-  toast(res, res.ok ? `Change ${decision}d` : "Decision not recorded");
+  toast(res, res.ok ? (decision === "approve" ? "Change approved" : "Change rejected") : "Decision not recorded");
   if (!res.ok) { err.textContent = detail(res.body); return; }
   closeDrawer(); loadAll();
 }
@@ -3053,6 +3088,7 @@ document.addEventListener("submit", e => {
   e.preventDefault();
   const f = e.target;
   if (f.id === "loginForm") login(e);
+  else if (f.id === "changePwForm") changePassword(f);
   else if (f.id === "prodForm") saveProduct(f);
   else if (f.id === "whForm") saveWarehouse(f);
   else if (f.id === "poForm") savePO(f);
@@ -3124,7 +3160,9 @@ document.addEventListener("keydown", e => {
 });
 $("#scrim").addEventListener("click", closeDrawer);
 $("#dclose").addEventListener("click", closeDrawer);
-$("#out").addEventListener("click", async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); });
+const signOut = async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); };
+$("#out").addEventListener("click", signOut);
+$("#mcOut").addEventListener("click", signOut);
 ["pq", "sq", "lq", "oq"].forEach(id => $("#" + id).addEventListener("input", () => ({pq: renderProducts, sq: renderStock, lq: renderLedger, oq: renderPOs})[id]()));
 $("#supq").addEventListener("input", renderSuppliers);
 $("#soq").addEventListener("input", renderSales);
