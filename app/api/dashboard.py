@@ -37,7 +37,7 @@ from ..models.core import (ApprovalRequest, AuditLog, Batch, CreditNote, DebitNo
 from ..models.hr import Attendance, LeaveApplication, ODRequest
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine
 from ..models.users import Employee
-from ..services import ledger, telegram
+from ..services import capacity, ledger, telegram
 from ..services.sales import EXPOSURE_STATUSES
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -259,17 +259,25 @@ def _top_products(db: Session, start: date, end: date) -> dict:
 
 
 def _stock_by_warehouse(db: Session) -> list[dict]:
-    rows = db.execute(
-        select(Warehouse.id, Warehouse.name,
-               func.count().filter(Batch.on_hand > 0),
-               func.coalesce(func.sum(Batch.on_hand).filter(Batch.on_hand > 0), 0))
-        .outerjoin(Batch, Batch.warehouse_id == Warehouse.id)
-        .group_by(Warehouse.id, Warehouse.name)
-        .order_by(Warehouse.name)).all()
-    return [{"id": wid, "name": name, "batches": int(batches),
-             "units": str(units), "capacity": None, "share": None,
-             "capacity_status": "not_configured", "gap": "GAP-D03"}
-            for wid, name, batches, units in rows]
+    rows = capacity.warehouse_positions(db)
+    total = sum((Decimal(r["used_units"]) for r in rows), Decimal(0))
+    for r in rows:
+        used = Decimal(r["used_units"])
+        r["units"] = r["used_units"]
+        r["share"] = round(float(used / total * 100), 1) if total > 0 else 0.0
+        r["gap"] = "GAP-D03" if r["capacity_units"] is None else None
+    return rows
+
+
+def _capacity_alert(db: Session) -> dict | None:
+    """Warehouses at or above the 80% attention line, from the same figures."""
+    rows = capacity.warehouse_positions(db)
+    tight = [r for r in rows if r["capacity_state"] in ("high", "over", "full")]
+    if not tight:
+        return None
+    return {"count": len(tight),
+            "names": [r["name"] for r in tight],
+            "over": any(r["capacity_state"] == "over" for r in tight)}
 
 
 def _expiry_counts(db: Session, today: date) -> dict:
@@ -357,10 +365,18 @@ def _attention(db: Session, user, perms: set[str], today: date,
                       "count": counts["expired"], "units": str(units),
                       "severity": "bad" if counts["expired"] else "ok",
                       "href": "#/inventory/stock", "available": True})
-        items.append({"key": "warehouse_capacity", "label": "Warehouse capacity",
-                      "severity": "off", "count": None, "available": False,
-                      "gap": "GAP-D03",
-                      "note": "No warehouse capacity is captured."})
+        alert = _capacity_alert(db)
+        configured = (db.scalar(select(func.count())
+                                .where(Warehouse.capacity_units.is_not(None))) or 0) > 0
+        items.append({"key": "warehouse_capacity",
+                      "label": "Warehouses above 80% capacity",
+                      "count": alert["count"] if alert else 0,
+                      "severity": ("bad" if alert and alert["over"]
+                                   else "warn" if alert else "ok"),
+                      "href": "#/inventory/warehouses", "available": True,
+                      "note": (", ".join(alert["names"][:3]) if alert
+                               else "" if configured
+                               else "Capacity is not set for any warehouse.")})
     if ageing is not None:
         old = [b for b in ageing["buckets"] if b["key"] in ("61-90", "90+")]
         amount = sum((b["total"] for b in old), Decimal(0))

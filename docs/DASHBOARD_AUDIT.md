@@ -188,7 +188,7 @@ Measured on the development machine with a warm local PostgreSQL, one session pe
 |---|---|---|---|
 | GAP-D01 | No product category or brand | Sales by category, margin by category | Add `products.category` (migration + backfill UI) |
 | GAP-D02 | No reorder level / minimum stock | Low-stock alert, stock cover alert | Add `products.reorder_level` |
-| GAP-D03 | No warehouse capacity | Warehouse over-capacity alert, capacity share | Add `warehouses.capacity_units` |
+| GAP-D03 | No warehouse capacity | Warehouse over-capacity alert, capacity share | Add `warehouses.capacity_units` — **resolved in v2** (nullable units + note, migration `0009`) |
 | GAP-D04 | No batch cost or valuation policy | Expiry value, stock value by warehouse, accurate gross margin | Add batch cost at receipt (from GRN) or a documented valuation policy |
 | GAP-D05 | No expected delivery date on POs | Supplier on-time delivery, PO ageing vs promise, "due this week" | Add `purchase_orders.expected_date` |
 | GAP-D06 | No due date on invoices | Ageing by due date (today it is by invoice date) | Add `invoices.due_date`, default from distributor terms |
@@ -299,6 +299,8 @@ Every card below can be correct today; where data is absent the card shows **"No
 **MISSING.** `warehouses` has only `id` and `name`; no capacity, unit or location. `batches.on_hand` gives live units per warehouse, so used/percentage needs only a capacity column. No transfer endpoint exists (`StockMovement.movement_type='transfer'` is modelled but no route posts it). Receiving (`POST /api/purchase-orders/{id}/receive`) and dispatch (`POST /api/sales-orders/{id}/dispatch`) do not check capacity.
 
 Gaps: **GAP-V06** capacity column; **GAP-V07** capacity checks at receipt and dispatch; **GAP-V08** utilisation report; **GAP-V09** transfer check (blocked by no transfer feature).
+
+**Built in v2.** Nullable `warehouses.capacity_units` and `capacity_note` (migration `0009`, with a downgrade). A goods receipt that would exceed capacity is refused unless an Administrator sends the audited override; dispatch is not capped but reports the source warehouse's position. `warehouse_utilisation` is a read-only report from the same query as the dashboard. GAP-V09 stays open because there is still no transfer endpoint.
 
 ## A5. Returns and credit note data
 

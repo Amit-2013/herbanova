@@ -67,6 +67,9 @@ class Warehouse(Base):
     __tablename__ = "warehouses"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
+    # NULL means capacity is not configured; it never means zero.
+    capacity_units: Mapped[int | None] = mapped_column(nullable=True)
+    capacity_note: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 class Batch(Base):
     __tablename__ = "batches"

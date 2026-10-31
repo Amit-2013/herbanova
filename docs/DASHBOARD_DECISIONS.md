@@ -65,6 +65,8 @@ This file records every decision taken without the owner present, so each one ca
 **Decision.** A goods receipt that would take a warehouse above its configured capacity returns HTTP 409 "capacity exceeded" unless the caller sends `allow_over_capacity=true`. That flag is only honoured for an Administrator, and the override is written to the audit log with the warehouse, the quantity and the new total.
 **Why.** Blocking stock receipt outright could stop the business; a silent warning could let a warehouse overflow. An explicit administrator override is the middle ground and is fully logged.
 **Dispatch.** Dispatch is not capped by capacity: it can only reduce stock. It shows the source warehouse's remaining stock and capacity in the dispatch result so the operator sees the position.
+**Purchase orders.** Raise-time checking is not possible because a purchase order carries no warehouse; the warehouse is chosen when goods arrive. Capacity is therefore checked at the goods receipt, which is the first moment the destination is known.
+**Revision (v2).** The receipt form shows the chosen warehouse's used, free and capacity figures before submission and names the block in the 409 message. The override checkbox is revealed only after the server refuses the receipt, and the server still enforces that only an Administrator may use it; the override is audited as `warehouse.capacity_override` with the before and after totals. A role that is not an Administrator gets a 403 even if it sends the flag.
 **Transfers.** There is no transfer endpoint, so no transfer check exists (GAP-V09, recorded, not built).
 
 ## D-11. The utilisation report is additive and read-only
