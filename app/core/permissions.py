@@ -41,6 +41,7 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "print:document":    ("Print an invoice, credit note or debit note as a secure PDF", "Billing"),
     "accounts:read":     ("View outstanding, party ledgers, GST registers and the trial balance", "Accounts"),
     "accounts:write":    ("Record receipts from distributors and payments to suppliers", "Accounts"),
+    "accounts:reports":  ("View the Accounts dashboard, Accounts report pack and Accounts email block", "Accounts"),
     "lead:read":         ("View leads", "Leads"),
     "lead:write":        ("Create and work leads", "Leads"),
     "lead:assign":       ("Reassign lead ownership", "Leads"),
@@ -80,6 +81,9 @@ BASELINE_ROLE_PERMS: dict[str, set[str]] = {
                   "db:reset",
                   # Module Phase 6 adds accounts: statements, plus recording money
                   "accounts:read", "accounts:write",
+                  # Full accounts reporting is a narrower right than the statements
+                  # above; the Administrator may grant it to an Accounts head.
+                  "accounts:reports",
                   # Approvals and post-billing amendments are administrator decisions
                   "approval:read", "approval:credit_limit", "invoice:edit_post_billing",
                   # HR management
