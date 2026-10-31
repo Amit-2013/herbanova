@@ -100,10 +100,13 @@ def _stock(db: Session, today: date) -> dict:
     }
 
 
-def _purchase_orders(db: Session) -> dict:
-    open_filter = PurchaseOrder.status.in_(OPEN_PO)
-    total = db.scalar(select(func.count()).where(open_filter)) or 0
-    pos = db.scalars(select(PurchaseOrder).where(open_filter)
+def _purchase_orders(db: Session, start: date, end: date) -> dict:
+    open_filter = (PurchaseOrder.status.in_(OPEN_PO),)
+    total = db.scalar(select(func.count()).where(*open_filter)) or 0
+    created_day = _business_day(PurchaseOrder.created_at)
+    in_range = open_filter + (created_day >= start, created_day <= end)
+    in_range_count = db.scalar(select(func.count()).where(*in_range)) or 0
+    pos = db.scalars(select(PurchaseOrder).where(*in_range)
                      .order_by(PurchaseOrder.id.desc()).limit(LIST_LIMIT)).all()
     ids = [p.id for p in pos]
     value, ordered, received, receipts = {}, {}, {}, {}
@@ -140,7 +143,8 @@ def _purchase_orders(db: Session) -> dict:
                     "received_units": str(received_qty),
                     "pct_received": round(pct, 1),
                     "receipt_count": receipts.get(p.id, 0)})
-    return {"open_count": total, "open": out}
+    return {"open_count": total, "in_range_count": in_range_count,
+            "from": start.isoformat(), "to": end.isoformat(), "open": out}
 
 
 def _leads(db: Session, today: date) -> dict:
@@ -394,11 +398,17 @@ def _approvals_section(db: Session, user, perms: set[str]) -> dict:
             "note": "Only a different person from the requester can decide."}
 
 
-def _activity(db: Session, limit: int = 8) -> dict:
-    total = db.scalar(select(func.count()).select_from(AuditLog)) or 0
+def _activity(db: Session, limit: int = 8,
+              start: date | None = None, end: date | None = None) -> dict:
+    day = _business_day(AuditLog.at)
+    where = ()
+    if start is not None and end is not None:
+        where = (day >= start, day <= end)
+    total = db.scalar(select(func.count()).select_from(AuditLog).where(*where)) or 0
     rows = db.execute(
         select(AuditLog, User.username)
         .join(User, User.id == AuditLog.actor_id, isouter=True)
+        .where(*where)
         .order_by(AuditLog.id.desc()).limit(limit)).all()
     return {"rows": [{"id": log.id, "at": log.at.isoformat() if log.at else None,
                       "actor": actor or "system", "action": log.action,
@@ -822,25 +832,43 @@ def activity_feed(limit: int = Query(20, ge=1, le=100),
 
 
 # ------------------------------------------------------------ dashboard
-@router.get("")
-def dashboard(range_days: int = Query(30, alias="range"),
-              db: Session = Depends(get_db), user=Depends(require_login)):
+def _period(from_date: date | None, to_date: date | None,
+            range_days: int | None, today: date) -> tuple[date, date, int]:
+    """The selected window. Dates win over the legacy range parameter."""
+    if from_date or to_date:
+        end = to_date or today
+        start = from_date or end.replace(day=1)
+        if end > today:
+            raise HTTPException(422, "to_date cannot be in the future")
+        if start > end:
+            raise HTTPException(422, "from_date cannot be after to_date")
+        return start, end, (end - start).days + 1
+    if range_days is None:
+        # No dates and no legacy range: the current month is the default.
+        return today.replace(day=1), today, today.day
     if range_days not in RANGE_CHOICES:
         raise HTTPException(422, "range must be one of 7, 30 or 90")
+    return today - timedelta(days=range_days - 1), today, range_days
+
+
+@router.get("")
+def dashboard(from_date: date | None = None, to_date: date | None = None,
+              range_days: int | None = Query(None, alias="range"),
+              db: Session = Depends(get_db), user=Depends(require_login)):
     perms = role_permissions(db, user)
     today = date.today()
-    start = today - timedelta(days=range_days - 1)
+    start, end, days = _period(from_date, to_date, range_days, today)
     admin = is_admin(db, user)
 
-    key = (user.id, tuple(sorted(perms)), range_days, admin)
+    key = (user.id, tuple(sorted(perms)), start, end, admin)
     now = datetime.now(timezone.utc).timestamp()
     if _cache_enabled(db):
         hit = _CACHE.get(key)
         if hit and hit[0] > now:
             return hit[1]
 
-    out = {"as_of": today.isoformat(), "range": range_days,
-           "from": start.isoformat(), "to": today.isoformat(),
+    out = {"as_of": today.isoformat(), "range": days,
+           "from": start.isoformat(), "to": end.isoformat(),
            "generated_at": datetime.now(timezone.utc).isoformat(),
            # legacy sections, unchanged for existing callers
            "stock": None, "purchase_orders": None, "active_products": None,
@@ -854,8 +882,10 @@ def dashboard(range_days: int = Query(30, alias="range"),
            "recent_activity": None, "health": _health(db)}
 
     stock = _stock(db, today) if "stock:read" in perms else None
-    pos = _purchase_orders(db) if "stock:read" in perms else None
-    ageing = ledger.ageing_rows(db, today) if "accounts:read" in perms else None
+    pos = _purchase_orders(db, start, end) if "stock:read" in perms else None
+    # Ageing is measured at the end of the selected window, so it agrees with
+    # the Receivables Ageing report asked for the same date.
+    ageing = ledger.ageing_rows(db, end) if "accounts:read" in perms else None
     if stock is not None:
         out["stock"] = stock
         out["purchase_orders"] = pos
@@ -872,7 +902,7 @@ def dashboard(range_days: int = Query(30, alias="range"),
         out["leads"] = _leads(db, today)
 
     # ---- KPI tiles, with a trend only where history is derivable
-    history = _stock_history(db, start, today) if stock is not None else None
+    history = _stock_history(db, start, end) if stock is not None else None
     counts = _expiry_counts(db, today) if stock is not None else None
 
     def tile(key_: str, label: str, value, href: str, note: str = "",
@@ -885,13 +915,13 @@ def dashboard(range_days: int = Query(30, alias="range"),
 
     if stock is not None:
         tile("units_on_hand", "Units on hand", stock["units_on_hand"],
-             "#/inventory/stock", "Across every warehouse.",
+             "#/inventory/stock", "Across every warehouse, as of today.",
              history["units"], history["points"],
-             f"Daily position, {start:%d %b} to {today:%d %b}.")
+             f"Daily position, {start:%d %b} to {end:%d %b}.")
         tile("batches_in_stock", "Batches in stock", stock["batches_in_stock"],
-             "#/inventory/stock", "Batches with a positive balance.",
+             "#/inventory/stock", "Batches with a positive balance, as of today.",
              history["batches"], history["points"],
-             f"Batches on hand, {start:%d %b} to {today:%d %b}.")
+             f"Batches on hand, {start:%d %b} to {end:%d %b}.")
         tile("expiring", "Expiring ≤90 days", stock["expiring_count"],
              "#/inventory/stock",
              f"{counts['expired']} already expired · {counts['lt30']} within 30 days",
@@ -899,15 +929,15 @@ def dashboard(range_days: int = Query(30, alias="range"),
              "Batches on hand whose expiry falls within 90 days.")
     if pos is not None:
         tile("po_awaiting", "POs awaiting goods", pos["open_count"],
-             "#/purchasing", "Open or part received.",
+             "#/purchasing", "Open or part received, as of today.",
              trend_note="No history yet: order status has no stored timeline.")
     if out["orders_ready"] is not None:
         tile("orders_ready", "Orders ready to dispatch", out["orders_ready"],
-             "#/sales", "Approved and not yet dispatched.",
+             "#/sales", "Approved and not yet dispatched, as of today.",
              trend_note="No history yet: approval time is not stored on the order.")
     if out["approvals_waiting"] is not None:
         tile("approvals_waiting", "Approvals waiting", out["approvals_waiting"],
-             "#/approvals", "Requests still pending a decision.",
+             "#/approvals", "Requests still pending a decision, as of today.",
              trend_note="No history yet: withdrawals have no decision timestamp.")
     if out["leads"] is not None:
         tile("followups_overdue", "Follow-ups overdue", out["leads"]["overdue"],
@@ -915,13 +945,13 @@ def dashboard(range_days: int = Query(30, alias="range"),
              trend_note="No history yet: only the current follow-up date is stored.")
     if out["active_products"] is not None:
         tile("active_products", "Active products", out["active_products"],
-             "#/products", "Status active.",
+             "#/products", "Status active, as of today.",
              trend_note="No history yet: products carry no creation timestamp.")
 
     out["attention"] = _attention(db, user, perms, today, stock, ageing)
 
     if "sales:read" in perms or "stock:read" in perms:
-        chart = _sales_purchases(db, start, today)
+        chart = _sales_purchases(db, start, end)
         sales_visible = "sales:read" in perms
         purchases_visible = "stock:read" in perms
         # One chart serves two permissions. Mask the side the caller cannot see
@@ -948,25 +978,29 @@ def dashboard(range_days: int = Query(30, alias="range"),
     if stock is not None:
         out["stock_by_warehouse"] = _stock_by_warehouse(db)
         out["expiry_watch"] = _expiry_watch(db, today)
-        out["open_pos"] = {"count": pos["open_count"], "rows": pos["open"],
+        out["open_pos"] = {"count": pos["in_range_count"],
+                           "open_total": pos["open_count"],
+                           "from": pos["from"], "to": pos["to"],
+                           "rows": pos["open"],
                            "shown": len(pos["open"]),
-                           "note": "Progress is by quantity received."}
+                           "note": ("Open orders raised in the selected period. "
+                                    "Progress is by quantity received.")}
     if "approval:read" in perms:
         out["approvals"] = _approvals_section(db, user, perms)
     if "sales:read" in perms:
-        out["top_products"] = _top_products(db, start, today)
+        out["top_products"] = _top_products(db, start, end)
         out["category_sales"] = {
             "available": False, "gap": "GAP-D01",
             "note": "No product category or brand is captured, so sales cannot be "
                     "grouped by category without inventing one."}
     if "audit:read" in perms:
-        out["recent_activity"] = _activity(db)
+        out["recent_activity"] = _activity(db, start=start, end=end)
 
     out["insights"] = {
         "pipeline": _pipeline(db, perms),
-        "customers": _customers(db, start, today, perms),
+        "customers": _customers(db, start, end, perms),
         "purchasing": _purchasing(db, today) if stock is not None else None,
-        "corrections": _corrections(db, start, today) if "sales:read" in perms else None,
+        "corrections": _corrections(db, start, end) if "sales:read" in perms else None,
         "hr": _hr_today(db, today) if "hr:read" in perms else None,
     }
 

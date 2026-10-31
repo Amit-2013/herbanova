@@ -28,17 +28,48 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
-               dashRange: 30, dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
+               dashFrom: "", dashTo: "", dashPreset: "month", dashDateError: "", dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
                expiry: {bucket: "all", loading: false, data: null},
                palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
                hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: []}};
 state.rp.filters = {employee_id: "", department: "", branch_id: ""};
 state.rp.opts = null;
+
+/* The Overview window. A preset fills both fields; editing a field clears it.
+   Dates are calendar days in the business time zone, sent to the server as
+   from_date/to_date so the figures are counted there, not filtered here. */
+function dayIso(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dashWindow(key, now = new Date()) {
+  const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (key === "7d" || key === "30d" || key === "90d") {
+    const n = Number(key.slice(0, -1));
+    const s = new Date(t); s.setDate(t.getDate() - (n - 1));
+    return {from: dayIso(s), to: dayIso(t)};
+  }
+  if (key === "last_month") {
+    return {from: dayIso(new Date(t.getFullYear(), t.getMonth() - 1, 1)),
+            to: dayIso(new Date(t.getFullYear(), t.getMonth(), 0))};
+  }
+  if (key === "fy") {
+    const y = t.getMonth() >= 3 ? t.getFullYear() : t.getFullYear() - 1;
+    return {from: `${y}-04-01`, to: dayIso(t)};
+  }
+  return {from: dayIso(new Date(t.getFullYear(), t.getMonth(), 1)), to: dayIso(t)};
+}
+{ const w = dashWindow("month"); state.dashFrom = w.from; state.dashTo = w.to; }
 try {
-  const saved = Number(localStorage.getItem("hb.dashRange"));
-  if ([7, 30, 90].includes(saved)) state.dashRange = saved;
+  const from = localStorage.getItem("hb.dashFrom");
+  const to = localStorage.getItem("hb.dashTo");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from || "") && /^\d{4}-\d{2}-\d{2}$/.test(to || "")
+      && from <= to) {
+    state.dashFrom = from; state.dashTo = to;
+    state.dashPreset = localStorage.getItem("hb.dashPreset") || "";
+  }
 } catch (e) { /* storage blocked */ }
 const can = p => state.perms.has(p);
+const dashQuery = () => `from_date=${encodeURIComponent(state.dashFrom)}&to_date=${encodeURIComponent(state.dashTo)}`;
 
 /* ---------- server calls ---------- */
 async function api(path, opts = {}) {
@@ -222,7 +253,7 @@ async function loadAll() {
     canAccounts ? api("/api/accounts/outstanding") : none,
     canAccounts ? api("/api/accounts/payments") : none,
     canAccounts ? api("/api/accounts/ageing") : none,
-    api(`/api/dashboard?range=${state.dashRange}`)]);
+    api(`/api/dashboard?${dashQuery()}`)]);
   if (!state.user) return;
   // The register is load-bearing for the Overview: keep the last good copy if a
   // refresh fails rather than blanking the module panel.
@@ -452,9 +483,15 @@ function renderDash() {
   $("#dashGreet").textContent = u ? `${greeting()}, ${u.username}` : "Overview";
   $("#dashDate").textContent = new Date().toLocaleDateString("en-IN", {
     weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  $$("[data-dash-range]").forEach(b =>
-    b.setAttribute("aria-pressed", String(Number(b.dataset.dashRange) === state.dashRange)));
-  $("#dashNewSo").classList.toggle("hide", !can("sales:write"));
+  const fromEl = $("#dashFrom"), toEl = $("#dashTo");
+  const today = dayIso(new Date());
+  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = state.dashFrom; }
+  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = state.dashTo; }
+  $$("[data-dash-preset]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.dashPreset === state.dashPreset)));
+  const dateErr = $("#dashDateErr");
+  dateErr.textContent = state.dashDateError;
+  dateErr.classList.toggle("hide", !state.dashDateError);
   $("#dashReset").classList.toggle("hide", !can("db:reset"));
 
   $("#dashSkeleton").classList.toggle("hide", !(loading && !d));
@@ -476,9 +513,9 @@ function renderDash() {
 
   const period = d.from === d.to ? fmtDate(d.from) : `${fmtDate(d.from)} to ${fmtDate(d.to)}`;
   $("#dashUpdated").innerHTML = loading
-    ? `Refreshing the ${esc(String(d.range))}-day period…`
-    : `As at <b>${esc(fmtDate(d.as_of))}</b> · ${esc(String(d.range))}-day period, `
-      + `${esc(period)} · updated ${esc(fmtStamp(d.generated_at))}`;
+    ? `Refreshing ${esc(period)}…`
+    : `Selected period <b>${esc(period)}</b> (${esc(plural(d.range, "day"))}) · `
+      + `snapshot cards are as at ${esc(fmtDate(d.as_of))} · updated ${esc(fmtStamp(d.generated_at))}`;
 
   renderAttention(d.attention || []);
   renderKpis(d.kpis || []);
@@ -832,7 +869,11 @@ function renderOpenPos(o) {
     return;
   }
   const rows = o.rows || [];
-  note.textContent = (o.count > o.shown ? `Showing ${o.shown} of ${o.count}. ` : "") + (o.note || "");
+  const total = o.open_total ?? o.count ?? rows.length;
+  const inRange = o.count ?? rows.length;
+  note.textContent = (inRange > o.shown ? `Showing ${o.shown} of ${inRange} raised in this period. ` : "")
+    + (total > inRange ? `${total - inRange} open order${total - inRange === 1 ? "" : "s"} raised outside it. ` : "")
+    + (o.note || "");
   el.innerHTML = rows.length ? rows.map(p => {
     const pct = Math.max(0, Math.min(100, Number(p.pct_received) || 0));
     return `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button>
@@ -1081,7 +1122,7 @@ async function loadDashboard() {
   state.dashLoading = true;
   state.dashError = null;
   renderDash();
-  const res = await api(`/api/dashboard?range=${state.dashRange}`);
+  const res = await api(`/api/dashboard?${dashQuery()}`);
   if (seq !== state.dashSeq || !state.user) return;
   state.dashLoading = false;
   if (res.ok && res.body && !Array.isArray(res.body)) {
@@ -1096,13 +1137,29 @@ async function loadDashboard() {
   if (state.dashboard && state.expiry.bucket !== "all") setExpiryBucket(state.expiry.bucket);
 }
 
-function setDashRange(days) {
-  if (![7, 30, 90].includes(days) || days === state.dashRange) return;
-  state.dashRange = days;
-  try { localStorage.setItem("hb.dashRange", String(days)); } catch (e) { /* storage blocked */ }
-  $$("[data-dash-range]").forEach(b =>
-    b.setAttribute("aria-pressed", String(Number(b.dataset.dashRange) === days)));
+function applyDashDates(from, to, preset) {
+  const today = dayIso(new Date());
+  let problem = "";
+  if (!from || !to) problem = "Choose both dates, or pick a preset.";
+  else if (from > to) problem = "The From date cannot be after the To date.";
+  else if (to > today) problem = "The To date cannot be in the future.";
+  state.dashDateError = problem;
+  if (problem) { renderDash(); return; }
+  state.dashFrom = from;
+  state.dashTo = to;
+  state.dashPreset = preset || "";
+  try {
+    localStorage.setItem("hb.dashFrom", from);
+    localStorage.setItem("hb.dashTo", to);
+    localStorage.setItem("hb.dashPreset", state.dashPreset);
+  } catch (e) { /* storage blocked */ }
+  renderDash();
   loadDashboard();
+}
+
+function setDashPreset(key) {
+  const w = dashWindow(key);
+  applyDashDates(w.from, w.to, key);
 }
 
 /* ---------- command palette ---------- */
@@ -3861,8 +3918,8 @@ document.addEventListener("click", e => {
   }
   const tab = e.target.closest("[data-tab]");
   if (tab) { location.hash = "#/inventory/" + tab.dataset.tab; return; }
-  const dr = e.target.closest("[data-dash-range]");
-  if (dr) { setDashRange(Number(dr.dataset.dashRange)); return; }
+  const dp = e.target.closest("[data-dash-preset]");
+  if (dp) { setDashPreset(dp.dataset.dashPreset); return; }
   const expb = e.target.closest("[data-eb]");
   if (expb) { setExpiryBucket(expb.dataset.eb); return; }
   const pf = e.target.closest("[data-pf]");
@@ -3961,6 +4018,9 @@ document.addEventListener("input", e => {
 document.addEventListener("change", e => {
   if (e.target.closest("#poForm")) syncPoLines();
   if (e.target.id === "rpCategory") { state.rpCategory = e.target.value; drawRpTabs(); }
+  if (e.target.id === "dashFrom" || e.target.id === "dashTo") {
+    applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
+  }
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
