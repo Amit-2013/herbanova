@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+alembic
+pydantic>=2
+pydantic-settings
+argon2-cffi
+pyjwt
+slowapi
+pytest
+httpx
+openpyxl
+reportlab==5.0.1
+sentry-sdk

@@ -1,0 +1,169 @@
+"""Shared HR helpers: geofence distance, attendance upsert, leave balances,
+working-day calendar and approval request creation.
+
+Rules live here so the API and the approval handlers cannot drift apart.
+"""
+import math
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..models.core import ApprovalRequest
+from ..models.hr import (Attendance, Holiday, LeaveApplication, LeaveBalance, LeaveType, Shift,
+                         WorkLocation)
+from ..models.users import Employee
+
+ZERO = Decimal(0)
+
+# Office timings are wall-clock times in the business's time zone. Attendance is
+# stored as a UTC instant, so late/early must be compared after converting to
+# India time; otherwise a 09:30 shift reads as a 04:00 UTC start.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def business_today() -> date:
+    return datetime.now(IST).date()
+
+
+def local_time(dt: datetime) -> datetime:
+    """The attendance instant as the office wall clock sees it."""
+    return dt.astimezone(IST) if dt.tzinfo else dt.replace(tzinfo=IST)
+
+
+def shift_late_minutes(shift: Shift | None, check_in: datetime | None) -> int:
+    """Minutes after the shift start, less the configured grace period."""
+    if shift is None or check_in is None:
+        return 0
+    local = local_time(check_in)
+    start = local.replace(hour=shift.start_time.hour, minute=shift.start_time.minute,
+                          second=0, microsecond=0)
+    return max(0, int((local - start).total_seconds() // 60) - (shift.grace_minutes or 0))
+
+
+def shift_early_minutes(shift: Shift | None, check_out: datetime | None) -> int:
+    """Minutes before the shift end. Overnight shifts end on the next day."""
+    if shift is None or check_out is None:
+        return 0
+    local = local_time(check_out)
+    end = local.replace(hour=shift.end_time.hour, minute=shift.end_time.minute,
+                        second=0, microsecond=0)
+    start = local.replace(hour=shift.start_time.hour, minute=shift.start_time.minute,
+                          second=0, microsecond=0)
+    if end <= start:
+        end += timedelta(days=1)
+    return max(0, int((end - local).total_seconds() // 60))
+
+
+def default_shift(db: Session) -> Shift | None:
+    """The general office shift employees are placed on unless another is chosen."""
+    return db.scalar(select(Shift).where(Shift.name == "General", Shift.status == "active"))
+
+
+def employee_for_user(db: Session, user) -> Employee | None:
+    if not getattr(user, "employee_id", None):
+        return None
+    return db.get(Employee, user.employee_id)
+
+
+def distance_m(lat1, lon1, lat2, lon2) -> float:
+    """Haversine distance in metres."""
+    r = 6371000
+    p1, p2 = math.radians(float(lat1)), math.radians(float(lat2))
+    dp = math.radians(float(lat2) - float(lat1))
+    dl = math.radians(float(lon2) - float(lon1))
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def geofence_result(office: WorkLocation | None, lat, lon) -> str:
+    if office is None or office.latitude is None or office.longitude is None:
+        return "na"
+    if lat is None or lon is None:
+        return "unavailable"
+    radius = office.geofence_radius_m or 200
+    return "inside" if distance_m(lat, lon, office.latitude, office.longitude) <= radius else "outside"
+
+
+def get_or_create_attendance(db: Session, employee_id: int, day: date) -> Attendance:
+    row = db.scalar(select(Attendance).where(Attendance.employee_id == employee_id,
+                                             Attendance.date == day))
+    if row is None:
+        row = Attendance(employee_id=employee_id, date=day, status="present")
+        db.add(row)
+        db.flush()
+    return row
+
+
+def apply_attendance_for_leave(db: Session, application: LeaveApplication,
+                               leave_type: LeaveType) -> None:
+    """Approved leave is reflected in attendance without duplicating the leave row."""
+    day = application.date_from
+    status = "paid_leave" if leave_type.kind == "paid" else "unpaid_leave"
+    while day <= application.date_to:
+        row = get_or_create_attendance(db, application.employee_id, day)
+        if row.status != "od":
+            row.status = status
+            row.remarks = f"Leave {leave_type.code} (application {application.id})"
+        day += timedelta(days=1)
+
+
+def apply_attendance_for_od(db: Session, od) -> None:
+    day = od.date
+    end = od.end_date or od.date
+    while day <= end:
+        row = get_or_create_attendance(db, od.employee_id, day)
+        if row.status not in ("paid_leave", "unpaid_leave"):
+            row.status = "od"
+            row.remarks = f"On duty: {od.purpose} (OD {od.id})"
+        day += timedelta(days=1)
+
+
+def leave_balance(db: Session, employee_id: int, leave_type_id: int, year: int) -> LeaveBalance:
+    bal = db.scalar(select(LeaveBalance).where(
+        LeaveBalance.employee_id == employee_id,
+        LeaveBalance.leave_type_id == leave_type_id, LeaveBalance.year == year))
+    if bal is None:
+        lt = db.get(LeaveType, leave_type_id)
+        bal = LeaveBalance(employee_id=employee_id, leave_type_id=leave_type_id, year=year,
+                           entitled=lt.default_days if lt else ZERO)
+        db.add(bal)
+        db.flush()
+    return bal
+
+
+def working_days(db: Session, employee: Employee, year: int, month: int) -> list[date]:
+    shift = db.get(Shift, employee.shift_id) if employee.shift_id else None
+    offs = set(shift.weekly_offs if shift else [5, 6])
+    first = date(year, month, 1)
+    last = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
+    holidays = {h.date for h in db.scalars(select(Holiday).where(
+        Holiday.date >= first, Holiday.date <= last)).all()
+        if (h.location_id is None or h.location_id == employee.office_id)
+        and (h.branch_id is None or h.branch_id == employee.branch_id)}
+    out, day = [], first
+    while day <= last:
+        if day.weekday() not in offs and day not in holidays:
+            out.append(day)
+        day += timedelta(days=1)
+    return out
+
+
+def request_approval(db: Session, *, record_type: str, record_id: int, requested_by: int,
+                     reasons: list[str], detail: dict, document_number: str | None = None,
+                     subject: str | None = None, requested_dates: str | None = None,
+                     approver_role: str | None = None) -> ApprovalRequest:
+    ar = ApprovalRequest(
+        record_type=record_type, record_id=record_id, reasons=reasons,
+        requested_by=requested_by, detail=detail,
+        request_no=f"AP-{datetime.now():%Y%m%d}-{record_id:05d}"[:40],
+        document_number=document_number, subject=subject, requested_dates=requested_dates,
+        pending_approver_role=approver_role)
+    db.add(ar)
+    db.flush()
+    return ar
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)

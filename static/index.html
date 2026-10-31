@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HERBANOVA Business Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- Sign in -->
+<section id="login">
+  <div class="brand">
+    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+    <div>
+      <h1>One controlled record of products, stock and orders.</h1>
+      <ul class="assure">
+        <li>Every change is checked by the server before it is saved.</li>
+        <li>Each entry is tied to a person and written to an audit trail.</li>
+        <li>Duplicate receipts and negative stock are refused.</li>
+      </ul>
+    </div>
+    <small>Internal system. Demonstration data is fictional.</small>
+  </div>
+  <div class="formside">
+    <form class="formbox" id="loginForm" novalidate>
+      <h2>Sign in</h2>
+      <p class="sub">Use the account issued to you.</p>
+      <label for="u">Username</label>
+      <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false">
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password">
+      <button class="btn block" id="loginBtn" type="submit">Sign in</button>
+      <div class="err" id="lerr" role="alert"></div>
+    </form>
+  </div>
+</section>
+
+<!-- App shell -->
+<div id="shell" class="hide">
+  <aside class="side">
+    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+    <nav aria-label="Modules">
+      <a class="nav on" href="#/dash" data-v="dash">Overview</a>
+      <a class="nav" href="#/leads" data-v="leads" id="navLeads">Leads<span class="count hide" id="ldCount"></span></a>
+      <a class="nav" href="#/lost" data-v="lost">Lost leads</a>
+      <a class="nav" href="#/followups" data-v="followups">Today's follow-ups</a>
+      <a class="nav" href="#/customers" data-v="customers">Customers</a>
+      <a class="nav" href="#/sales" data-v="sales">Sales orders<span class="count hide" id="soCount"></span></a>
+      <a class="nav hide" href="#/billing" data-v="billing" id="navBilling">Billing</a>
+      <a class="nav" href="#/purchasing" data-v="purchasing">Purchases<span class="count hide" id="poCount"></span></a>
+      <a class="nav" href="#/products" data-v="products">Products</a>
+      <a class="nav" href="#/inventory" data-v="inventory">Inventory</a>
+      <a class="nav hide" href="#/suppliers" data-v="suppliers" id="navSuppliers">Suppliers</a>
+      <a class="nav" href="#/distributors" data-v="distributors">Distributors</a>
+      <a class="nav" href="#/approvals" data-v="approvals">Approvals<span class="count hide" id="apCount"></span></a>
+      <a class="nav hide" href="#/accounts" data-v="accounts" id="navAccounts">Accounting &amp; Finance</a>
+      <a class="nav" href="#/reports" data-v="reports" id="navReports">Reports</a>
+      <a class="nav hide" href="#/hr" data-v="hr" id="navHr">HR Management</a>
+      <a class="nav hide" href="#/settings" data-v="settings" id="navSettings">Settings &amp; Administration</a>
+    </nav>
+    <div class="who">
+      <div class="who-id"><b id="who"></b><span class="pill" id="role"></span></div>
+      <button class="link-btn" id="out" type="button">Sign out</button>
+      <div class="env" id="env">Demo build</div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <header class="page-head">
+      <div>
+        <h1 id="title">Overview</h1>
+        <p id="subtitle"></p>
+      </div>
+      <div class="head-actions" id="actions"></div>
+    </header>
+
+    <!-- Overview -->
+    <section id="v-dash" class="view">
+      <div class="callout hide" id="whCallout">
+        <div><b>No warehouse has been added yet.</b> Goods cannot be received until one exists.</div>
+        <a class="btn sm" href="#/inventory/warehouses">Add a warehouse</a>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="cols">
+        <div class="panel">
+          <div class="panel-h"><h2>Stock to watch</h2><span class="muted" id="watchNote"></span></div>
+          <ul class="rows" id="watch"></ul>
+        </div>
+        <div class="panel">
+          <div class="panel-h"><h2>Waiting to be received</h2><a class="link-btn" href="#/purchasing">All purchase orders</a></div>
+          <ul class="rows" id="openpos"></ul>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><h2>Module status</h2><span class="muted" id="prog"></span></div>
+        <div class="meter" aria-hidden="true"><i id="barfill"></i></div>
+        <ul class="rows" id="mods"></ul>
+      </div>
+    </section>
+
+    <!-- Products -->
+    <section id="v-products" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="pq" type="search" placeholder="Search by SKU or name" aria-label="Search products">
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>HSN code</th><th>SKU</th><th>Name</th><th>Pack size</th><th class="n">MRP (₹)</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="prows"></tbody>
+        </table></div>
+        <div class="empty hide" id="pempty"></div>
+      </div>
+    </section>
+
+    <!-- Inventory -->
+    <section id="v-inventory" class="view hide">
+      <div class="seg" role="tablist" aria-label="Inventory sections">
+        <button role="tab" id="t-stock" aria-controls="i-stock" aria-selected="true" data-tab="stock">Stock on hand</button>
+        <button role="tab" id="t-ledger" aria-controls="i-ledger" aria-selected="false" data-tab="ledger">Stock ledger</button>
+        <button role="tab" id="t-warehouses" aria-controls="i-warehouses" aria-selected="false" data-tab="warehouses">Warehouses</button>
+      </div>
+
+      <div id="i-stock" role="tabpanel" aria-labelledby="t-stock" class="panel flush">
+        <div class="toolbar">
+          <input id="sq" type="search" placeholder="Search SKU, product or batch" aria-label="Search stock">
+          <select id="swh" aria-label="Warehouse"><option value="">All warehouses</option></select>
+          <label class="check"><input type="checkbox" id="sin" checked> Hide empty batches</label>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Product</th><th>Batch</th><th>Warehouse</th><th>Shelf life</th><th>Owner</th><th class="n">On hand</th></tr></thead>
+          <tbody id="srows"></tbody>
+        </table></div>
+        <div class="empty hide" id="sempty"></div>
+      </div>
+
+      <div id="i-ledger" role="tabpanel" aria-labelledby="t-ledger" class="panel flush hide">
+        <div class="toolbar">
+          <input id="lq" type="search" placeholder="Search SKU, batch or reference" aria-label="Search ledger">
+          <select id="ltype" aria-label="Movement type"><option value="">All movements</option></select>
+          <span class="muted" id="lnote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>When</th><th>Movement</th><th>Product</th><th>Batch</th><th>Warehouse</th><th>Reference</th><th>By</th><th class="n">Quantity</th></tr></thead>
+          <tbody id="lrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="lempty"></div>
+      </div>
+
+      <div id="i-warehouses" role="tabpanel" aria-labelledby="t-warehouses" class="panel flush hide">
+        <div class="tw"><table>
+          <thead><tr><th>Warehouse</th><th class="n">Batches in stock</th><th class="n">Units on hand</th></tr></thead>
+          <tbody id="wrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="wempty"></div>
+      </div>
+    </section>
+
+    <!-- Purchasing -->
+    <section id="v-purchasing" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="oq" type="search" placeholder="Search PO number or supplier" aria-label="Search purchase orders">
+          <div class="seg compact" role="group" aria-label="Filter by status">
+            <button type="button" data-pf="all" aria-pressed="true">All</button>
+            <button type="button" data-pf="open" aria-pressed="false">Open</button>
+            <button type="button" data-pf="partially_received" aria-pressed="false">Part received</button>
+            <button type="button" data-pf="received" aria-pressed="false">Received</button>
+            <button type="button" data-pf="cancelled" aria-pressed="false">Cancelled</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>PO number</th><th>Supplier</th><th>Created</th><th class="n">Lines</th><th class="n">Receipts</th><th class="n">Value (₹)</th><th>Status</th></tr></thead>
+          <tbody id="orows"></tbody>
+        </table></div>
+        <div class="empty hide" id="oempty"></div>
+      </div>
+    </section>
+
+    <!-- Suppliers (Module Phase 2) -->
+    <section id="v-suppliers" class="view hide">
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Supplier records</h2><span class="muted">Records are blocked, never deleted.</span></div>
+        <div class="toolbar">
+          <input id="supq" type="search" placeholder="Search code, name or GSTIN" aria-label="Search suppliers">
+          <div class="seg compact" role="group" aria-label="Filter suppliers">
+            <button type="button" data-sf2="all" aria-pressed="true">All</button>
+            <button type="button" data-sf2="active" aria-pressed="false">Active</button>
+            <button type="button" data-sf2="blocked" aria-pressed="false">Blocked</button>
+            <button type="button" data-sf2="incomplete" aria-pressed="false">Needs completion</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Supplier</th><th>GSTIN</th><th>State</th><th>Kind</th><th class="n">Terms</th><th class="n">Orders</th><th>Status</th></tr></thead>
+          <tbody id="suprows"></tbody>
+        </table></div>
+        <div class="empty hide" id="supempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Bank-detail changes</h2><span class="muted">A change needs a different person to approve it.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Supplier</th><th>Bank</th><th>Account</th><th>Requested by</th><th>When</th><th>Status</th><th></th></tr></thead>
+          <tbody id="bankrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="bankempty"></div>
+      </div>
+    </section>
+
+    <!-- Sales orders -->
+    <section id="v-sales" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="soq" type="search" placeholder="Search order number or distributor" aria-label="Search sales orders">
+          <div class="seg compact" role="group" aria-label="Filter by status">
+            <button type="button" data-sf="all" aria-pressed="true">All</button>
+            <button type="button" data-sf="draft" aria-pressed="false">Draft</button>
+            <button type="button" data-sf="pending_approval" aria-pressed="false">Awaiting approval</button>
+            <button type="button" data-sf="approved" aria-pressed="false">To dispatch</button>
+            <button type="button" data-sf="dispatched" aria-pressed="false">Dispatched</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Order</th><th>Distributor</th><th>Created</th><th class="n">Lines</th><th class="n">Value (₹)</th><th>Status</th></tr></thead>
+          <tbody id="sorows"></tbody>
+        </table></div>
+        <div class="empty hide" id="soempty"></div>
+      </div>
+    </section>
+
+    <!-- Billing (Module Phase 4) -->
+    <section id="v-billing" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="biq" type="search" placeholder="Search invoice number or buyer" aria-label="Search invoices">
+          <div class="seg compact" role="group" aria-label="Filter invoices">
+            <button type="button" data-if="all" aria-pressed="true">All</button>
+            <button type="button" data-if="issued" aria-pressed="false">Issued</button>
+            <button type="button" data-if="cancelled" aria-pressed="false">Cancelled</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Invoice</th><th>Date</th><th>Buyer</th><th class="n">Value (₹)</th><th class="n">Credited (₹)</th><th>Status</th><th></th></tr></thead>
+          <tbody id="invrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="invempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Credit and debit notes</h2><span class="muted">A note is linked to the invoice it corrects and cannot exceed it. Neither note can be edited after issue.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Document</th><th>Invoice</th><th>Date</th><th>Kind</th><th class="n">Value (₹)</th><th>Status</th></tr></thead>
+          <tbody id="noterows"></tbody>
+        </table></div>
+        <div class="empty hide" id="noteempty"></div>
+      </div>
+    </section>
+
+    <!-- Approvals -->
+    <section id="v-accounts" class="view hide">
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables</h2><span class="muted" id="recvSub">What distributors still owe on issued invoices.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Invoice</th><th>Date</th><th>Distributor</th><th class="n">Value (₹)</th><th class="n">Received (₹)</th><th class="n">Outstanding (₹)</th></tr></thead>
+          <tbody id="arows"></tbody>
+        </table></div>
+        <div class="empty hide" id="aempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Ageing of outstanding invoices</h2><span class="muted" id="ageSub">Days since each invoice date, in 0-30, 31-60, 61-90 and 90+ buckets.</span></div>
+        <div class="toolbar" style="padding:12px 18px 0">
+          <input id="ageAsOf" type="date" aria-label="Ageing as at">
+          <button class="btn ghost" type="button" data-act="load-ageing">Rebuild ageing</button>
+          <span class="muted" id="ageTot"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Invoice</th><th>Date</th><th>Distributor</th><th class="n">Days</th><th>Bucket</th><th class="n">Outstanding (₹)</th></tr></thead>
+          <tbody id="agerows"></tbody>
+        </table></div>
+        <div class="empty hide" id="ageempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Payables</h2><span class="muted" id="paySub">What the business still owes suppliers for goods received.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Order</th><th>Supplier</th><th class="n">Received value (₹)</th><th class="n">Paid (₹)</th><th class="n">Outstanding (₹)</th></tr></thead>
+          <tbody id="payrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="payempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Receipts and payments</h2><span class="muted">An entry is never edited: a mistake is corrected by recording the opposite one.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Entry</th><th>Date</th><th>Kind</th><th>Party</th><th>Against</th><th class="n">Amount (₹)</th><th>Mode</th></tr></thead>
+          <tbody id="enrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="enempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>GST register — outward supplies</h2><span class="muted">From the issued invoices, credit and debit notes. Input tax is not captured yet, and this is not a filing file.</span></div>
+        <div class="toolbar" style="padding:12px 18px 0">
+          <input id="gstFrom" type="date" aria-label="Register from">
+          <input id="gstTo" type="date" aria-label="Register to">
+          <button class="btn ghost" type="button" data-act="load-gst">Build register</button>
+          <span class="muted" id="gstTot"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Document</th><th>Date</th><th>Buyer</th><th>GSTIN</th><th>POS</th><th class="n">Taxable (₹)</th><th class="n">CGST (₹)</th><th class="n">SGST (₹)</th><th class="n">IGST (₹)</th><th class="n">Total (₹)</th></tr></thead>
+          <tbody id="gstrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="gstempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Trial balance</h2><span class="muted">Built from the documents, so both sides must agree. A difference is shown, never hidden.</span></div>
+        <div class="toolbar" style="padding:12px 18px 0">
+          <input id="tbAsOf" type="date" aria-label="Trial balance as at">
+          <button class="btn ghost" type="button" data-act="load-tb">Build trial balance</button>
+          <span class="muted" id="tbBal"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Account</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th></tr></thead>
+          <tbody id="tbrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="tbempty"></div>
+      </div>
+    </section>
+
+    <section id="v-approvals" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <div class="seg compact" role="group" aria-label="Filter requests">
+            <button type="button" data-af="pending" aria-pressed="true">Waiting</button>
+            <button type="button" data-af="decided" aria-pressed="false">Decided</button>
+            <button type="button" data-af="all" aria-pressed="false">All</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Request</th><th>Type</th><th>Document</th><th>Requester</th><th>Submitted</th><th>Status</th><th>Decision remarks</th></tr></thead>
+          <tbody id="aprows"></tbody>
+        </table></div>
+        <div class="empty hide" id="apempty"></div>
+      </div>
+    </section>
+
+    <!-- Distributors -->
+    <section id="v-distributors" class="view hide">
+      <div class="panel flush">
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Distributor</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th class="n">Available (₹)</th><th></th></tr></thead>
+          <tbody id="drows"></tbody>
+        </table></div>
+        <div class="empty hide" id="dempty"></div>
+      </div>
+    </section>
+    <!-- Tax and discounts (Module Phase 3) -->
+    <section id="v-tax" class="view hide">
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Company tax profile</h2><span class="muted" id="companyNote"></span></div>
+        <div class="toolbar">
+          <span class="muted">This is the seller on every tax document: its GSTIN, its state and its invoice series.</span>
+          <button class="btn" data-act="edit-company" type="button">Edit company profile</button>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody id="companyRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="companyEmpty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>GST rate master</h2><span class="muted">One rate in force per HSN per date. A new rate closes the open window the day before it starts.</span></div>
+        <div class="toolbar">
+          <input id="rateq" type="search" placeholder="Search HSN or description" aria-label="Search GST rates">
+          <div class="seg compact" role="group" aria-label="Filter rates">
+            <button type="button" data-rf="all" aria-pressed="true">All</button>
+            <button type="button" data-rf="current" aria-pressed="false">In force today</button>
+          </div>
+          <button class="btn" data-act="new-rate" type="button">New rate</button>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>HSN</th><th>Description</th><th class="n">CGST %</th><th class="n">SGST %</th><th class="n">IGST %</th><th class="n">Cess %</th><th>From</th><th>To</th><th>Status</th><th></th></tr></thead>
+          <tbody id="rateRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="rateEmpty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Discount slabs</h2><span class="muted">The discount policy as data: a band, a percentage, and the point above which a second person must approve it.</span></div>
+        <div class="toolbar">
+          <button class="btn" data-act="new-slab" type="button">New slab</button>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Name</th><th>Applies to</th><th>Band</th><th class="n">Discount %</th><th class="n">Approval above %</th><th>From</th><th>To</th><th>Status</th><th></th></tr></thead>
+          <tbody id="slabRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="slabEmpty"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-h"><h2>Tax quote</h2><span class="muted">The arithmetic an invoice line would use: discount first, then the place of supply decides the split.</span></div>
+        <form id="quoteForm" novalidate>
+          <div class="row3">
+            <div><label for="q-hsn">HSN</label><input id="q-hsn" name="hsn" inputmode="numeric" placeholder="2106" autocomplete="off"></div>
+            <div><label for="q-qty">Quantity</label><input id="q-qty" name="qty" inputmode="decimal" placeholder="10" autocomplete="off"></div>
+            <div><label for="q-price">Unit price (₹)</label><input id="q-price" name="unit_price" inputmode="decimal" placeholder="199.00" autocomplete="off"></div>
+          </div>
+          <div class="row3">
+            <div><label for="q-disc">Discount %</label><input id="q-disc" name="discount_percent" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+            <div><label for="q-state">Place of supply (buyer state)</label><select id="q-state" name="buyer_state"></select></div>
+            <div><label for="q-dist">Distributor</label><select id="q-dist" name="distributor_id"><option value="">None</option></select></div>
+          </div>
+          <div class="actions"><button class="btn" type="submit">Quote the line</button></div>
+          <div class="err" role="alert"></div>
+        </form>
+        <div id="quoteOut"></div>
+      </div>
+    </section>
+
+    <!-- Leads -->
+    <section id="v-leads" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="ldq" type="search" placeholder="Search name, company, phone, email or lead number" aria-label="Search leads">
+          <div class="seg compact" role="group" aria-label="Owner">
+            <button type="button" data-lo="all" aria-pressed="true">All owners</button>
+            <button type="button" data-lo="mine" aria-pressed="false">My leads</button>
+          </div>
+          <div class="seg compact" role="group" aria-label="Filter leads">
+            <button type="button" data-lf="open" aria-pressed="true">Open</button>
+            <button type="button" data-lf="overdue" aria-pressed="false">Overdue</button>
+            <button type="button" data-lf="today" aria-pressed="false">Due today</button>
+            <button type="button" data-lf="week" aria-pressed="false">Next 7 days</button>
+            <button type="button" data-lf="closed" aria-pressed="false">Closed</button>
+            <button type="button" data-lf="all" aria-pressed="false">All</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Lead</th><th>Owner</th><th>Source</th><th>Status</th><th>Next follow-up</th><th>Last activity</th></tr></thead>
+          <tbody id="ldrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="ldempty"></div>
+      </div>
+    </section>
+    <!-- Lost leads -->
+    <section id="v-lost" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar"><input id="lostq" type="search" placeholder="Search lost leads" aria-label="Search lost leads"></div>
+        <div class="tw"><table>
+          <thead><tr><th>Lead</th><th>Customer</th><th>Reason lost</th><th>Assigned to</th><th>Source</th><th>Last updated</th></tr></thead>
+          <tbody id="lostrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="lostempty"></div>
+      </div>
+    </section>
+
+    <!-- Today's follow-ups -->
+    <section id="v-followups" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="fuq" type="search" placeholder="Search follow-ups" aria-label="Search follow-ups">
+          <div class="seg compact" role="group" aria-label="Follow-up window">
+            <button type="button" data-fuf="today" aria-pressed="true">Due today</button>
+            <button type="button" data-fuf="overdue" aria-pressed="false">Overdue</button>
+            <button type="button" data-fuf="upcoming" aria-pressed="false">Upcoming</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Lead</th><th>Customer</th><th>Assigned to</th><th>Last remark</th><th>Next follow-up</th><th></th></tr></thead>
+          <tbody id="furows"></tbody>
+        </table></div>
+        <div class="empty hide" id="fuempty"></div>
+      </div>
+    </section>
+
+    <!-- Customers (same master as distributors) -->
+    <section id="v-customers" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <input id="cuq" type="search" placeholder="Search customer code, name, GSTIN or territory" aria-label="Search customers">
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Customer</th><th>Territory</th><th>GSTIN</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th>Status</th><th></th></tr></thead>
+          <tbody id="curows"></tbody>
+        </table></div>
+        <div class="empty hide" id="cuempty"></div>
+      </div>
+    </section>
+
+    <!-- HR Management (people, attendance, leave, payroll) -->
+    <section id="v-hr" class="view hide">
+      <div class="stats" id="hrStats"></div>
+      <div class="panel flush">
+        <div class="panel-h"><h2>HR workspace</h2><span class="muted">Employee records, attendance, leave, on-duty and payroll.</span></div>
+        <div class="toolbar">
+          <button class="btn" data-act="hr-employees" type="button">Employees</button>
+          <button class="btn ghost" data-act="hr-attendance" type="button">Attendance</button>
+          <button class="btn ghost" data-act="hr-leave" type="button">Leave</button>
+          <button class="btn ghost" data-act="hr-od" type="button">On duty</button>
+          <button class="btn ghost" data-act="hr-payroll" type="button">Payroll</button>
+          <button class="btn ghost hide" data-act="hr-shifts" type="button">Shift settings</button>
+        </div>
+        <div id="hrDirectory">
+          <div class="tw"><table>
+            <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Status</th></tr></thead>
+            <tbody id="hrrows"></tbody>
+          </table></div>
+          <div class="empty hide" id="hrempty"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings and administration -->
+    <section id="v-settings" class="view hide">
+      <div class="panel">
+        <div class="panel-h"><h2>Settings &amp; Administration</h2><span class="muted">Configuration and controlled records.</span></div>
+        <div class="toolbar">
+          <a class="btn ghost" href="#/users">Users, roles and employees</a>
+          <a class="btn ghost" href="#/tax">Tax, discounts and company profile</a>
+          <a class="btn ghost" href="#/audit">Audit trail</a>
+          <a class="btn ghost" href="#/hr">HR policies and offices</a>
+        </div>
+        <div class="note">Each area enforces its own permissions on the server. A link is hidden only as a convenience; the backend refuses an unauthorised request.</div>
+      </div>
+      <div class="panel flush">
+        <div class="panel-h"><h2>Employees</h2><span class="muted">The same master used by HR.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Designation</th><th>Status</th></tr></thead>
+          <tbody id="setEmprows"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- Reports -->
+    <section id="v-reports" class="view hide">
+      <div class="panel">
+        <div class="toolbar" style="padding:0 0 12px">
+          <input id="rpq" type="search" placeholder="Search report names" aria-label="Search reports">
+          <select id="rpCategory" aria-label="Filter by report category"><option value="">All categories</option></select>
+        </div>
+        <div class="seg compact" role="group" aria-label="Choose a report" id="rpTabs"></div>
+        <p class="sub" id="rpDesc" style="margin:10px 0 0"></p>
+        <div class="toolbar hide" id="rpPeriod" style="margin-top:12px;padding:0">
+          <label for="rpFrom" style="margin:0">From</label><input id="rpFrom" type="date" style="max-width:160px">
+          <label for="rpTo" style="margin:0">To</label><input id="rpTo" type="date" style="max-width:160px">
+          <div class="seg compact" role="group" aria-label="Quick periods">
+            <button type="button" data-rpp="all" aria-pressed="true">All time</button>
+            <button type="button" data-rpp="month" aria-pressed="false">This month</button>
+            <button type="button" data-rpp="30" aria-pressed="false">Last 30 days</button>
+            <button type="button" data-rpp="fy" aria-pressed="false">This financial year</button>
+          </div>
+        </div>
+        <div class="toolbar hide" id="rpFilters" style="margin-top:8px;padding:0" role="group" aria-label="Narrow the report">
+          <select id="rpEmployee" aria-label="Filter by employee" class="hide"><option value="">All employees</option></select>
+          <select id="rpDepartment" aria-label="Filter by department" class="hide"><option value="">All departments</option></select>
+          <select id="rpBranch" aria-label="Filter by branch" class="hide"><option value="">All branches</option></select>
+        </div>
+      </div>
+      <div id="rpBody"></div>
+    </section>
+
+    <!-- Users and rights (Module Phase 1) -->
+    <section id="v-users" class="view hide">
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Logins</h2><span class="muted" id="userNote"></span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Username</th><th>Role</th><th>Employee</th><th>Status</th><th>Password</th><th></th></tr></thead>
+          <tbody id="urows"></tbody>
+        </table></div>
+        <div class="empty hide" id="uempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Roles and permissions</h2><span class="muted">Changes take effect on the next request.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Role</th><th class="n">Permissions</th><th class="n">Users</th><th>Type</th><th></th></tr></thead>
+          <tbody id="rrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="rempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Employees</h2><span class="muted">Employees are deactivated, never deleted.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Name</th><th>Designation</th><th>Department</th><th>Login</th><th>Status</th><th></th></tr></thead>
+          <tbody id="erows"></tbody>
+        </table></div>
+        <div class="empty hide" id="eempty"></div>
+      </div>
+    </section>
+
+    <!-- Audit trail (Module Phase 1) -->
+    <section id="v-audit" class="view hide">
+      <div class="panel flush">
+        <div class="toolbar">
+          <select id="audAction" aria-label="Filter by action"><option value="">All actions</option></select>
+          <select id="audActor" aria-label="Filter by user"><option value="">All users</option></select>
+          <label for="audFrom" style="margin:0">From</label><input id="audFrom" type="date" style="max-width:150px">
+          <label for="audTo" style="margin:0">To</label><input id="audTo" type="date" style="max-width:150px">
+          <span class="muted" id="audNote"></span>
+          <a class="link-btn hide" id="audExport" href="/api/audit/export" download>Download CSV</a>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>When</th><th>By</th><th>Action</th><th>Record</th><th>Details</th></tr></thead>
+          <tbody id="audrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="audempty"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="scrim" class="hide"></div>
+<aside id="drawer" class="hide" role="dialog" aria-modal="true" aria-labelledby="dtitle">
+  <div class="drawer-h"><div><h2 id="dtitle"></h2><p id="dsub"></p></div><button class="x" id="dclose" type="button" aria-label="Close">&times;</button></div>
+  <div class="drawer-b" id="dbody"></div>
+</aside>
+<div id="toast" class="hide" role="status" aria-live="polite"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>
