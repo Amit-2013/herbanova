@@ -12,12 +12,13 @@ Rules this module keeps:
   the business expects is not made smaller by an environment problem.
 - The group subtotals are derived, never typed, so they always add up to the
   headline.
-- `MOD-` identifiers match docs/Feature Structure.md section 4. Module Phase 4
-  and Module Phase 5 are one module (MOD-13), as that document requires.
+- `MOD-` identifiers are unique and stable. Module Phase 4 and Module Phase 5
+  are one module (MOD-13).
 
 A status changes only against evidence: a passing test suite, an executed code
-path, or a live check. `tests/test_module_status.py` compares this register with
-the human register in the documentation.
+path, or a live check. `tests/test_module_status.py` checks the register's own
+rules, that the served figures add up, and that modules claimed as working have
+the code that does the work.
 """
 from dataclasses import dataclass, asdict
 

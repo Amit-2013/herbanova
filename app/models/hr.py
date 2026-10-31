@@ -6,6 +6,7 @@ be paid twice. Money is Numeric, never float. Rates and amounts are configured
 rows, never constants in code.
 """
 from datetime import date, datetime, time
+from datetime import date as DateType  # the OD and attendance classes have a column named `date`
 from decimal import Decimal
 
 from sqlalchemy import (Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer,
@@ -217,7 +218,7 @@ class ODRequest(Base):
     # nullable=True is explicit: inside this class body the attribute name `date`
     # shadows datetime.date, so the Optional annotation alone would not be read
     # as optional by SQLAlchemy and autogenerate would try to add NOT NULL.
-    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[DateType | None] = mapped_column(Date, nullable=True)
     duration: Mapped[str] = mapped_column(String(20), default="full_day")
     visit_type: Mapped[str] = mapped_column(String(40))
     purpose: Mapped[str] = mapped_column(String(300))

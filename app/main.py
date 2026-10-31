@@ -7,7 +7,7 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from .core.config import settings
 from .core.limiter import limiter
-from .api import (accounts, admin, approvals, audit, auth, credit_notes, debit_notes, db_reset, distributors, employees,
+from .api import (accounts, admin, approvals, audit, auth, credit_notes, dashboard, debit_notes, db_reset, distributors, employees,
                   hr, inventory, invoices, leads, modules, printing, products, purchase_orders,
                   reports, roles, sales_orders, suppliers, tax, users)
 
@@ -41,6 +41,7 @@ app.include_router(db_reset.router)
 app.include_router(admin.router)
 app.include_router(audit.router)
 app.include_router(modules.router)
+app.include_router(dashboard.router)
 app.include_router(accounts.router)
 app.include_router(products.router)
 app.include_router(suppliers.router)
