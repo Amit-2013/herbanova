@@ -1,10 +1,12 @@
 # Overview Dashboard — Metric Register
 
 **Project:** Herbanova Business Control
-**Phase:** 2 — Overview dashboard
+**Phase:** 2 — Overview dashboard, extended by Dashboard v2 (November 2026)
 **Date:** 1 November 2026
 **Source of truth:** `app/api/dashboard.py`, `static/js/app.js`, `static/index.html`, `static/css/styles.css`
-**Rule:** every figure on the screen is a SQL aggregate over the whole database. Nothing is computed by filtering a capped browser list, and no figure is invented. When the input is not stored, the screen says **No data yet**, names the gap (GAP-Dxx) and the section is listed in §8.
+**Rule:** every figure on the screen is a SQL aggregate over the whole database. Nothing is computed by filtering a capped browser list, and no figure is invented. When the input is not stored, the screen says **No data yet**, names the gap (GAP-Dxx / GAP-Vxx) and the section is listed in §8.
+
+> **v2 in one line.** The Overview now has an explicit date window, inline approvals, a reconciled sales-vs-purchases card and warehouse capacity; two new pages add MoM/YoY comparison and state-level geography. The six v2 steps and their tests are in §11; what remains open is in §12. Sections §1–§10 describe the Phase 2 register and are updated where v2 changed them.
 
 ---
 
@@ -12,10 +14,12 @@
 
 | Endpoint | Purpose | Permission | Notes |
 |---|---|---|---|
-| `GET /api/dashboard?range=7\|30\|90` | One aggregated payload for the whole page | signed in; each section additionally gated (see §7) | `range` outside 7/30/90 → **422**. Default 30. |
+| `GET /api/dashboard?from_date=&to_date=` | One aggregated payload for the whole page | signed in; each section additionally gated (see §7) | Defaults to the current month. `from_date > to_date` or a future `to_date` → **422**. Legacy `range=7\|30\|90` still accepted. |
 | `GET /api/dashboard/expiry?bucket=expired\|lt30\|lt90\|all&page&page_size` | Paged expiry drill-down | `stock:read` | `page_size` 1..100 (default 25); rows sorted by expiry, then batch id. |
 | `GET /api/dashboard/search?q=` | Global search (palette) | signed in; each group gated | Minimum 2 characters; returns at most 5 rows per group. |
 | `GET /api/dashboard/activity?limit=1..50` | Recent audit entries | `audit:read` | Used by the activity feed and the palette. |
+| `GET /api/dashboard/compare?mode=full_month\|mtd&month=YYYY-MM` | MoM/YoY comparison, 12-month trend, run rate and breakdowns | `sales:read`; each card/column additionally gated | `mode` and `month` validated → **422**. Defaults: `full_month`, current month. |
+| `GET /api/dashboard/geo?from_date=&to_date=` | State-level sales, returns and GST split | `sales:read`; tax fields need `tax:read`, returns need `accounts:read` | Same date validation as `/api/dashboard`; defaults to the current month. |
 
 The payload defaults every Phase-2 section to `null` and fills only what the caller may see. A section the role cannot read is **`null`, never `0`**, so the browser can distinguish "none" from "not permitted".
 
@@ -27,7 +31,7 @@ The payload defaults every Phase-2 section to `null` and fills only what the cal
 
 | Item | Rule |
 |---|---|
-| Cache | In-process, key = `(user id, sorted permissions, range, administrator flag)`, TTL **45 s** (`DASHBOARD_TTL_SECONDS`). A different role or range never reuses another caller's payload. |
+| Cache | In-process, key = `(user id, sorted permissions, range or explicit window, administrator flag)`, TTL **45 s** (`DASHBOARD_TTL_SECONDS`). Comparison adds `mode` and `month`, geography adds the explicit window. A different role or window never reuses another caller's payload. Approving or rejecting a request retires the cached dashboard. |
 | Cache scope | Only when `APP_ENV=production` **and** the database name does not end in `_test`. Tests always read fresh data. |
 | Updated line | `generated_at` is UTC; the page renders it in the browser's local time ("updated 01 Nov 2026, 12:31 am"). Cached payloads keep the time they were built. |
 | Cost | One request per range change; all figures are indexed aggregates. Measured on the development database: **7–8 ms** median for the full payload. |
@@ -42,7 +46,8 @@ The payload defaults every Phase-2 section to `null` and fills only what the cal
 |---|---|---|
 | Greeting and date | "Good morning/afternoon/evening, {username}" plus the long local date (en-IN) | `greeting()`, `renderDash()` |
 | Search button | Opens the palette; shows the platform shortcut (`Ctrl/⌘ K`) | `openPalette()` |
-| Period 7D / 30D / 90D | Reloads the dashboard with the chosen range; the choice survives reload (`localStorage hb.dashRange`); the pressed button is `aria-pressed` | `setDashRange()` |
+| Period presets | 7D, 30D, 90D, This month, Last month, This FY, plus explicit From/To dates; the window survives reload (`hb.dashFrom`/`hb.dashTo`/`hb.dashPreset`); the pressed preset is `aria-pressed`; invalid dates show the server's rule in place | `setDashPreset()`, `applyDashDates()` |
+| MoM & YoY | Replaces the old top-bar "New sales order" action and opens the comparison page; "New sales order" remains on the Sales screen and in the command palette | `#compare` |
 | New sales order | Only rendered when the role holds `sales:write`; opens the existing sales-order form | `dashNewSo` |
 | Updated line | "As at {date} · {n}-day period, {from} to {to} · updated {time}" | `renderDash()` |
 | Theme | Light/dark toggle in the sidebar, stored in `hb.theme`; defaults to the OS preference | `applyTheme()`, `toggleTheme()` |
@@ -77,7 +82,7 @@ Trends are shown as inline SVG sparklines only when at least two finite points e
 | Rule | Threshold | Severity | Link |
 |---|---|---|---|
 | Batches past expiry | `expiry < today`, `on_hand > 0` | red when > 0 | Inventory |
-| Warehouse capacity | not stored (GAP-D03) | "No data" | — |
+| Warehouse above 80% capacity | `used_units / capacity_units` from the capacity service; amber above 80%, red above 95% / over | amber/red when > 0; "Capacity is not set for any warehouse" when none is configured | Inventory → Warehouses |
 | Receivables over 60 days | ageing buckets `61-90` + `90+` | amber when > 0 | Accounts |
 | Approvals needing an Administrator | pending credit-limit or post-billing requests visible to the caller | amber when > 0 | Approvals |
 | Low stock vs reorder level | not stored (GAP-D02) | "No data" | — |
@@ -113,7 +118,7 @@ Buckets `0-30`, `31-60`, `61-90`, `90+` come from `ledger.ageing_rows(db, today)
 
 ### 5.5 Stock by warehouse
 
-Warehouses from `warehouses` (including empty ones), with batches and units in stock and the unit share of total stock. A non-zero tiny share shows **<1%** rather than rounding to 0%. Capacity is not stored (GAP-D03), so no fill-level bar is drawn and the panel says so.
+Warehouses from `warehouses` (including empty ones), with batches and units in stock and the unit share of total stock. A non-zero tiny share shows **<1%** rather than rounding to 0%. When `capacity_units` is configured, each row shows used, free and % of capacity with a bar (green, amber above 80%, red above 95%); a warehouse without capacity says "Capacity not set" (GAP-D03 remains for that row). Administrators can set capacity and the unit word inline; the editor requires `stock:write` and is audited.
 
 ### 5.6 Waiting to be received (open POs)
 
@@ -197,6 +202,13 @@ is not shown because no expected-delivery date is stored (GAP-D05).
 | PO ageing | `stock:read` | Card absent |
 | HR today | `hr:read` | Card absent |
 | New sales order button | `sales:write` | Button not rendered |
+| MoM/YoY page and `/api/dashboard/compare` | `sales:read` | Page and nav entry hidden; endpoint 403 |
+| Comparison cards | each card's own read permission | Card omitted from the payload, not zero |
+| Geography page and `/api/dashboard/geo` | `sales:read` | Page hidden; endpoint 403 |
+| Geography tax split | `tax:read` | Column and GST panel replaced by a "needs tax:read" gap |
+| Geography returns | `accounts:read` | Returns column and panel replaced by a "needs accounts:read" gap |
+| Warehouse capacity editor | `stock:write` | Fields read-only |
+| Capacity override on receipt | Administrator role | Override refused server-side (403) even if the flag is sent |
 | Health, search, greeting | signed in | Visible to every signed-in user; search groups still gated |
 
 All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_dashboard_phase2.py` (null sections per role, chart masking, search scoping, activity permission, HR self-scoping).
@@ -209,9 +221,15 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 |---|---|---|
 | GAP-D01 | Product category or brand | "Sales by category" → No data yet |
 | GAP-D02 | Reorder level | "Low stock against reorder level" → No data |
-| GAP-D03 | Warehouse capacity | Capacity rule and fill bars omitted; "Capacity is not captured" |
-| GAP-D04 | Batch cost / valuation policy | Expiry rows omit value; footer names the gap |
+| GAP-D03 | Warehouse capacity | **Resolved for configured warehouses in v2** (migration `0009`); a warehouse with no capacity still says "Capacity not set" |
+| GAP-D04 | Batch cost / valuation policy | Expiry rows omit value; footer names the gap; comparison gross-margin card says "No data yet" |
 | GAP-D09 | Persisted backup/restore result | Health card "Not recorded" |
+| GAP-V09 | No stock transfer endpoint | No transfer capacity warning is claimed |
+| GAP-V10 | Free-text return reason | Geography shows the reason as recorded; no categories |
+| GAP-V11 | No district / city / pincode | Geography stops at state and says so |
+| GAP-V12 | Territory is free text | Not used as a geographic key |
+| GAP-V16 | No `distributors.created_at` | Comparison "new customers" card says "No data yet" |
+| GAP-V17 | No prior-year data yet | MoM/YoY prior-year figures read zero with "No data yet", never invented |
 
 `GAP-D05..D08` (PO expected date, invoice due date, input tax, structured lead-status history) do not appear as dashboard figures in this phase; they are recorded in `docs/DASHBOARD_AUDIT.md`.
 
@@ -250,7 +268,6 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 |---|---|---|
 | Sales by category / margin by category | GAP-D01 | `products.category` (migration + backfill) |
 | Low-stock and stock-cover alerts | GAP-D02 | `products.reorder_level` |
-| Warehouse capacity alerts / fill level | GAP-D03 | `warehouses.capacity_units` |
 | Expiry value and stock value | GAP-D04 | Batch cost at receipt or a valuation policy |
 | PO due-date and supplier on-time | GAP-D05 | `purchase_orders.expected_date` |
 | Ageing by due date | GAP-D06 | `invoices.due_date` |
@@ -260,3 +277,106 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 | Trend lines for POs, orders, approvals, follow-ups, products | No stored status timeline | Event/status history tables |
 
 No sample or placeholder data is used anywhere in production code; the gaps are surfaced as gaps.
+
+---
+
+# Dashboard v2 — what was built
+
+**Branch:** `feature/dashboard-v2` (one commit per step, baseline commit first)
+**Decisions and reasoning:** `docs/DASHBOARD_DECISIONS.md` (D-01 … D-20)
+**Data-safety:** additive only. Two nullable/index-only migrations, both with `downgrade()`; no row, table, permission or existing report was changed.
+
+The repository has no separate Feature Inventory or Requirements Traceability Matrix (`docs/DASHBOARD_AUDIT.md` §0); this register is the feature inventory and the audit/decision files carry the traceability.
+
+## 11. The six v2 steps
+
+### 11.1 Explicit date window (Step 1)
+
+| Item | Behaviour |
+|---|---|
+| Controls | 7D, 30D, 90D, This month, Last month, This FY, plus explicit From/To date inputs |
+| Default | First day of the current month to today (D-02) |
+| Validation | `from_date > to_date` or a future `to_date` → 422; mirrored in the UI (D-03) |
+| Persistence | `hb.dashFrom`, `hb.dashTo`, `hb.dashPreset`; restored only when valid and `from ≤ to` |
+| Scope labels | Range-driven cards state the window; "as of today" snapshots (stock, capacity, open POs) say so (D-04); ageing uses the selected end date (D-05) |
+| Legacy callers | `range=7\|30\|90` still accepted and translated to the same window |
+| Tests | `tests/test_dashboard_v2.py` — window bounds, defaults, validation, persistence of server figures |
+
+The top-bar "New sales order" button was replaced by **MoM & YoY**; the sales-order action remains on the Sales screen and in the command palette.
+
+### 11.2 Approvals decided inline (Step 2)
+
+Rows on the Overview show **Approve** and **Reject**. Approve posts the existing `POST /api/approvals/{id}/decide` with the visible default reason "Approved from the dashboard"; Reject reveals an inline reason field requiring at least 3 characters. After a decision the card, KPI and sidebar badge reload from one `loadAll()`, and the server retires the cached dashboard so a stale count cannot return. Self-approval, role rules and the audit row stay in the existing endpoint (D-06). The response names *who may decide* in role words and the age in whole `Asia/Kolkata` days (D-07).
+
+### 11.3 Sales vs purchases card (Step 3)
+
+Sales (issued invoices, including GST) and purchases (received goods at PO cost, excluding tax) are drawn as a solid green line with area fill and a dashed amber line. Each legend entry is a pill that shows or hides its series; the last visible series cannot be hidden. Hover and ←/→ move a focus ring with a readout of the day and both totals. The permission mask removes a series the role cannot read, server-side. Totals reconcile with the Sales Invoice Register and the Goods Receipt Register over the same dates; both are tested independently (D-08).
+
+### 11.4 Warehouse capacity (Step 4)
+
+- Migration `0009_warehouse_capacity` adds nullable `warehouses.capacity_units` and `capacity_note`; `downgrade()` drops them (D-09).
+- The Overview warehouse panel shows used, free and % of capacity with a bar: green, amber above 80%, red above 95% / over. Unconfigured warehouses say "Capacity not set".
+- The attention list gains "Warehouses above 80% capacity".
+- The capacity editor requires `stock:write` and is audited.
+- A goods receipt that would exceed capacity returns 409; an Administrator may resend with `allow_over_capacity=true`, audited as `warehouse.capacity_override` with before/after totals. Non-administrators get 403 (D-10).
+- Dispatch is not capped (it only reduces stock) but reports the source warehouse's position.
+- `warehouse_utilisation` is a read-only report (`stock:read`) built from the same service as the dashboard (D-11).
+- Transfers do not exist, so no transfer check exists (GAP-V09).
+
+### 11.5 MoM/YoY comparison (Step 5)
+
+`GET /api/dashboard/compare` with one explicit mode (`full_month` or `mtd`) and a month. It returns:
+
+- three labelled windows (current, previous month, same month last year) with the exact dates and states (`future`, `current`, `past`);
+- eight cards (sales, purchases, orders, gross margin, receipts, returns, new leads, new customers), each with current, prior-month, prior-year, change and availability; unreadable cards are omitted from the payload; gross margin (GAP-D04) and new customers (GAP-V16) are explicit gaps;
+- a 12-month trend with prior-year overlay, 3-month moving average, best/worst positive month and seasonality;
+- a run-rate projection labelled **"Run-rate estimate (not a forecast)"** for the current month, "Complete month" for a past month, "Not started" for a future month (D-12);
+- top-five products and distributors by taxable value before GST.
+
+Migration `0010_comparison_indexes` adds four date indexes (`sales_orders.created_at`, `credit_notes.note_date`, `goods_receipts.received_at`, `leads.created_at`) with a matching downgrade. The page exports CSV with the compared dates in the header (D-16) and uses the existing 45-second cache (D-17).
+
+### 11.6 Geography (Step 6)
+
+`GET /api/dashboard/geo` groups issued invoices by `coalesce(buyer_state_code, distributor.state_code)` over the selected window. The invoice's frozen buyer state wins; the distributor master is only a fallback for rows without a snapshot. Invoices with neither code stay in an explicit **"Location not recorded"** row so the window total reconciles.
+
+| Element | Behaviour |
+|---|---|
+| KPIs | Sales (incl. GST), invoices, states with a sale, then taxable value, returns or "location not recorded" depending on permission |
+| Map | 37 fixed tiles from `app/core/india_states.py`, shaded by sales share, labelled **"State tile map — not a geographic outline"**; no external map service |
+| Ranked lists | Top five and bottom five, where "bottom" ranks only states with a positive sale |
+| Table | State, sales, share, invoices, customers, taxable (with `tax:read`), returns (with `accounts:read`); client-side sorting with `aria-sort` |
+| Returns | Issued credit notes grouped by the invoice's buyer state; the free-text reason shown as recorded, capped at five with a true total (GAP-V10) |
+| GST | Taxable, CGST, SGST, IGST, cess and tax as printed on issued invoices; labelled "not a statutory filing export" |
+| Permissions | `sales:read` gates the page; tax/returns fields are omitted without their permissions and the page names the missing permission |
+| Export | CSV of the rendered table, with the window and permission-appropriate columns |
+| Gaps | District/city/pincode say "No data yet · GAP-V11"; territory is not used (GAP-V12); no territory-scoped user model (D-14) |
+
+## 12. Verification
+
+| Check | Result |
+|---|---|
+| Full suite | **107 passed** (last run 1 November 2026), isolated `herbanova_bcs_test` database |
+| Geography tests | 4 tests: grouping/reconciliation/share; snapshot fallback + unrecorded row; window validation; returns/GST availability and viewer/payroll scoping |
+| Comparison tests | 9 tests: window rules, validation, sales reconciliation with the invoice register, projection labels, 12-month trend, breakdowns, gaps/masking, zero bases |
+| Capacity tests | migration, editor permissions, receipt block and administrator override, utilisation report reconciliation |
+| Approvals tests | inline decision reuses the existing endpoint, self-approval refused, cache invalidated |
+| Browser check (v2 pages) | Isolated verification database and a server on port 8001 (never the development database). As Administrator: map rendered 37 tiles with the Delhi tile active, KPI and table figures matched the seeded invoice, sorting changed `aria-sort`, tile selection highlighted the row, From > To showed the validation message, CSV download produced a file, and the console had no errors after sign-in. As Viewer: navigating to `#/geo` worked, taxable/returns columns disappeared, and the GST and returns panels named the missing permissions. Desktop screenshot at 1440 px: no horizontal overflow; mobile-width layout stacked cleanly. The throwaway database, server and helper files were deleted afterwards. |
+| Limits of the check | The verification data was the marked demo seed (one issued invoice, one credit note), so top/bottom lists each show one state; multi-state ranking and prior-year trends are covered by the synthetic tests, not by that dataset. |
+
+## 13. What I need you to review or decide
+
+These are the choices that were safe to make autonomously but are business or policy decisions:
+
+1. **Capacity thresholds.** Attention starts at 80%, red at 95% / over. Change the thresholds if your operation wants earlier warning.
+2. **Capacity override.** Only an Administrator may override a capacity block, and every override is audited. Confirm this is the right authority level.
+3. **Receipt vs purchase order.** Capacity is checked when goods arrive, because a PO has no warehouse. If you want a raise-time warning, a warehouse field must be added to POs.
+4. **Approvals default reason.** Inline Approve records "Approved from the dashboard" unless the interface later grows a reason field. Confirm that wording is acceptable for audit.
+5. **Date default.** The dashboard defaults to the current month; older bookmarks using `range=30` still work. Say if you prefer a rolling 30 days.
+6. **Comparison gaps.** Gross margin stays "No data yet" until stock or invoice lines carry a cost; new customers stays "No data yet" until distributors have a creation timestamp. Adding those fields is a schema decision.
+7. **Run rate wording.** The current-month projection is labelled an estimate, not a forecast. If you need a real forecast, that is a separate model with its own error statement.
+8. **Geography depth.** The page stops at state because district/city/pincode are not captured. Adding them to invoices and distributors would unblock the drill-down (GAP-V11).
+9. **Territory scoping.** There is no user-to-territory model, so every `sales:read` user sees every state. If regional users must be restricted, that needs a new scope field and a permission change — both out of scope here.
+10. **Export format.** The two new tables export CSV, not PDF. The existing report catalog still produces PDFs for its own reports.
+11. **Deployment.** Apply migrations `0009_warehouse_capacity` and `0010_comparison_indexes` before starting the new code. Neither rewrites data, and both have downgrades. Set capacity for each warehouse after deployment if you want fill bars.
+
+**Skipped, with reasons:** stock transfers (no endpoint — GAP-V09); district/city/pincode (not captured — GAP-V11); gross margin (no cost — GAP-D04); new customers (no creation date — GAP-V16); territory-scoped geography (no scope model); PDF export of the new tables (would duplicate the document pipeline); prior-year comparison values (no data in the prior year yet — GAP-V17).
