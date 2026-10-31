@@ -122,7 +122,7 @@ def world(database):
     from uuid import uuid4
 
     from app.core.db import SessionLocal
-    from app.models.core import Batch, Distributor, Product, Warehouse
+    from app.models.core import Batch, Distributor, Product, StockMovement, User, Warehouse
     from app.models.suppliers import Supplier
     from app.models.tax import CompanyProfile, TaxRate
 
@@ -154,6 +154,15 @@ def world(database):
         batch = Batch(product_id=product.id, warehouse_id=warehouse.id,
                       batch_no=f"B-{suffix}", on_hand=Decimal("1000"))
         db.add(batch)
+        db.flush()
+        # Opening stock must carry a movement row: the stock report reconciles
+        # batches against the movement ledger, and a batch with no movement is
+        # a real difference, not something to paper over in the fixture.
+        actor = db.scalar(select(User).where(User.username == "admin"))
+        db.add(StockMovement(batch_id=batch.id, movement_type="receipt",
+                             qty_delta=Decimal("1000"), ref_type="opening",
+                             ref_id=f"OPEN-{suffix}",
+                             actor_id=actor.id if actor else 1))
         db.commit()
         return {"product_id": product.id, "sku": product.sku, "hsn": hsn,
                 "distributor_id": distributor.id, "warehouse_id": warehouse.id,
