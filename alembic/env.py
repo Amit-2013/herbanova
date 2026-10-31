@@ -5,8 +5,15 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.core.db import Base
-import app.models.core  # noqa: F401  (registers users/products/batches/POs/etc. on Base.metadata)
-import app.models.hr      # noqa: F401  (HR tables)
+# Every model module must be imported here. If one is missing, `alembic revision
+# --autogenerate` cannot see its tables and will propose DROPping them (the
+# `payments` table was at risk before this list was completed).
+import app.models.core      # noqa: F401  users, products, batches, POs, SOs, invoices, notes, leads
+import app.models.hr        # noqa: F401  HR tables
+import app.models.accounts  # noqa: F401  payments (receipts and payments)
+import app.models.users     # noqa: F401  roles, employees
+import app.models.tax       # noqa: F401  company_profile, tax_rates, discount_slabs
+import app.models.suppliers # noqa: F401  suppliers, goods_receipts
 
 config = context.config
 if config.config_file_name is not None:

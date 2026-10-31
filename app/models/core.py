@@ -47,7 +47,10 @@ class Product(Base):
                       # digits-only is checked by the API (the database check stays
                       # portable so the model can also be created in SQLite)
                       CheckConstraint("hsn IS NULL OR length(hsn) BETWEEN 4 AND 8",
-                                      name="ck_product_hsn"))
+                                      name="ck_product_hsn"),
+                      # Names match the migration-created indexes (schema parity).
+                      Index("ix_products_status", "status"),
+                      Index("ix_products_hsn", "hsn"))
     id: Mapped[int] = mapped_column(primary_key=True)
     sku: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
@@ -85,6 +88,7 @@ class StockMovement(Base):
     __table_args__ = (
         UniqueConstraint("batch_id", "movement_type", "ref_type", "ref_id",
                          name="uq_movement_idempotency"),  # blocks duplicate receipt posting
+        Index("ix_stock_movements_batch_created", "batch_id", "created_at"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     batch_id: Mapped[int] = mapped_column(ForeignKey("batches.id"))
@@ -101,6 +105,7 @@ class PurchaseOrder(Base):
     cancelled before any goods arrive. Each receipt posts 'receipt' movements
     keyed to its goods receipt note."""
     __tablename__ = "purchase_orders"
+    __table_args__ = (Index("ix_purchase_orders_status_created", "status", "created_at"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     po_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     supplier: Mapped[str] = mapped_column(String(120))          # display snapshot of the supplier name
@@ -181,6 +186,7 @@ class Distributor(Base):
 class SalesOrder(Base):
     """draft -> (pending_approval) -> approved -> dispatched; or cancelled / rejected."""
     __tablename__ = "sales_orders"
+    __table_args__ = (Index("ix_sales_orders_status_created", "status", "created_at"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     so_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     distributor_id: Mapped[int] = mapped_column(ForeignKey("distributors.id"))
@@ -220,6 +226,7 @@ class ApprovalRequest(Base):
     __table_args__ = (
         Index("uq_approval_pending", "record_type", "record_id", unique=True,
               postgresql_where=text("status = 'pending'")),
+        Index("ix_approval_status_type", "status", "record_type"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     record_type: Mapped[str] = mapped_column(String(30))
@@ -253,6 +260,7 @@ class Lead(Base):
         UniqueConstraint("email_key", name="uq_lead_email"),
         CheckConstraint("phone_key IS NOT NULL OR email_key IS NOT NULL", name="ck_lead_has_contact"),
         Index("ix_leads_owner_followup", "owner_id", "next_follow_up"),
+        Index("ix_leads_status_followup", "status", "next_follow_up"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     lead_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
@@ -275,6 +283,7 @@ class Lead(Base):
 class LeadActivity(Base):
     """Append-only history. There is deliberately no update or delete endpoint."""
     __tablename__ = "lead_activities"
+    __table_args__ = (Index("ix_lead_activities_lead_created", "lead_id", "created_at"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
     kind: Mapped[str] = mapped_column(String(20))   # created|note|call|email|meeting|status_change|follow_up_change|owner_change|updated
@@ -295,6 +304,7 @@ class Invoice(Base):
     __table_args__ = (
         UniqueConstraint("invoice_number", "financial_year", name="uq_invoice_number_fy"),
         CheckConstraint("status IN ('issued','cancelled')", name="ck_invoice_status"),
+        Index("ix_invoices_invoice_date", "invoice_date"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     invoice_number: Mapped[str] = mapped_column(String(16), index=True)

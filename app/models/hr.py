@@ -8,8 +8,8 @@ rows, never constants in code.
 from datetime import date, datetime, time
 from decimal import Decimal
 
-from sqlalchemy import (Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, JSON,
-                        Numeric, String, Time, UniqueConstraint, func)
+from sqlalchemy import (Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer,
+                        JSON, Numeric, String, Time, UniqueConstraint, func)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..core.db import Base
@@ -21,8 +21,14 @@ LAT = Numeric(9, 6)
 
 class Branch(Base):
     __tablename__ = "hr_branches"
+    # Index names below match the ones the migrations created, so
+    # `alembic revision --autogenerate` reports no drift against the live schema.
+    __table_args__ = (
+        UniqueConstraint("code", name="hr_branches_code_key"),
+        Index("ix_hr_branches_code", "code"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    code: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(120))
     address: Mapped[str | None] = mapped_column(String(300))
     status: Mapped[str] = mapped_column(String(20), default="active")
@@ -40,10 +46,12 @@ class WorkLocation(Base):
         CheckConstraint("geofence_radius_m IS NULL OR geofence_radius_m > 0",
                         name="ck_hr_radius"),
         CheckConstraint("attendance_mode IN ('office','gps','both')", name="ck_hr_mode"),
+        UniqueConstraint("code", name="hr_work_locations_code_key"),
+        Index("ix_hr_work_locations_code", "code"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     branch_id: Mapped[int | None] = mapped_column(ForeignKey("hr_branches.id"))
-    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    code: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(120))
     address: Mapped[str | None] = mapped_column(String(300))
     latitude: Mapped[Decimal | None] = mapped_column(LAT)
@@ -96,10 +104,13 @@ class Attendance(Base):
                         name="ck_hr_attendance_source"),
         CheckConstraint("geofence_result IN ('inside','outside','unavailable','manual','na')",
                         name="ck_hr_geofence_result"),
+        # Explicit names = the names the migration created (schema parity).
+        Index("ix_hr_attendance_employee", "employee_id"),
+        Index("ix_hr_attendance_date", "date"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
-    date: Mapped[date] = mapped_column(Date, index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    date: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(20), default="present")
     check_in: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     check_out: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -120,9 +131,13 @@ class Attendance(Base):
 
 class AttendanceCorrection(Base):
     __tablename__ = "hr_attendance_corrections"
+    __table_args__ = (
+        Index("ix_hr_attendance_corrections_attendance", "attendance_id"),
+        Index("ix_hr_attendance_corrections_employee", "employee_id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
-    attendance_id: Mapped[int] = mapped_column(ForeignKey("hr_attendance.id"), index=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    attendance_id: Mapped[int] = mapped_column(ForeignKey("hr_attendance.id"))
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
     requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     old_status: Mapped[str | None] = mapped_column(String(20))
     new_status: Mapped[str | None] = mapped_column(String(20))
@@ -154,9 +169,10 @@ class LeaveType(Base):
 class LeaveBalance(Base):
     __tablename__ = "hr_leave_balances"
     __table_args__ = (UniqueConstraint("employee_id", "leave_type_id", "year",
-                                       name="uq_hr_leave_balance"),)
+                                       name="uq_hr_leave_balance"),
+                      Index("ix_hr_leave_balances_employee", "employee_id"))
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
     leave_type_id: Mapped[int] = mapped_column(ForeignKey("hr_leave_types.id"))
     year: Mapped[int] = mapped_column(Integer)
     entitled: Mapped[Decimal] = mapped_column(Numeric(6, 1), default=0)
@@ -171,9 +187,10 @@ class LeaveApplication(Base):
         CheckConstraint("status IN ('pending','approved','rejected','cancelled')",
                         name="ck_hr_leave_status"),
         CheckConstraint("date_to >= date_from", name="ck_hr_leave_dates"),
+        Index("ix_hr_leave_applications_employee", "employee_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
     leave_type_id: Mapped[int] = mapped_column(ForeignKey("hr_leave_types.id"))
     date_from: Mapped[date] = mapped_column(Date)
     date_to: Mapped[date] = mapped_column(Date)
@@ -191,11 +208,16 @@ class LeaveApplication(Base):
 class ODRequest(Base):
     __tablename__ = "hr_od_requests"
     __table_args__ = (CheckConstraint("status IN ('pending','approved','rejected','cancelled')",
-                                      name="ck_hr_od_status"),)
+                                      name="ck_hr_od_status"),
+                      Index("ix_hr_od_requests_employee", "employee_id"),
+                      Index("ix_hr_od_requests_date", "date"))
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
-    date: Mapped[date] = mapped_column(Date, index=True)
-    end_date: Mapped[date | None] = mapped_column(Date)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    date: Mapped[date] = mapped_column(Date)
+    # nullable=True is explicit: inside this class body the attribute name `date`
+    # shadows datetime.date, so the Optional annotation alone would not be read
+    # as optional by SQLAlchemy and autogenerate would try to add NOT NULL.
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     duration: Mapped[str] = mapped_column(String(20), default="full_day")
     visit_type: Mapped[str] = mapped_column(String(40))
     purpose: Mapped[str] = mapped_column(String(300))
@@ -247,8 +269,9 @@ class SalaryComponent(Base):
 
 class SalaryStructure(Base):
     __tablename__ = "hr_salary_structures"
+    __table_args__ = (Index("ix_hr_salary_structures_employee", "employee_id"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
     effective_from: Mapped[date] = mapped_column(Date)
     effective_to: Mapped[date | None] = mapped_column(Date)
     payment_mode: Mapped[str] = mapped_column(String(20), default="bank")
@@ -296,10 +319,11 @@ class PayrollPeriod(Base):
 
 class PayrollEntry(Base):
     __tablename__ = "hr_payroll_entries"
-    __table_args__ = (UniqueConstraint("period_id", "employee_id", name="uq_hr_payroll_entry"),)
+    __table_args__ = (UniqueConstraint("period_id", "employee_id", name="uq_hr_payroll_entry"),
+                      Index("ix_hr_payroll_entries_employee", "employee_id"))
     id: Mapped[int] = mapped_column(primary_key=True)
     period_id: Mapped[int] = mapped_column(ForeignKey("hr_payroll_periods.id"))
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
     working_days: Mapped[Decimal] = mapped_column(Numeric(6, 1), default=0)
     payable_days: Mapped[Decimal] = mapped_column(Numeric(6, 1), default=0)
     present_days: Mapped[Decimal] = mapped_column(Numeric(6, 1), default=0)

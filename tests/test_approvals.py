@@ -7,8 +7,12 @@ def _order(client, world, qty="100"):
 
 
 def _invoice_for(client, world):
-    order = _order(client, world, qty="1")
-    submitted = client.post(f"/api/sales-orders/{order['id']}/submit")
+    # The sales desk raises the order; the administrator approves and dispatches it.
+    # Raising it as admin would make a credit-limit approval impossible, because
+    # nobody may decide a request they raised.
+    sales = client.as_user("sales")
+    order = _order(sales, world, qty="1")
+    submitted = sales.post(f"/api/sales-orders/{order['id']}/submit")
     assert submitted.status_code == 200
     if submitted.json()["status"] == "pending_approval":
         admin = client.as_user("admin")

@@ -10,12 +10,14 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models.core import (
     ApprovalRequest,
     Batch,
+    CreditNote,
+    DebitNote,
     Distributor,
     Invoice,
     InvoiceLine,
@@ -26,7 +28,7 @@ from ..models.core import (
     SalesOrder,
     StockMovement,
 )
-from ..models.accounts import Payment
+from ..models.accounts import RECEIPT, Payment
 from ..models.hr import (
     Attendance,
     AttendanceCorrection,
@@ -222,6 +224,7 @@ def _columns(rows, preferred=None):
                 "received", "paid", "taxable_value", "tax_total", "grand_total",
                 "cgst_total", "sgst_total", "igst_total", "cess_total",
                 "gross_total", "discount_total", "received_value",
+                "taxable", "cgst", "sgst", "igst", "total", "amount",
             } else "text",
         }
         for key in keys
@@ -397,11 +400,120 @@ def _payroll_rows(db, filters, date_from, date_to):
     return sorted(rows, key=lambda r: (r["year"], r["month"], r["code"] or ""))
 
 
-def _empty_reconciled(key, date_from, date_to, table):
+def _source_receivables(db: Session, date_from: date | None = None,
+                        date_to: date | None = None) -> dict:
+    """Recompute what is owed straight from grouped SQL aggregates.
+
+    Deliberately a different code path from ``ledger.receivable_rows()``: the
+    report is built from ORM rows one document at a time, this from database
+    SUM()s, so the two agreeing is real evidence instead of a self-comparison
+    (the flaw behind the empty GST register and the flattened ageing report).
+    """
+    stmt = select(Invoice.id, Invoice.grand_total).where(Invoice.status == "issued")
+    if date_from:
+        stmt = stmt.where(Invoice.invoice_date >= date_from)
+    if date_to:
+        stmt = stmt.where(Invoice.invoice_date <= date_to)
+    invoices = {i: ledger.money(g) for i, g in db.execute(stmt).all()}
+    if not invoices:
+        return {"invoices": 0, "outstanding": ledger.money(0),
+                "open": 0, "open_total": ledger.money(0)}
+    ids = list(invoices)
+
+    def per_invoice(model, column):
+        rows = db.execute(
+            select(model.invoice_id, func.coalesce(func.sum(column), 0))
+            .where(model.status == "issued", model.invoice_id.in_(ids))
+            .group_by(model.invoice_id)).all()
+        return {i: ledger.money(v) for i, v in rows}
+
+    received = {i: ledger.money(v) for i, v in db.execute(
+        select(Payment.invoice_id, func.coalesce(func.sum(Payment.amount), 0))
+        .where(Payment.kind == RECEIPT, Payment.invoice_id.in_(ids))
+        .group_by(Payment.invoice_id)).all()}
+    credit = per_invoice(CreditNote, CreditNote.grand_total)
+    debit = per_invoice(DebitNote, DebitNote.grand_total)
+
+    total, open_total, open_count = ledger.money(0), ledger.money(0), 0
+    for inv_id, grand in invoices.items():
+        outstanding = ledger.money(
+            grand - credit.get(inv_id, ledger.ZERO) + debit.get(inv_id, ledger.ZERO)
+            - received.get(inv_id, ledger.ZERO))
+        total = ledger.money(total + outstanding)
+        if outstanding > 0:
+            open_total = ledger.money(open_total + outstanding)
+            open_count += 1
+    return {"invoices": len(invoices), "outstanding": total,
+            "open": open_count, "open_total": open_total}
+
+
+def _source_gst(db: Session, date_from: date | None, date_to: date | None) -> dict:
+    """Outward taxable value and tax totals summed in SQL, independent of
+    ``ledger.gst_register()`` (which builds one Python dict per document)."""
+    cols = ("taxable_value", "cgst_total", "sgst_total", "igst_total", "grand_total")
+
+    def period(stmt, date_col):
+        if date_from:
+            stmt = stmt.where(date_col >= date_from)
+        if date_to:
+            stmt = stmt.where(date_col <= date_to)
+        return stmt
+
+    def totals(model, date_col):
+        stmt = select(*[func.coalesce(func.sum(getattr(model, c)), 0) for c in cols])
+        stmt = period(stmt.where(model.status == "issued"), date_col)
+        return [ledger.money(v) for v in db.execute(stmt).one()]
+
+    documents = 0
+    for model, date_col in ((Invoice, Invoice.invoice_date),
+                            (CreditNote, CreditNote.note_date),
+                            (DebitNote, DebitNote.note_date)):
+        stmt = select(func.count()).select_from(model).where(model.status == "issued")
+        documents += int(db.scalar(period(stmt, date_col)) or 0)
+
+    inv = totals(Invoice, Invoice.invoice_date)
+    credit = totals(CreditNote, CreditNote.note_date)
+    debit = totals(DebitNote, DebitNote.note_date)
+    keys = ("taxable", "cgst", "sgst", "igst", "total")
+    out = {k: ledger.money(inv[i] + debit[i] - credit[i]) for i, k in enumerate(keys)}
+    out["documents"] = documents
+    return out
+
+
+def _source_payables(db: Session, po_ids: list[int]) -> dict:
+    """Received purchase value and cash paid for the listed orders, recomputed
+    in SQL (the report builds the same figures in Python, one row at a time)."""
+    if not po_ids:
+        return {"received_value": ledger.money(0), "paid": ledger.money(0)}
+    received = db.execute(
+        select(func.coalesce(func.sum(GoodsReceiptLine.qty * PurchaseOrderLine.unit_cost), 0))
+        .select_from(GoodsReceiptLine)
+        .join(GoodsReceipt, GoodsReceipt.id == GoodsReceiptLine.grn_id)
+        .join(PurchaseOrderLine,
+              (PurchaseOrderLine.po_id == GoodsReceipt.po_id)
+              & (PurchaseOrderLine.product_id == GoodsReceiptLine.product_id))
+        .where(GoodsReceipt.po_id.in_(po_ids))).scalar()
+    paid = db.execute(
+        select(func.coalesce(func.sum(Payment.amount), 0))
+        .where(Payment.kind == "payment", Payment.purchase_order_id.in_(po_ids))).scalar()
+    return {"received_value": ledger.money(received), "paid": ledger.money(paid)}
+
+
+def _empty_reconciled(key, date_from, date_to, table, source_count=None, extra=None):
+    """Envelope consistency check, plus an independent record count when the
+    caller supplies one taken straight from the database."""
+    checks = [
+        _check("row_count", "Report row count", len(table["rows"]),
+               "Table row count", len(table["rows"])),
+    ]
+    if source_count is not None:
+        checks.append(_check("source_rows", "Report rows", len(table["rows"]),
+                             "Records found in the source table", source_count,
+                             "records"))
+    checks.extend(extra or [])
     return _envelope(
         key, date_from, date_to, [table],
-        [_check("row_count", "Report row count", len(table["rows"]),
-                "Table row count", len(table["rows"]))],
+        checks,
     )
 
 
@@ -686,10 +798,17 @@ def build(
 
     if key == "stock":
         products = db.query(Product).order_by(Product.sku, Product.id).all()
+        # One grouped query for every batch instead of one round trip per product.
+        quantities: dict[int, Decimal] = {}
+        counts: dict[int, int] = {}
+        for product_id, qty, n in db.query(
+                Batch.product_id, func.coalesce(func.sum(Batch.on_hand), 0),
+                func.count(Batch.id)).group_by(Batch.product_id).all():
+            quantities[product_id] = _decimal(qty)
+            counts[product_id] = int(n)
         rows = []
         for product in products:
-            batches = db.query(Batch).filter(Batch.product_id == product.id).all()
-            qty = sum((_decimal(b.on_hand) for b in batches), Decimal("0.00"))
+            qty = quantities.get(product.id, Decimal("0.00"))
             rows.append({
                 "product_id": product.id,
                 "sku": product.sku,
@@ -697,9 +816,11 @@ def build(
                 "pack_size": product.pack_size,
                 "status": product.status,
                 "quantity": _num(qty),
-                "batch_count": len(batches),
+                "batch_count": counts.get(product.id, 0),
             })
         total_qty = sum((_decimal(r["quantity"]) for r in rows), Decimal("0.00"))
+        movement_qty = _decimal(db.scalar(
+            select(func.coalesce(func.sum(StockMovement.qty_delta), 0))))
         table = _table(
             "stock", "Stock on Hand", rows,
             ["product_id", "sku", "name", "pack_size", "status", "quantity", "batch_count"],
@@ -708,83 +829,158 @@ def build(
         return _envelope(
             key, date_from, date_to, [table],
             [_check("product_count", "Products in report", len(rows),
-                    "Products queried", len(products))],
+                    "Products queried", len(products)),
+             # Opening balance + movements = closing stock, checked against the
+             # append-only movement ledger rather than against the batch table.
+             _check("stock_quantity", "Report stock quantity", total_qty,
+                    "Sum of the stock movement ledger", movement_qty, "units")],
         )
 
     if key == "receivables":
         data = ledger.receivable_rows(db)
         rows = []
         for item in data:
-            if date_from and item.get("invoice_date") and item["invoice_date"] < date_from:
+            day = item.get("date")
+            if date_from and day and day < date_from:
                 continue
-            if date_to and item.get("invoice_date") and item["invoice_date"] > date_to:
+            if date_to and day and day > date_to:
                 continue
             rows.append({k: _iso(v) for k, v in item.items()})
         table = _table("receivables", "Receivables", rows)
-        return _empty_reconciled(key, date_from, date_to, table)
+        report_outstanding = ledger.money(
+            sum((_decimal(r.get("outstanding")) for r in rows), Decimal("0")))
+        source = _source_receivables(db, date_from, date_to)
+        return _envelope(key, date_from, date_to, [table], [
+            _check("row_count", "Report rows", len(rows),
+                   "Issued invoices in the period", source["invoices"], "records"),
+            _check("outstanding", "Report outstanding", report_outstanding,
+                   "Recomputed from invoices, notes and receipts",
+                   source["outstanding"], "amount"),
+        ])
 
     if key == "receivables_ageing":
+        # Ageing is a snapshot: it reports every invoice that still carries a
+        # balance as at the report date, grouped into the four day buckets.
         data = ledger.ageing_rows(db, date_to or date.today())
         rows = []
-        if isinstance(data, dict):
-            rows = [{"ageing_bucket": k, "amount": _num(_decimal(v))}
-                    for k, v in data.items()]
-        elif isinstance(data, list):
-            rows = data
-        table = _table("receivables_ageing", "Receivables Ageing", rows)
-        return _empty_reconciled(key, date_from, date_to, table)
+        buckets = data.get("buckets", []) if isinstance(data, dict) else []
+        for bucket in buckets:
+            rows.append({
+                "ageing_bucket": bucket["key"],
+                "label": bucket["label"],
+                "invoice_count": bucket["count"],
+                "amount": _num(_decimal(bucket["total"])),
+            })
+        table = _table("receivables_ageing", "Receivables Ageing", rows,
+                       ["ageing_bucket", "label", "invoice_count", "amount"],
+                       {"amount": _num(_decimal(data.get("total", 0)))})
+        source = _source_receivables(db)
+        report_amount = ledger.money(
+            sum((_decimal(r["amount"]) for r in rows), Decimal("0")))
+        report_count = sum(int(r["invoice_count"]) for r in rows)
+        return _envelope(key, date_from, date_to, [table], [
+            _check("ageing_total", "Report ageing total", report_amount,
+                   "Recomputed from invoices, notes and receipts",
+                   source["open_total"], "amount"),
+            _check("ageing_count", "Invoices in the buckets", report_count,
+                   "Invoices with a balance", source["open"], "records"),
+        ], [
+            "Buckets count days since the invoice date, measured at the report date; "
+            "invoices have no due date of their own.",
+            "Outstanding is net of credit notes and receipts already recorded.",
+        ])
 
     if key == "payables":
         data = ledger.payable_rows(db)
-        rows = []
-        for item in data:
-            rows.append({k: _iso(v) for k, v in item.items()})
+        rows = [{k: _iso(v) for k, v in item.items()} for item in data]
         table = _table("payables", "Payables", rows)
-        return _empty_reconciled(key, date_from, date_to, table)
+        report_received = ledger.money(
+            sum((_decimal(r.get("received_value")) for r in rows), Decimal("0")))
+        report_paid = ledger.money(
+            sum((_decimal(r.get("paid")) for r in rows), Decimal("0")))
+        source = _source_payables(db, [r.get("purchase_order_id") for r in rows])
+        return _envelope(key, date_from, date_to, [table], [
+            _check("received_value", "Report goods received value", report_received,
+                   "Recomputed from goods receipts x order lines",
+                   source["received_value"], "amount"),
+            _check("paid", "Report payments made", report_paid,
+                   "Sum of recorded supplier payments", source["paid"], "amount"),
+        ])
 
     if key == "trial_balance":
         result = ledger.trial_balance(db, date_to or date.today())
-        if isinstance(result, dict):
-            source_rows = result.get("rows", [])
-            if not source_rows:
-                source_rows = [
-                    {"account": k, "balance": _num(_decimal(v))}
-                    for k, v in result.items()
-                    if not isinstance(v, (dict, list))
-                ]
-        elif isinstance(result, list):
-            source_rows = result
-        else:
-            source_rows = []
+        source_rows = result.get("rows", []) if isinstance(result, dict) else []
         table = _table("trial_balance", "Trial Balance", source_rows)
-        return _empty_reconciled(key, date_from, date_to, table)
+        debit_sum = ledger.money(sum((_decimal(r.get("debit")) for r in source_rows),
+                                     Decimal("0")))
+        credit_sum = ledger.money(sum((_decimal(r.get("credit")) for r in source_rows),
+                                      Decimal("0")))
+        checks = [
+            _check("row_count", "Report rows", len(source_rows),
+                   "Table rows", len(table["rows"])),
+            # Double entry: every document contributes both sides, so the two
+            # totals must agree. A difference would mean a stored figure that
+            # does not add up, and is reported rather than hidden.
+            _check("balanced", "Total debits", ledger.money(result.get("debit_total")),
+                   "Total credits", ledger.money(result.get("credit_total")), "amount"),
+            _check("row_debits", "Debits listed in the rows", debit_sum,
+                   "Reported debit total", ledger.money(result.get("debit_total")),
+                   "amount"),
+            _check("row_credits", "Credits listed in the rows", credit_sum,
+                   "Reported credit total", ledger.money(result.get("credit_total")),
+                   "amount"),
+        ]
+        return _envelope(key, date_from, date_to, [table], checks)
 
     if key == "gst_register":
         result = ledger.gst_register(db, date_from, date_to)
-        if isinstance(result, dict):
-            rows = result.get("rows", result.get("items", []))
-            limitations = result.get("limitations", [])
-            if not limitations:
-                limitations = [
-                    "Outward supply register only; verify tax data before statutory filing.",
-                    "Input GST purchase-register reconciliation is not available in this report.",
-                ]
-        else:
-            rows = result or []
-            limitations = [
+        rows = []
+        for section, items in (("B2B invoice", result.get("b2b") or []),
+                               ("Credit note", result.get("credit_notes") or []),
+                               ("Debit note", result.get("debit_notes") or [])):
+            for item in items:
+                rows.append({
+                    "section": section,
+                    "number": item.get("number"),
+                    "date": item.get("date"),
+                    "party": item.get("party"),
+                    "gstin": item.get("gstin"),
+                    "place_of_supply": item.get("place_of_supply"),
+                    "taxable": _num(_decimal(item.get("taxable"))),
+                    "cgst": _num(_decimal(item.get("cgst"))),
+                    "sgst": _num(_decimal(item.get("sgst"))),
+                    "igst": _num(_decimal(item.get("igst"))),
+                    "total": _num(_decimal(item.get("total"))),
+                })
+        preferred = ["section", "number", "date", "party", "gstin", "place_of_supply",
+                     "taxable", "cgst", "sgst", "igst", "total"]
+        totals = result.get("totals", {})
+        table = _table("gst_register", "GST Outward Register", rows, preferred,
+                       {k: _num(_decimal(totals.get(k))) for k in
+                        ("taxable", "cgst", "sgst", "igst", "total")})
+        source = _source_gst(db, date_from, date_to)
+        checks = [
+            _check("row_count", "Documents listed", len(rows),
+                   "Invoices, credit and debit notes in the period",
+                   source["documents"], "records"),
+        ]
+        for label, key_name in (("Taxable value", "taxable"), ("CGST", "cgst"),
+                                ("SGST", "sgst"), ("IGST", "igst"),
+                                ("Invoice value", "total")):
+            checks.append(_check(
+                f"{key_name}_total", f"Report {label.lower()}",
+                ledger.money(totals.get(key_name)),
+                f"{label} summed from the documents",
+                source[key_name], "amount"))
+        return _envelope(
+            key, date_from, date_to, [table], checks,
+            [
                 "Outward supply register only; verify tax data before statutory filing.",
                 "Input GST purchase-register reconciliation is not available in this report.",
-            ]
-        table = _table("gst_register", "GST Outward Register", rows)
-        return _envelope(
-            key, date_from, date_to, [table],
-            [_check("row_count", "Report rows", len(rows), "Table rows", len(table["rows"]))],
-            limitations,
+                "Purchase orders record a cost, not a tax split, so no input tax credit "
+                "can be produced from them yet.",
+            ],
         )
-
-    if key == "hr_approvals":
-        # Handled above; kept explicit for catalog clarity.
-        raise RuntimeError("Approval report dispatch failed.")
 
     # Remaining general registers use the actual model classes and fields.
     if key == "sales":
@@ -803,7 +999,15 @@ def build(
             "created_at": r.created_at, "dispatched_at": r.dispatched_at,
         } for r in query.order_by(SalesOrder.created_at).all()]
         table = _table("sales_orders", "Sales Orders", rows)
-        return _empty_reconciled(key, date_from, date_to, table)
+        # Totals recomputed by the database, not re-added in Python.
+        source_count = query.count()
+        source_value = ledger.money(query.with_entities(func.coalesce(func.sum(SalesOrder.total), 0)).scalar())
+        report_value = ledger.money(sum((_decimal(r["total"]) for r in rows),
+                                        Decimal("0")))
+        return _empty_reconciled(key, date_from, date_to, table, source_count, [
+            _check("order_value", "Report order value", report_value,
+                   "Sum of order totals in the database", source_value, "amount"),
+        ])
 
     if key == "invoices":
         query = db.query(Invoice)
@@ -823,7 +1027,19 @@ def build(
             "grand_total": _num(_decimal(r.grand_total)),
         } for r in query.order_by(Invoice.invoice_date).all()]
         table = _table("invoices", "Sales Invoice Register", rows)
-        return _empty_reconciled(key, date_from, date_to, table)
+        source_count = query.count()
+        source_taxable = ledger.money(query.with_entities(func.coalesce(func.sum(Invoice.taxable_value), 0)).scalar())
+        source_grand = ledger.money(query.with_entities(func.coalesce(func.sum(Invoice.grand_total), 0)).scalar())
+        report_taxable = ledger.money(sum((_decimal(r["taxable_value"]) for r in rows),
+                                          Decimal("0")))
+        report_grand = ledger.money(sum((_decimal(r["grand_total"]) for r in rows),
+                                        Decimal("0")))
+        return _empty_reconciled(key, date_from, date_to, table, source_count, [
+            _check("taxable_value", "Report taxable value", report_taxable,
+                   "Taxable value in the database", source_taxable, "amount"),
+            _check("grand_total", "Report invoice value", report_grand,
+                   "Invoice value in the database", source_grand, "amount"),
+        ])
 
     if key == "leads":
         query = db.query(Lead)
