@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import html
 from datetime import datetime
-from decimal import Decimal
 
 from . import email_charts
 from .report_packs import _inr as inr
@@ -225,23 +224,8 @@ def _accounts(data: dict) -> str:
     tb = acc["trial_balance"]
     check = ("Debits equal credits" if tb["balanced"] else
              f"DOES NOT BALANCE: debits {inr(tb['debit_total'])} vs credits {inr(tb['credit_total'])}")
-    account_attention = []
-    if Decimal(acc["outstanding"]["overdue_60"]) > 0:
-        account_attention.append({
-            "severity": "amber", "title": "Receivables older than 60 days",
-            "detail": f"{inr(acc['outstanding']['overdue_60'])} is overdue.",
-            "href": f"{data['base_url']}/ui/#/accounts", "link": "Open accounts"})
-    if acc["credit"]["over_limit_count"]:
-        account_attention.append({
-            "severity": "red", "title": "Customers over their credit limit",
-            "detail": f"{acc['credit']['over_limit_count']} customers, "
-                      f"{inr(acc['credit']['over_limit_amount'])} above the limits.",
-            "href": f"{data['base_url']}/ui/#/accounts", "link": "Open credit use"})
-    if Decimal(acc["payables"]["due_this_week"]) > 0:
-        account_attention.append({
-            "severity": "amber", "title": "Payables falling due within 7 days",
-            "detail": f"{inr(acc['payables']['due_this_week'])} estimated from current supplier terms.",
-            "href": f"{data['base_url']}/ui/#/accounts", "link": "Open payables"})
+    # Accounts attention items are raised in the single "Needs attention" list
+    # above, so this block carries figures only and never repeats a warning.
     return (
         f'<hr style="border:0;border-top:1px solid {LINE};margin:0">'
         f'<div style="padding:22px 28px">'
@@ -252,8 +236,6 @@ def _accounts(data: dict) -> str:
         + _tiles(tiles)
         + f'<p style="font-size:12px;color:{"#1F6B4A" if tb["balanced"] else RED};margin:8px 0 0">'
           f'Trial balance: {_e(check)}.</p>'
-        + (f'<h3 style="font-size:14px;margin:16px 0 8px;color:{INK}">Accounts needs attention</h3>'
-           + _attention(account_attention) if account_attention else "")
         + "</div>")
 
 
@@ -337,7 +319,8 @@ def render(data: dict, attachments: list[dict], *, mode: str = "test",
     else:
         headline = "No sales figure is available for this period."
     attention_count = len(data["attention"])
-    headline += (f" {attention_count} item{'s' if attention_count != 1 else ''} need attention."
+    headline += (f" {attention_count} item{'s' if attention_count != 1 else ''} "
+                 f"{'need' if attention_count != 1 else 'needs'} attention."
                  if attention_count else " Nothing needs attention in this period.")
 
     test_banner = ""

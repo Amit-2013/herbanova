@@ -1,0 +1,81 @@
+[TEST MODE] Redirected to admin@example.test; 3 real recipient(s) were not sent to.
+
+HERBANOVA SAMPLE CO | Monthly MD Report | 1–31 Oct 2026
+Generated 1 Nov 2026, 04:02 AM IST
+
+KEY FIGURES
+- Sales: ₹ 8,90,900.00 (▲ up 151.7% vs previous)
+- Purchases: ₹ 30,000.00 (No prior period to compare)
+- Sales orders: 0 (No prior period to compare)
+- Collections: ₹ 1,00,000.00 (▲ up 100.0% vs previous)
+- Returns: ₹ 0.00 (No prior period to compare)
+- Receivables outstanding: ₹ 11,44,900.00 (No prior period to compare)
+- Gross margin: No data yet (GAP-A02)
+- Net profit: No data yet (GAP-A02)
+
+NEEDS ATTENTION
+- 1 customer is over their credit limit: ₹ 6,75,000.00 above the approved limits. http://127.0.0.1:8000/ui/#/accounts
+
+COMPARISON (this period, previous, last year, change)
+- Sales: ₹ 8,90,900.00, ₹ 3,54,000.00, ₹ 0.00, +151.7%
+- Purchases: ₹ 30,000.00, ₹ 0.00, ₹ 0.00, no prior figure
+- Orders: ₹ 0.00, ₹ 0.00, ₹ 0.00, no prior figure
+- Collections: ₹ 1,00,000.00, ₹ 50,000.00, ₹ 0.00, +100.0%
+- Returns: ₹ 0.00, ₹ 0.00, ₹ 0.00, no prior figure
+- Receivables outstanding: ₹ 11,44,900.00, —, —, no prior figure
+- Gross margin: No data yet (GAP-A02)
+- Net profit: No data yet (GAP-A02)
+
+SALES VS PURCHASES
+Period | Sales | Purchases
+- W1 01 Oct | ₹ 1,77,000.00 | ₹ 0.00
+- W2 08 Oct | ₹ 3,54,000.00 | ₹ 0.00
+- W3 15 Oct | ₹ 88,500.00 | ₹ 30,000.00
+- W4 22 Oct | ₹ 0.00 | ₹ 0.00
+- W5 29 Oct | ₹ 2,71,400.00 | ₹ 0.00
+
+RECEIVABLES AGEING
+Bucket | Outstanding | Invoices
+- 0-30 days | ₹ 7,90,900.00 | 5
+- 31-60 days | ₹ 3,54,000.00 | 2
+- 61-90 days | ₹ 0.00 | 0
+- 90+ days | ₹ 0.00 | 0
+
+TOP PRODUCTS
+- Sample tablets: ₹ 7,55,000.00
+
+TOP CUSTOMERS
+- Sample Distributors — Mumbai: ₹ 5,66,400.00
+- Sample Distributors — Delhi: ₹ 1,77,000.00
+- Sample Distributors — Chennai: ₹ 1,47,500.00
+
+TOP STATES
+- Maharashtra: ₹ 5,66,400.00
+- Delhi: ₹ 1,77,000.00
+- Tamil Nadu: ₹ 1,47,500.00
+
+ACCOUNTS SUMMARY
+- Revenue (taxable): ₹ 7,55,000.00
+- Collections: ₹ 1,00,000.00
+- Returns: ₹ 0.00
+- Output GST: ₹ 1,35,900.00 (input tax not captured, GAP-A05)
+- Receivables outstanding: ₹ 11,44,900.00 as at 2026-10-31
+- Receivables over 60 days: ₹ 0.00
+- Payables outstanding: ₹ 20,000.00 (due dates estimated)
+- Cash and bank net movement: ₹ 90,000.00 (no opening balance, GAP-A10)
+- Expenses: No data yet (GAP-A01)
+- Net profit: No data yet (GAP-A02)
+- Trial balance: debits equal credits
+- No financial-year or period lock is configured (GAP-A03)
+
+ATTACHED REPORTS
+- HERBANOVA_Monthly_MD_2026-10.pdf (Summary, comparison, ageing, top products, accounts, 23 rows, 3 KB)
+- HERBANOVA_Monthly_MD_2026-10_Detail.xlsx (Every table in this email, one sheet each, 23 rows, 10 KB)
+- HERBANOVA_Sales_Orders_2026-10.xlsx (Sales Orders, 0 rows, 6 KB)
+- HERBANOVA_Sales_Invoice_Register_2026-10.xlsx (Sales Invoice Register, 5 rows, 7 KB)
+
+View the full dashboard (login required): http://127.0.0.1:8000/ui/
+
+Scheduled by Administrator. Data is as at 2026-10-31.
+Every figure comes from the database; 'No data yet' marks an input the system does not capture.
+This email and its attachments are confidential and meant only for the named recipients.

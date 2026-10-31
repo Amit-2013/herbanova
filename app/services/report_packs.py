@@ -220,10 +220,19 @@ def _attention(db: Session, data: dict, base_url: str) -> list[dict]:
                     "href": f"{base_url}/ui/#/followups", "link": "Open follow-ups"})
     credit = data.get("credit")
     if credit and credit["over_limit_count"]:
+        count = credit["over_limit_count"]
         out.append({"severity": "red",
-                    "title": f"{credit['over_limit_count']} customers are over their credit limit",
+                    "title": (f"{count} customer{'s' if count != 1 else ''} "
+                              f"{'are' if count != 1 else 'is'} over their credit limit"),
                     "detail": f"{_inr(credit['over_limit_amount'])} above the approved limits.",
                     "href": f"{base_url}/ui/#/accounts", "link": "Open credit use"})
+    accounts = data.get("accounts")
+    if accounts and Decimal(accounts["payables"]["due_this_week"] or 0) > 0:
+        out.append({"severity": "amber",
+                    "title": "Payables falling due within 7 days",
+                    "detail": (f"{_inr(accounts['payables']['due_this_week'])} estimated "
+                               "from current supplier terms."),
+                    "href": f"{base_url}/ui/#/accounts", "link": "Open payables"})
     return out
 
 

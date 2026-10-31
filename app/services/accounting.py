@@ -20,6 +20,7 @@ from decimal import Decimal
 from sqlalchemy import Date, case, cast, func, select
 from sqlalchemy.orm import Session
 
+from ..core.india_states import state_name
 from ..core.rules import REPORT_TZ
 from ..models.accounts import Payment
 from ..models.core import (CreditNote, DebitNote, Distributor, Invoice, PurchaseOrder,
@@ -79,8 +80,20 @@ def _change(current, previous) -> float | None:
     return round(float((current - previous) / previous * 100), 1)
 
 
-def window(db: Session, start: date, end: date, as_of: date | None = None) -> dict:
-    """Every Accounts figure for one window. Snapshot figures use `as_of`."""
+def _invoice_state():
+    """The buyer state frozen on the invoice, with the master as last resort."""
+    return func.coalesce(Invoice.buyer_state_code, Distributor.state_code)
+
+
+def window(db: Session, start: date, end: date, as_of: date | None = None,
+           state: str | None = None) -> dict:
+    """Every Accounts figure for one window. Snapshot figures use `as_of`.
+
+    `state` narrows the flows that carry a buyer state (revenue, returns,
+    output GST and distributor receipts). Balances owed on suppliers, the
+    trial balance and the net cash movement are not split by state, and the
+    response says so rather than pretending they were filtered.
+    """
     as_of = as_of or end
     empty = start > end
     revenue = {"taxable": ZERO, "gross": ZERO, "discount": ZERO, "invoices": 0}
@@ -91,43 +104,60 @@ def window(db: Session, start: date, end: date, as_of: date | None = None) -> di
     paid_out = {"total": ZERO, "cash": ZERO, "bank": ZERO, "count": 0}
 
     if not empty:
-        row = db.execute(
-            select(func.count(Invoice.id),
-                   func.coalesce(func.sum(Invoice.taxable_value), 0),
-                   func.coalesce(func.sum(Invoice.grand_total), 0),
-                   func.coalesce(func.sum(Invoice.discount_total), 0),
-                   func.coalesce(func.sum(Invoice.cgst_total), 0),
-                   func.coalesce(func.sum(Invoice.sgst_total), 0),
-                   func.coalesce(func.sum(Invoice.igst_total), 0),
-                   func.coalesce(func.sum(Invoice.cess_total), 0),
-                   func.coalesce(func.sum(Invoice.tax_total), 0))
-            .where(Invoice.status == "issued", Invoice.invoice_date >= start,
-                   Invoice.invoice_date <= end)).one()
+        sales_q = (select(func.count(Invoice.id),
+                          func.coalesce(func.sum(Invoice.taxable_value), 0),
+                          func.coalesce(func.sum(Invoice.grand_total), 0),
+                          func.coalesce(func.sum(Invoice.discount_total), 0),
+                          func.coalesce(func.sum(Invoice.cgst_total), 0),
+                          func.coalesce(func.sum(Invoice.sgst_total), 0),
+                          func.coalesce(func.sum(Invoice.igst_total), 0),
+                          func.coalesce(func.sum(Invoice.cess_total), 0),
+                          func.coalesce(func.sum(Invoice.tax_total), 0))
+                   .where(Invoice.status == "issued", Invoice.invoice_date >= start,
+                          Invoice.invoice_date <= end))
+        if state:
+            sales_q = (sales_q.join(Distributor, Distributor.id == Invoice.distributor_id)
+                       .where(_invoice_state() == state))
+        row = db.execute(sales_q).one()
         revenue = {"taxable": Decimal(row[1]), "gross": Decimal(row[2]),
                    "discount": Decimal(row[3]), "invoices": int(row[0])}
         gst = {"cgst": Decimal(row[4]), "sgst": Decimal(row[5]),
                "igst": Decimal(row[6]), "cess": Decimal(row[7]),
                "total": Decimal(row[8])}
 
-        r = db.execute(select(func.count(CreditNote.id),
-                              func.coalesce(func.sum(CreditNote.grand_total), 0))
-                       .where(CreditNote.status == "issued",
-                              CreditNote.note_date >= start,
-                              CreditNote.note_date <= end)).one()
+        note_q = (select(func.count(CreditNote.id),
+                         func.coalesce(func.sum(CreditNote.grand_total), 0))
+                  .where(CreditNote.status == "issued",
+                         CreditNote.note_date >= start,
+                         CreditNote.note_date <= end))
+        debit_q = (select(func.count(DebitNote.id),
+                          func.coalesce(func.sum(DebitNote.grand_total), 0))
+                   .where(DebitNote.status == "issued",
+                          DebitNote.note_date >= start,
+                          DebitNote.note_date <= end))
+        if state:
+            note_q = (note_q.join(Invoice, Invoice.id == CreditNote.invoice_id)
+                      .join(Distributor, Distributor.id == Invoice.distributor_id)
+                      .where(_invoice_state() == state))
+            debit_q = (debit_q.join(Invoice, Invoice.id == DebitNote.invoice_id)
+                       .join(Distributor, Distributor.id == Invoice.distributor_id)
+                       .where(_invoice_state() == state))
+        r = db.execute(note_q).one()
         returns = {"value": Decimal(r[1]), "count": int(r[0])}
-        d = db.execute(select(func.count(DebitNote.id),
-                              func.coalesce(func.sum(DebitNote.grand_total), 0))
-                       .where(DebitNote.status == "issued",
-                              DebitNote.note_date >= start,
-                              DebitNote.note_date <= end)).one()
+        d = db.execute(debit_q).one()
         debits = {"value": Decimal(d[1]), "count": int(d[0])}
 
-        pay = db.execute(
+        receipt_q = (
             select(func.count(), func.coalesce(func.sum(Payment.amount), 0),
                    func.coalesce(func.sum(case(
                        (Payment.mode == "cash", Payment.amount), else_=0)), 0))
             .where(Payment.kind == "receipt", Payment.paid_on >= start,
-                   Payment.paid_on <= end)).one()
+                   Payment.paid_on <= end))
+        if state:
+            receipt_q = (receipt_q.join(Distributor,
+                                        Distributor.id == Payment.distributor_id)
+                         .where(Distributor.state_code == state))
+        pay = db.execute(receipt_q).one()
         collections = {"total": Decimal(pay[1]), "cash": Decimal(pay[2]),
                        "bank": Decimal(pay[1]) - Decimal(pay[2]), "count": int(pay[0])}
         out = db.execute(
@@ -159,6 +189,12 @@ def window(db: Session, start: date, end: date, as_of: date | None = None) -> di
     return {
         "from": start.isoformat(), "to": end.isoformat(), "as_of": as_of.isoformat(),
         "days": days,
+        "region": {"state": state, "name": state_name(state) if state else None,
+                   "label": state_name(state) if state else "All states",
+                   "applies_to": "Revenue, returns, output GST and distributor receipts.",
+                   "not_applied_to": ("Receivables and payables balances, cash and bank "
+                                      "totals, and the trial balance stay company-wide."),
+                   } if state else None,
         "revenue": {"taxable": _s(revenue["taxable"]), "gross": _s(revenue["gross"]),
                     "discount": _s(revenue["discount"]), "invoices": revenue["invoices"]},
         "returns": {"value": _s(returns["value"]), "count": returns["count"]},
@@ -186,7 +222,9 @@ def window(db: Session, start: date, end: date, as_of: date | None = None) -> di
             "Cash and bank is the net movement recorded in the window; opening balances are not captured (GAP-A10).",
             "Output GST only: purchase-side tax is not captured (GAP-A05).",
             "No financial-year or period lock is configured (GAP-A03).",
-        ],
+        ] + ([f"Region filter: {state_name(state) or state}. It narrows revenue, returns, "
+              "output GST and distributor receipts; balances and cash stay company-wide."]
+             if state else []),
     }
 
 
@@ -296,7 +334,7 @@ def trial_balance(db: Session, as_of: date) -> dict:
 
 
 def monthly_series(db: Session, first: date, months: int = 12) -> list[dict]:
-    """Revenue, collections and returns by calendar month, oldest first."""
+    """Revenue, collections, payments, output GST and returns by calendar month."""
     start = first
     # Move to the first month in the range.
     for _ in range(months - 1):
@@ -307,23 +345,25 @@ def monthly_series(db: Session, first: date, months: int = 12) -> list[dict]:
         rows[(cursor.year, cursor.month)] = {"year": cursor.year, "month": cursor.month,
                                              "label": cursor.strftime("%b %Y"),
                                              "revenue": ZERO, "collections": ZERO,
+                                             "payments": ZERO, "output_gst": ZERO,
                                              "returns": ZERO}
         cursor = _shift_month(cursor, 1)
     if True:
-        for day, value in db.execute(
-                select(Invoice.invoice_date, Invoice.taxable_value)
+        for day, taxable, tax in db.execute(
+                select(Invoice.invoice_date, Invoice.taxable_value, Invoice.tax_total)
                 .where(Invoice.status == "issued", Invoice.invoice_date >= start,
                        Invoice.invoice_date <= _month_end(first))).all():
             key = (day.year, day.month)
             if key in rows:
-                rows[key]["revenue"] += Decimal(value)
-        for day, value in db.execute(
-                select(Payment.paid_on, Payment.amount)
-                .where(Payment.kind == "receipt", Payment.paid_on >= start,
+                rows[key]["revenue"] += Decimal(taxable)
+                rows[key]["output_gst"] += Decimal(tax)
+        for day, kind, value in db.execute(
+                select(Payment.paid_on, Payment.kind, Payment.amount)
+                .where(Payment.paid_on >= start,
                        Payment.paid_on <= _month_end(first))).all():
             key = (day.year, day.month)
             if key in rows:
-                rows[key]["collections"] += Decimal(value)
+                rows[key]["collections" if kind == "receipt" else "payments"] += Decimal(value)
         for day, value in db.execute(
                 select(CreditNote.note_date, CreditNote.grand_total)
                 .where(CreditNote.status == "issued", CreditNote.note_date >= start,
@@ -332,7 +372,143 @@ def monthly_series(db: Session, first: date, months: int = 12) -> list[dict]:
             if key in rows:
                 rows[key]["returns"] += Decimal(value)
     return [{**r, "revenue": _s(r["revenue"]), "collections": _s(r["collections"]),
-             "returns": _s(r["returns"])} for r in rows.values()]
+             "payments": _s(r["payments"]), "output_gst": _s(r["output_gst"]),
+             "returns": _s(r["returns"]),
+             "net_cash": _s(r["collections"] - r["payments"])}
+            for r in rows.values()]
+
+
+def state_breakdown(db: Session, start: date, end: date) -> list[dict]:
+    """Revenue, output GST, returns and outstanding, by the invoice's buyer state.
+
+    Revenue and tax come from the issued invoices, returns from the credit notes
+    written against them, and outstanding from the same rows the ageing report
+    uses. A distributor with no state code is grouped as unrecorded; nothing is
+    guessed from a free-text address.
+    """
+    if start > end:
+        return []
+    code = _invoice_state()
+    flows = {str(row[0]).zfill(2) if row[0] else None: row for row in db.execute(
+        select(code, func.count(Invoice.id),
+               func.coalesce(func.sum(Invoice.taxable_value), 0),
+               func.coalesce(func.sum(Invoice.tax_total), 0),
+               func.coalesce(func.sum(Invoice.grand_total), 0))
+        .select_from(Invoice)
+        .join(Distributor, Distributor.id == Invoice.distributor_id)
+        .where(Invoice.status == "issued", Invoice.invoice_date >= start,
+               Invoice.invoice_date <= end)
+        .group_by(code)).all()}
+    returned = {str(row[0]).zfill(2) if row[0] else None: Decimal(row[1])
+                for row in db.execute(
+                    select(code, func.coalesce(func.sum(CreditNote.grand_total), 0))
+                    .select_from(CreditNote)
+                    .join(Invoice, Invoice.id == CreditNote.invoice_id)
+                    .join(Distributor, Distributor.id == Invoice.distributor_id)
+                    .where(CreditNote.status == "issued",
+                           CreditNote.note_date >= start,
+                           CreditNote.note_date <= end)
+                    .group_by(code)).all()}
+    states = dict(db.execute(select(Distributor.id, Distributor.state_code)).all())
+    outstanding: dict[str | None, Decimal] = {}
+    for row in ledger.receivable_rows(db):
+        value = Decimal(row["outstanding"])
+        if value <= 0:
+            continue
+        raw = states.get(row["distributor_id"])
+        key = str(raw).zfill(2) if raw else None
+        outstanding[key] = outstanding.get(key, ZERO) + value
+
+    keys = set(flows) | set(returned) | set(outstanding)
+    out = []
+    for key in keys:
+        flow = flows.get(key)
+        name = state_name(key) if key else None
+        out.append({
+            "key": key or "unrecorded",
+            "state": key,
+            "name": name or ("State not recorded" if not key else f"Unknown state ({key})"),
+            "known": bool(name),
+            "invoices": int(flow[1]) if flow else 0,
+            "revenue": _s(flow[2]) if flow else _s(ZERO),
+            "output_gst": _s(flow[3]) if flow else _s(ZERO),
+            "invoiced": _s(flow[4]) if flow else _s(ZERO),
+            "returns": _s(returned.get(key, ZERO)),
+            "outstanding": _s(outstanding.get(key, ZERO)),
+        })
+    out.sort(key=lambda r: (-Decimal(r["revenue"]), r["key"]))
+    return out
+
+
+def receivables_by_distributor(db: Session, limit: int = 10) -> dict:
+    """Outstanding per distributor, for the total -> party -> ledger drill-down."""
+    names = dict(db.execute(select(Distributor.id, Distributor.name)).all())
+    states = dict(db.execute(select(Distributor.id, Distributor.state_code)).all())
+    grouped: dict[int, dict] = {}
+    for row in ledger.receivable_rows(db):
+        value = Decimal(row["outstanding"])
+        if value <= 0:
+            continue
+        group = grouped.setdefault(row["distributor_id"], {
+            "distributor_id": row["distributor_id"],
+            "name": names.get(row["distributor_id"]) or str(row["distributor_id"]),
+            "state": states.get(row["distributor_id"]),
+            "invoices": 0, "outstanding": ZERO})
+        group["invoices"] += 1
+        group["outstanding"] += value
+    rows = sorted(grouped.values(), key=lambda r: (-r["outstanding"], r["distributor_id"]))
+    return {"total": _s(sum((r["outstanding"] for r in rows), ZERO)),
+            "count": len(rows),
+            "rows": [{**r, "outstanding": _s(r["outstanding"])} for r in rows[:limit]],
+            "note": ("Each distributor opens the party ledger, where every invoice, "
+                     "credit note and receipt is listed. There is no voucher posting "
+                     "state (GAP-A08).")}
+
+
+def report(db: Session, start: date, end: date, state: str | None = None) -> dict:
+    """The Accounts dashboard for one window: figures, trend, regions and gaps."""
+    out = window(db, start, end, state=state)
+    out["trend"] = monthly_series(db, end.replace(day=1))
+    out["states"] = state_breakdown(db, start, end)
+    out["receivables_by_distributor"] = receivables_by_distributor(db)
+    out["profit_and_loss"] = {
+        "rows": [
+            {"key": "revenue", "label": "Revenue (taxable)", "value": out["revenue"]["taxable"],
+             "available": True},
+            {"key": "returns", "label": "Less returns", "value": out["returns"]["value"],
+             "available": True, "good_when_up": False},
+            {"key": "collections", "label": "Collected in the window",
+             "value": out["collections"]["total"], "available": True},
+            {"key": "expenses", "label": "Expenses", "value": None, "available": False,
+             "gap": "GAP-A01", "note": "No expense record or expense head exists."},
+            {"key": "net_profit", "label": "Net profit", "value": None, "available": False,
+             "gap": "GAP-A02", "note": "Cost of goods and expenses are not captured."},
+        ],
+        "note": ("Revenue and returns come from issued documents. Expenses and net "
+                 "profit cannot be shown until they are captured; no figure is inferred."),
+    }
+    out["cards"] = [
+        {"key": "revenue", "label": "Revenue", "value": out["revenue"]["taxable"],
+         "href": "#/reports", "note": "Issued invoices, taxable value before GST."},
+        {"key": "collections", "label": "Collections", "value": out["collections"]["total"],
+         "href": "#/accounts", "note": "Receipts dated in the window."},
+        {"key": "outstanding", "label": "Receivables", "value": out["outstanding"]["total"],
+         "href": "#/accounts", "note": "As at the window end, net of notes and receipts."},
+        {"key": "overdue_60", "label": "Over 60 days", "value": out["outstanding"]["overdue_60"],
+         "href": "#/accounts", "note": "The part of receivables ageing past 60 days."},
+        {"key": "payables", "label": "Payables", "value": out["payables"]["total"],
+         "href": "#/accounts", "note": "Goods received, less payments; due dates estimated."},
+        {"key": "payable_week", "label": "Payable within 7 days",
+         "value": out["payables"]["due_this_week"], "href": "#/accounts",
+         "note": "Estimated from each supplier's current payment terms."},
+        {"key": "gst", "label": "Output GST", "value": out["output_gst"]["total"],
+         "href": "#/accounts", "note": "Output only; input tax is not captured (GAP-A05)."},
+        {"key": "cash_bank", "label": "Cash and bank (net)", "value": out["cash_bank_net"],
+         "href": "#/accounts", "note": "Receipts minus payments in the window."},
+    ]
+    out["net_profit"] = {"available": False, "value": None, "gap": "GAP-A02",
+                         "note": "Cost of goods and expenses are not captured."}
+    return out
 
 
 def compare(db: Session, mode: str, first: date, today: date) -> dict:
@@ -377,6 +553,16 @@ def compare(db: Session, mode: str, first: date, today: date) -> dict:
                "As at the window end, estimated due dates."),
         metric("cash_bank", "Cash and bank (net movement)", "amount",
                lambda s: s["cash_bank_net"], "Receipts minus payments in the window."),
+        {"key": "expenses", "label": "Expenses", "unit": "amount",
+         "current": None, "previous": None, "last_year": None,
+         "previous_change": None, "last_year_change": None,
+         "available": False, "gap": "GAP-A01",
+         "note": "No expense record or expense head exists, so expenses cannot be compared."},
+        {"key": "net_profit", "label": "Net profit", "unit": "amount",
+         "current": None, "previous": None, "last_year": None,
+         "previous_change": None, "last_year_change": None,
+         "available": False, "gap": "GAP-A02",
+         "note": "Cost of goods and expenses are not captured."},
     ]
     month_state = windows["state"]
     if month_state == "future":
