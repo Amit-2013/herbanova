@@ -1,0 +1,122 @@
+# Dashboard v2 — decisions and assumptions
+
+**Date:** 1 November 2026
+**Branch:** `feature/dashboard-v2`
+**Rule applied throughout:** when the data does not exist, show "No data yet" with the gap code; never invent a figure; never change an existing permission; every schema change gets a migration and a rollback.
+
+This file records every decision taken without the owner present, so each one can be reviewed or reversed.
+
+---
+
+## D-01. Work happens on a new branch with one commit per step
+
+**Decision.** All v2 work is committed to `feature/dashboard-v2`, one commit per requested step, with the verified pre-v2 work as the first (baseline) commit.
+**Why.** The owner asked for a branch and per-step commits. A separate baseline keeps the v2 history readable and gives a clean rollback point (`master` is untouched).
+**How to reverse.** `git checkout master` and delete the branch; no data or schema on `master` changed.
+
+## D-02. The date filter defaults to the current month, not 30 days
+
+**Decision.** `from_date`/`to_date` default to the first day of the current month and today. `range=7|30|90` stays accepted for older callers and is translated into the same window ending today.
+**Why.** The requirement says the default is the current month. Keeping `range` avoids breaking the two existing dashboard tests and any saved bookmark.
+**Consequence.** A request with only `range` returns `from`/`to` for that window; a request with dates ignores `range`.
+
+## D-03. Date validation is server-side and strict
+
+**Decision.** Reject `from_date > to_date` and any `to_date` after today with HTTP 422. `from_date` may be any past date.
+**Why.** The requirement says no future dates. Validating on the server keeps the truth out of the browser's hands; the UI mirrors the message.
+**Exception.** Forecast and projection figures inside the MoM/YoY page are labelled as estimates and are computed from data up to today, never by querying a future date.
+
+## D-04. "As of today" cards do not move with the range
+
+**Decision.** Stock, expiry, batches, warehouse capacity and open purchase orders remain current snapshots and carry the subtitle "As of {date}". Sales, purchases, orders, returns, receipts, top products, ageing-by-period, leads and activity follow the selected dates.
+**Why.** A stock snapshot cannot be reconstructed for an arbitrary historical day without daily snapshots; the movement ledger does allow it for units on hand, which is why only the stock-history trend uses the range. Labelling prevents a reader from assuming the range applies everywhere.
+
+## D-05. Ageing stays "as of the end of the selected range"
+
+**Decision.** Receivables ageing is computed on the selected `to_date`, not on today, and the card says "As of {to_date}". When no date is chosen it is today, which is the previous behaviour.
+**Why.** The ageing report already accepts an as-of date; using it makes the card reconcile with the report for the same date.
+
+## D-06. Approvals are decided inline, using the existing endpoint
+
+**Decision.** Each row on the Overview gets Approve and Reject buttons. Approve sends the existing `POST /api/approvals/{id}/decide` with a default reason "Approved from the dashboard"; Reject asks for a reason in a drawer field and requires at least 3 characters. The card, the KPI tile and the sidebar badge refresh from one extra `/api/dashboard` call after a decision.
+**Why.** Reusing the endpoint keeps every rule (segregation of duties, admin-only credit limits, audit log) in one place. The reason field is required by the API (`min_length=3`), so the UI supplies a truthful, visible default rather than inventing one on the server.
+**Consequence.** A user who cannot decide sees the row with disabled buttons and the reason in words; a requester sees "You raised this request".
+
+## D-07. "Who may decide" is described, not guessed
+
+**Decision.** The API returns `deciders` as a list of role words derived from the same rule `can_decide` uses: "Administrator" for credit-limit and post-billing; "Administrator or an approver with approval:decide" for sales orders; the specific HR permission for HR types. Pending request types with no handler say "No decision handler yet".
+**Why.** Naming the rule in words is honest; naming individual people would be wrong (any holder of the permission may decide) and could go stale.
+
+## D-08. Purchases remain valued at order cost
+
+**Decision.** The purchases line continues to value received goods at `purchase_order_lines.unit_cost`, labelled in the card and the metric register.
+**Why.** There is no purchase invoice or landed-cost capture. Using the order cost is the only sourced number; zero-cost lines count as zero because the alternative would be to guess a cost.
+**Consequence.** Sales (tax-inclusive) and purchases (cost, exclusive of tax) are different bases; the card legend says so.
+
+## D-09. Warehouse capacity is stored in units with one optional unit word
+
+**Decision.** Add `warehouses.capacity_units` (integer ≥ 0, nullable) and `warehouses.capacity_note` (short free text such as "pallets"). A NULL capacity means "not configured" and the UI says so; it never means zero.
+**Why.** Stock on hand is measured in units, so capacity in units is the only comparison that needs no conversion. A note field lets the owner say "120 pallets" without a second unit system that the system cannot convert.
+**Migration.** `0009_warehouse_capacity` adds both columns (nullable, no default); its `downgrade()` drops them. No existing row is rewritten.
+
+## D-10. Capacity warnings are warnings, not blocks, by default
+
+**Decision.** A goods receipt that would take a warehouse above its configured capacity returns HTTP 409 "capacity exceeded" unless the caller sends `allow_over_capacity=true`. That flag is only honoured for an Administrator, and the override is written to the audit log with the warehouse, the quantity and the new total.
+**Why.** Blocking stock receipt outright could stop the business; a silent warning could let a warehouse overflow. An explicit administrator override is the middle ground and is fully logged.
+**Dispatch.** Dispatch is not capped by capacity: it can only reduce stock. It shows the source warehouse's remaining stock and capacity in the dispatch result so the operator sees the position.
+**Transfers.** There is no transfer endpoint, so no transfer check exists (GAP-V09, recorded, not built).
+
+## D-11. The utilisation report is additive and read-only
+
+**Decision.** Add `warehouse_utilisation` to the report catalog, permission `stock:read`, using the same query as the dashboard.
+**Why.** The requirement asks for reconciliation; using one function for both guarantees it. No new permission is introduced.
+
+## D-12. The MoM/YoY page uses one endpoint and two explicit modes
+
+**Decision.** `GET /api/dashboard/compare?mode=full_month|mtd&month=YYYY-MM`. `full_month` compares the whole calendar month with the whole previous month and the same month last year. `mtd` compares day 1 to `min(today, month end)` with the same day number in the previous month (capped at that month's last day) and in the same month last year (capped the same way).
+**Why.** Two explicit modes are clearer than inferring "month to date" from a range, and they make the comparison dates explainable on screen.
+**Zero base.** When the comparison value is zero or missing, the change is `null` and the UI says "No data yet" or "New" (for a positive current value against zero), never infinity or NaN.
+**Future months.** A month that has not started may be selected; every figure is zero and the cards say "No data yet". The current month is labelled "Current month (incomplete)".
+
+## D-13. Gross margin and new customers are shown as gaps
+
+**Decision.** The comparison card for gross margin returns `available: false` with `gap: GAP-D04` because neither stock nor invoice lines carry a cost. New customers returns `available: false` with `gap: GAP-V16` because distributors have no creation timestamp.
+**Why.** Computing margin as revenue would be wrong; counting all customers as "new" would be wrong. Both are shown as "No data yet" and listed for review.
+
+## D-14. Geography uses the invoice's frozen buyer state
+
+**Decision.** The state is `invoices.buyer_state_code` from the issued invoice snapshot (falling back to the distributor's current state only when a row predates the snapshot — none exist today). District and city are not available and are not offered. Invoices without any state code are grouped under "Location not recorded" so the total reconciles.
+**Why.** The invoice snapshot is immutable and is the document of record for place of supply. The distributor master can change; the invoice cannot.
+**Map.** The page draws a local, hand-built state tile grid (an inline SVG built in the browser from a fixed state layout) shaded by the selected metric, with a ranked list as the accessible equivalent on phones. No external map service, no network request. A true geographic outline is not drawn because a hand-drawn India outline risks being inaccurate; the tile grid is labelled "State tile map".
+**Territory.** The free-text `distributors.territory` is not used as a geography key (GAP-V12); the page says so.
+**Role scope.** Geography is gated by `sales:read` (and return figures additionally by `accounts:read` where they come from notes). There is no territory-scoped user model, so "a regional user sees only their territory" cannot be enforced and is recorded as a gap rather than faked.
+
+## D-15. Returns by region are reported at state level only
+
+**Decision.** Return value and count come from issued credit notes grouped by the invoice's buyer state. Return reason is shown as the free text recorded on the note; no categories are invented (GAP-V10).
+**Why.** Credit note lines carry the product and quantity, but reasons are prose. Grouping prose would require an unstated dictionary.
+
+## D-16. Export is CSV for the new tables
+
+**Decision.** The MoM/YoY comparison table and the geography table export to CSV through the browser from the data already rendered, naming the exact compared dates in the file header. PDF export of these two tables is not added in v2.
+**Why.** The existing export service builds PDFs from the report catalog; these are dashboard tables, not catalog reports, and adding a second PDF layout would duplicate the document pipeline. CSV is a complete, honest export; the gap is recorded.
+
+## D-17. Caching follows the existing rule
+
+**Decision.** The 45-second in-process cache is keyed by user, permissions, date range, mode and month, and is disabled outside production and for `_test` databases (the existing rule). No new cache layer.
+**Why.** Keeps behaviour consistent with the current dashboard and prevents tests reading another test's payload.
+
+## D-18. No existing permission is changed
+
+**Decision.** New endpoints reuse `approval:read`, `sales:read`, `stock:read`, `accounts:read`. The capacity editor reuses `stock:write`; the capacity override additionally requires the Administrator role. No role's permission set is edited, and `BASELINE_ROLE_PERMS` is untouched.
+**Why.** The owner forbade changing existing permissions. Reusing an existing read permission for a new read endpoint is additive and keeps the permission matrix stable.
+
+## D-19. Invoice print signature block
+
+**Decision.** Centre the company line (`For {seller}`) and "Authorised signatory" on the same horizontal axis, above and below the signature line, in both the invoice and the credit/debit note layout.
+**Why.** They are one signature block; right-aligning the company name while centring the designation makes the two lines look misaligned on paper. The fix is layout-only and changes no document content.
+
+## D-20. Demo data is not added in v2
+
+**Decision.** No new demo rows are seeded on this branch. The existing marked demo seed and its rollback remain the only synthetic records.
+**Why.** The owner's data-safety rules; v2 changes are verified against the existing demo set and the isolated test database.
