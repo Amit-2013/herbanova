@@ -380,3 +380,112 @@ These are the choices that were safe to make autonomously but are business or po
 11. **Deployment.** Apply migrations `0009_warehouse_capacity` and `0010_comparison_indexes` before starting the new code. Neither rewrites data, and both have downgrades. Set capacity for each warehouse after deployment if you want fill bars.
 
 **Skipped, with reasons:** stock transfers (no endpoint — GAP-V09); district/city/pincode (not captured — GAP-V11); gross margin (no cost — GAP-D04); new customers (no creation date — GAP-V16); territory-scoped geography (no scope model); PDF export of the new tables (would duplicate the document pipeline); prior-year comparison values (no data in the prior year yet — GAP-V17).
+
+---
+
+# Accounts dashboards and scheduled emails (November 2026)
+
+This register covers the Accounts dashboard, its comparisons and the scheduled report emails. The repository has **no Feature Inventory and no Requirements Traceability Matrix**; this file, `docs/DASHBOARD_AUDIT.md` and `docs/DASHBOARD_DECISIONS.md` are the substitute, with each requirement mapped to the screen, endpoint, service and test that implements it.
+
+## 14. Accounts endpoints and screens
+
+| Endpoint | Permission | Purpose |
+|---|---|---|
+| `GET /api/accounts/report?from_date&to_date&state` | `accounts:reports` | Window figures, 12-month trend, by-state table, receivables by distributor, gaps |
+| `GET /api/accounts/report/compare?mode=full_month\|mtd&month=YYYY-MM` | `accounts:reports` | Current window vs previous month vs same month last year |
+| `GET /api/accounts/outstanding`, `/ageing`, `/trial-balance`, `/gst-register`, `/payments`, ledgers | `accounts:read` | Existing statements, unchanged |
+| Overview `GET /api/dashboard` → `accounts` | `accounts:reports` | Receivables, payables, cash and bank, output GST, net-profit gap for the selected dates |
+
+**Overview section.** Five tiles (Receivables, Payables, Cash and bank (net), Output GST, Net profit) under the KPI row. The first four open Accounting & Finance; Net profit reads "No data yet" with GAP-A02. The section is absent for any role without `accounts:reports`.
+
+**Accounting & Finance screen.** Above the existing statements when the role holds `accounts:reports`:
+
+| Section | What it shows | Source |
+|---|---|---|
+| Accounts performance | Date window, region filter, eight KPI tiles, notes | `accounting.window()` |
+| Profit and loss | Revenue, returns, collections; Expenses and Net profit as explicit gaps | `accounting.report()` |
+| Month on month and year on year | Both modes; current / previous / last year / change; no percentage against zero | `accounting.compare()` |
+| Monthly trend | Revenue, collections, payments, net cash, output GST, returns for 12 months | `accounting.monthly_series()` |
+| By state | Invoices, revenue, share, output GST, returns, outstanding; Filter button | `accounting.state_breakdown()` |
+| Receivables by distributor | Outstanding per party, opening the append-only party ledger | `accounting.receivables_by_distributor()` + `/api/accounts/ledger/distributors/{id}` |
+| Data gaps | GAP-A01 to GAP-A10 with the missing input | `accounting.GAPS` |
+
+## 15. Accounts metric definitions
+
+| Metric | Definition | Window behaviour |
+|---|---|---|
+| Revenue (taxable) | Sum of `taxable_value` on issued invoices | Flow, exact window |
+| Invoiced (with GST) | Sum of `grand_total` on issued invoices | Flow |
+| Collections | Receipts dated in the window | Flow |
+| Returns | Issued credit notes dated in the window | Flow |
+| Output GST | `tax_total` printed on issued invoices | Flow; input tax not captured (GAP-A05) |
+| Receivables outstanding | Issued invoices less receipts and credit/debit notes | Snapshot as at window end |
+| Over 60 days | Ageing buckets 61-90 and 90+ | Snapshot |
+| Payables outstanding | Goods received at order cost less payments | Snapshot; due dates estimated from current supplier terms |
+| Payable within 7 days | Outstanding whose estimated due date falls in the next seven days | Snapshot |
+| Cash and bank (net) | Receipts minus supplier payments | Flow; opening balances not captured (GAP-A10) |
+| Net profit | **No data yet** | GAP-A02: cost and expenses are not captured |
+| Region filter | Narrows revenue, returns, output GST and distributor receipts by buyer state | Balances and trial balance stay company-wide |
+
+## 16. Permissions
+
+| Right | Who has it by default | Effect |
+|---|---|---|
+| `accounts:read` | Administrator, sales desk | Statements, ledgers, ageing, GST register, trial balance |
+| `accounts:reports` | Administrator only (grantable) | Accounts performance section, Overview Accounts tiles, Accounts email block |
+| `accounts:write` | Administrator | Record receipts and payments |
+
+Both checks are server-side (`require("accounts:reports")` and `require("accounts:read")`). The screen hides what the API would refuse; it never substitutes for the API check.
+
+## 17. Data gaps
+
+GAP-A01 expenses and heads · GAP-A02 cost of goods and net profit · GAP-A03 financial-year and period locks · GAP-A04 invoice due dates · GAP-A05 input GST and net payable · GAP-A06 GSTR-1/3B reconciliation · GAP-A07 TDS and statutory dues · GAP-A08 vouchers and day book · GAP-A09 bank reconciliation · GAP-A10 opening balances and balance sheet.
+
+Every one of these appears in the screen's Data gaps panel and in the email accounts block; none is drawn as zero.
+
+## 18. Verification
+
+| Check | Result |
+|---|---|
+| Accounts report tests | 9 tests in `tests/test_accounts_reports.py`: role gate (`accounts:read` is refused), dates and state validation, ageing and trial-balance reconciliation, Overview tiles equal the report, region filter scope, state and trend sums, gap semantics, both comparison modes with a zero base, email accounts block equal to the report |
+| Trial balance | Debits equal credits on every report; the equality is asserted, not hidden |
+| Email figures | `report_packs.build` and `/api/accounts/report` call the same `accounting.window()`; the test compares revenue, outstanding and output GST |
+| Browser check | Isolated helper on 127.0.0.1:8765, headless Chrome at 1440 px: Overview Accounts tiles rendered; Accounting & Finance showed eight KPI tiles, P&L gaps, both comparison modes (November incomplete vs October vs November 2025), trend, By state with a Filter button, receivables drill with Open ledger, and all ten gaps; no console errors. Desktop layout has no horizontal overflow. The helper and its temporary profile were deleted; no real email was sent. |
+
+## 19. What is skipped or needs your decision
+
+1. **Role for the MD.** There is no seeded MD login. Create an `md` role, grant `accounts:reports` (and `accounts:read` if the statements should be visible), and assign it to the MD user.
+2. **Region scope.** Only flows that carry a buyer state can be filtered. A state filter does not narrow balances or cash; the screen says so. If you need a balance split by state, outstanding must be grouped on the distributor state at invoice time, which needs a stored snapshot.
+3. **Expenses and net profit** stay "No data yet" until an expense table with heads is added (GAP-A01/A02).
+4. **Period locks** are not enforced because no lock date is stored (GAP-A03). Adding a lock is a schema and workflow decision.
+5. **Vouchers** remain receipts and payments; the party ledger is the drill-down, and it links the document rather than a voucher (GAP-A08).
+6. **CSV only.** The Accounts screen exports CSV; PDF is produced by the email pack's attachment builder.
+
+## 20. Scheduled email reports
+
+A separate section of this register; the operator guide is [docs/EMAIL_REPORTS.md](EMAIL_REPORTS.md).
+
+| Area | What exists |
+|---|---|
+| Packs | Daily Business Summary, Weekly Management Report, Monthly MD Report, Alerts Digest, Accounts Report, Custom |
+| Timing | Daily, Monday–Friday, chosen weekdays, monthly (day / last day / first working day), five-field cron; several slots; `Asia/Kolkata` default; holidays shift or skip; month-end and leap years handled |
+| Recipients | Managed list with MD, Administrators and extras; To/CC/BCC; groups expanded at send time; unsubscribe only for extras |
+| Content | Table HTML at 640 px, inline CSS, CID charts with alt text and data tables, plain-text alternative, comparison table, top lists, footer, test/preview banners |
+| Attachments | Summary PDF, detail XLSX, up to two register XLSX; named, listed with rows and size; 9.5 MB budget with the dropped files named |
+| Delivery | Separate DB-backed worker, unique run key, `SKIP LOCKED`, 30-minute stale release, 4 attempts with 5/15/45-minute backoff, Telegram alert on final failure |
+| Screens | Administrator-only `#/scheduled`: Schedules, Recipients, Delivery log with Preview, Send test, Run now, Edit, Pause/Resume, Duplicate, Delete, Resend |
+| Guardrails | `EMAIL_MODE=test` and `EMAIL_SEND_ENABLED=false` by default; test mode redirects to one Administrator; no real email until the owner approves the SMTP settings and recipient list |
+| Audit | Every schedule and recipient change, every queue, every send and every final failure writes an audit row |
+| Worker | `python -m app.email_worker` (loop) or `--once` (one cycle) |
+| Samples | [docs/samples/](samples/) — rendered HTML and plain text from synthetic test data only |
+
+The repository still has no Feature Inventory or Requirements Traceability Matrix;
+sections 14–20 are the substitute, with each requirement tied to its screen,
+endpoint, service and test. The email requirements map to `app/services/schedule.py`
+(timing), `report_packs.py` (figures), `email_render.py` (content),
+`mailer.py` (test/live gate), `email_worker.py` (delivery), `app/api/email_reports.py`
+(Administrator API) and the two test files named in EMAIL_REPORTS.md §11.
+
+**Needs your decision before go-live:** SMTP settings, sender address, recipient
+list and who may receive the Accounts block. The checklist is in
+[docs/EMAIL_REPORTS.md](EMAIL_REPORTS.md) §12.

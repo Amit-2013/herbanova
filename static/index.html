@@ -174,6 +174,11 @@
 
         <div class="kpis" id="stats"></div>
 
+        <div class="panel flush hide" id="accOverviewPanel">
+          <div class="panel-h"><h2>Accounts</h2><span class="muted" id="accOverviewNote"></span></div>
+          <div class="kpis" id="accOverview"></div>
+        </div>
+
         <div class="dash-grid dash-chart-grid">
           <div class="panel dash-panel" id="chartPanel">
             <div class="panel-h">
@@ -591,6 +596,58 @@
 
     <!-- Accounting and finance -->
     <section id="v-accounts" class="view hide">
+      <div class="panel hide" id="accPerfPanel">
+        <div class="panel-h"><h2>Accounts performance</h2><span class="muted" id="accPerfNote">Loading figures…</span></div>
+        <div class="toolbar">
+          <label for="accFrom">From <input id="accFrom" type="date" aria-label="From date"></label>
+          <label for="accTo">To <input id="accTo" type="date" aria-label="To date"></label>
+          <select id="accState" aria-label="Filter by buyer state"><option value="">All states</option></select>
+          <button class="btn ghost" type="button" data-act="load-acc-report">Refresh</button>
+          <button class="btn ghost" type="button" data-act="export-acc">Export CSV</button>
+        </div>
+        <p class="err hide" id="accPerfErr" role="alert"></p>
+        <div class="kpis" id="accKpis"></div>
+        <p class="muted panel-note" id="accPerfGaps"></p>
+      </div>
+
+      <div class="panel flush hide" id="accPnlPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Profit and loss</h2><span class="muted">Only what the documents can prove. A figure that is not captured says so.</span></div>
+        <div id="accPnl"></div>
+      </div>
+
+      <div class="panel flush hide" id="accCmpPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Month on month and year on year</h2><span class="muted" id="accCmpNote"></span></div>
+        <div class="toolbar">
+          <div class="seg compact" role="group" aria-label="Comparison mode">
+            <button type="button" data-acc-mode="full_month" aria-pressed="true">Full month</button>
+            <button type="button" data-acc-mode="mtd" aria-pressed="false">Month to date</button>
+          </div>
+          <input id="accMonth" type="month" aria-label="Comparison month">
+        </div>
+        <div id="accCmp"></div>
+      </div>
+
+      <div class="panel flush hide" id="accTrendPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Monthly trend</h2><span class="muted">Revenue, collections, payments, net cash and output GST by calendar month.</span></div>
+        <div id="accTrend"></div>
+      </div>
+
+      <div class="panel flush hide" id="accStatePanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>By state</h2><span class="muted">Buyer state as frozen on each issued invoice. Select a state to filter the window above.</span></div>
+        <div id="accStates"></div>
+      </div>
+
+      <div class="panel flush hide" id="accDrillPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables by distributor</h2><span class="muted" id="accDrillNote"></span></div>
+        <div id="accDrill"></div>
+      </div>
+
+      <div class="panel hide" id="accGapPanel">
+        <div class="panel-h"><h2>Data gaps</h2><span class="muted">What Accounts cannot report yet, and why.</span></div>
+        <div id="accGaps"></div>
+      </div>
+
+      <div id="accStatements">
       <div class="panel flush">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables</h2><span class="muted" id="recvSub">What distributors still owe on issued invoices.</span></div>
         <div class="tw"><table>
@@ -659,6 +716,7 @@
           <tbody id="tbrows"></tbody>
         </table></div>
         <div class="empty hide" id="tbempty"></div>
+      </div>
       </div>
     </section>
 

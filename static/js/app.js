@@ -26,6 +26,8 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                tax: {company: null, rates: [], slabs: [], states: [], rateFilter: "all"},
                invoices: [], creditNotes: [], debitNotes: [], invFilter: "all",
                accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
+               acc: {from: "", to: "", state: "", report: null, loading: false, error: null, seq: 0,
+                     cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0}},
                sr: {status: null, schedules: [], recipients: [], deliveries: [],
                     tab: "schedules", logStatus: "", logPack: ""},
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
@@ -80,6 +82,8 @@ try {
   if (/^\d{4}-\d{2}$/.test(month || "")) state.compare.month = month;
 } catch (e) { /* storage blocked */ }
 { const w = dashWindow("month"); state.geo.from = w.from; state.geo.to = w.to; }
+{ const w = dashWindow("month"); state.acc.from = w.from; state.acc.to = w.to; }
+const accAllowed = () => can("accounts:reports");
 try {
   const from = localStorage.getItem("hb.geoFrom");
   const to = localStorage.getItem("hb.geoTo");
@@ -162,7 +166,7 @@ function enter(u) {
   show("#navLeads", can("lead:read"));
   show("#navSuppliers", can("supplier:read"));
   show("#navBilling", can("sales:read"));
-  show("#navAccounts", can("accounts:read"));
+  show("#navAccounts", can("accounts:read") || can("accounts:reports"));
   show("#navHr", can("hr:read") || can("hr:attendance_self"));
   show("#navSettings", can("user:manage") || can("tax:read") || can("audit:read") || can("hr:read"));
   // Every other module link follows the read permission its API requires, so a
@@ -351,7 +355,8 @@ function route() {
   const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
   // Staff with only self-service attendance still reach the HR page for their own day.
   const allowed = (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
-    || (v === "compare" && (can("sales:read") || can("stock:read"))))
+    || (v === "compare" && (can("sales:read") || can("stock:read")))
+    || (v === "accounts" && can("accounts:reports")))
     && (v !== "scheduled" || srAllowed());
   state.view = TITLES[v] && allowed ? v : "dash";
   $("#shell").dataset.view = state.view;
@@ -371,6 +376,7 @@ function route() {
   if (state.view === "hr") { if (can("hr:read")) openHr(); else renderHr(); }
   if (state.view === "compare") loadCompare();
   if (state.view === "geo") loadGeo();
+  if (state.view === "accounts") openAccountsReports();
   if (state.view === "scheduled") openScheduled();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
@@ -425,6 +431,7 @@ function renderHead() {
     sub = out
       ? `${money(out.receivable_total)} receivable, ${money(out.payable_total)} payable, from the documents as they stand.`
       : "Outstanding, ledgers, GST registers and the trial balance, all built from the documents.";
+    if (can("accounts:reports")) sub += " The performance section compares any window with the previous month and the same month last year.";
     if (can("accounts:write")) {
       act = `<button class="btn" data-act="new-entry" data-kind="receipt" type="button">Record receipt</button>`
           + ` <button class="btn ghost" data-act="new-entry" data-kind="payment" type="button">Record payment</button>`;
@@ -512,7 +519,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -563,6 +570,7 @@ function renderDash() {
 
   renderAttention(d.attention || []);
   renderKpis(d.kpis || []);
+  renderDashAccounts(d.accounts);
   renderChart(d.sales_vs_purchases);
   renderDashAgeing(d.receivables_ageing);
   renderExpiry(d);
@@ -1984,6 +1992,10 @@ function toggleTheme() {
 
 /* ---------- accounts ---------- */
 function renderAccounts() {
+  // The statements need accounts:read; the performance section above is
+  // accounts:reports, so a role may reach this screen with only that right.
+  const stmts = $("#accStatements");
+  if (stmts) stmts.classList.toggle("hide", !can("accounts:read"));
   if (!can("accounts:read")) return;
   const out = state.accounts.outstanding;
   const recv = out ? out.receivables.filter(r => Number(r.outstanding) > 0) : [];
@@ -2081,6 +2093,284 @@ async function loadTrialBalance() {
   const res = await api(`/api/accounts/trial-balance${asOf ? "?as_of=" + encodeURIComponent(asOf) : ""}`);
   if (!res.ok) return toast(res, "Trial balance could not be built");
   state.accounts.tb = res.body; renderTrialBalance();
+}
+
+/* ---------- accounts performance (accounts:reports) ----------
+   The statements above need accounts:read. This section is the narrower
+   accounts:reports right: the Administrator, the MD or an Accounts head the
+   Administrator has granted it. The server enforces the same key. */
+const accMoney = v => (Number(v) < 0 ? "−₹ " : "₹ ") + money(Math.abs(Number(v) || 0));
+const accQuery = () => {
+  const p = new URLSearchParams({from_date: state.acc.from, to_date: state.acc.to});
+  if (state.acc.state) p.set("state", state.acc.state);
+  return p.toString();
+};
+const ACC_PANELS = ["#accPerfPanel", "#accPnlPanel", "#accCmpPanel", "#accTrendPanel",
+                    "#accStatePanel", "#accDrillPanel", "#accGapPanel"];
+
+function renderDashAccounts(a) {
+  const panel = $("#accOverviewPanel"), el = $("#accOverview");
+  if (!panel || !el) return;
+  panel.classList.toggle("hide", !a);
+  if (!a) return;
+  $("#accOverviewNote").textContent =
+    `${fmtDate(a.from)} to ${fmtDate(a.to)} · snapshot balances as at ${fmtDate(a.to)}`;
+  const tiles = [
+    ["Receivables", a.receivable_total, "#/accounts",
+     `${accMoney(a.overdue_60)} has been outstanding more than 60 days.`],
+    ["Payables", a.payable_total, "#/accounts",
+     `${accMoney(a.payable_due_this_week)} estimated to fall due within 7 days.`],
+    ["Cash and bank (net)", a.cash_bank_net, "#/accounts",
+     "Receipts minus payments in the selected window; opening balances are not captured."],
+    ["Output GST", a.output_gst, "#/accounts",
+     "Output only; purchase-side tax is not captured."],
+    ["Net profit", null, "#/accounts", a.net_profit_note || "Cost and expenses are not captured.",
+     a.net_profit_gap || "GAP-A02"],
+  ];
+  el.innerHTML = tiles.map(([label, value, href, note, gap]) => gap
+    ? `<a class="kpi cmp-card-gap" href="${esc(href)}"><span class="kpi-label">${esc(label)}<span class="chip off">Gap ${esc(gap)}</span></span><span class="kpi-value">No data yet</span><span class="kpi-note">${esc(note)}</span></a>`
+    : `<a class="kpi" href="${esc(href)}"><span class="kpi-label">${esc(label)}</span><span class="kpi-value">${esc(accMoney(value))}</span><span class="kpi-note">${esc(note)}</span></a>`).join("");
+}
+
+function openAccountsReports() {
+  if (!accAllowed()) return renderAccountsReport();
+  renderAccountsReport();
+  if (!state.acc.report && !state.acc.loading) loadAccountsReport();
+  if (!state.acc.cmp.data && !state.acc.cmp.loading) loadAccountsCompare();
+}
+
+async function loadAccountsReport() {
+  if (!accAllowed()) return;
+  const s = state.acc, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderAccountsReport();
+  const res = await api(`/api/accounts/report?${accQuery()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) { s.report = res.body; s.error = null; }
+  else s.error = detail(res.body);
+  renderAccountsReport();
+}
+
+async function loadAccountsCompare() {
+  if (!accAllowed()) return;
+  const s = state.acc.cmp, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderAccountsReport();
+  const params = new URLSearchParams({mode: s.mode});
+  if (s.month) params.set("month", s.month);
+  const res = await api(`/api/accounts/report/compare?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) { s.data = res.body; s.error = null; }
+  else s.error = detail(res.body);
+  renderAccountsReport();
+}
+
+function renderAccountsReport() {
+  const allowed = accAllowed();
+  ACC_PANELS.forEach(sel => { const el = $(sel); if (el) el.classList.toggle("hide", !allowed); });
+  if (!allowed) return;
+  const s = state.acc, r = s.report, cmp = s.cmp;
+  const fromEl = $("#accFrom"), toEl = $("#accTo"), monthEl = $("#accMonth");
+  const today = dayIso(new Date());
+  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = s.from; }
+  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = s.to; }
+  if (monthEl && document.activeElement !== monthEl) monthEl.value = cmp.month || (cmp.data ? cmp.data.month : "");
+  $$("[data-acc-mode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.accMode === cmp.mode)));
+
+  $("#accPerfErr").classList.toggle("hide", !s.error);
+  $("#accPerfErr").textContent = s.error ? `The accounts figures could not be loaded. Last good figures are kept. ${s.error}` : "";
+  $("#accPerfNote").textContent = r
+    ? `${fmtDate(r.from)} to ${fmtDate(r.to)} · ${plural(r.days, "day")}${r.region ? ` · ${r.region.label}` : " · all states"}${s.loading ? " · refreshing…" : ""}`
+    : s.loading ? "Loading figures from the server…" : "Choose a window and refresh.";
+
+  // The region list is always the full company, not the filtered view.
+  const stateEl = $("#accState");
+  if (stateEl && r) {
+    const rows = (r.states || []).filter(x => x.state);
+    const current = stateEl.value;
+    stateEl.innerHTML = `<option value="">All states</option>` + rows.map(x =>
+      `<option value="${esc(x.state)}"${x.state === s.state ? " selected" : ""}>${esc(x.name)}</option>`).join("");
+    if (stateEl.value !== current && s.state) stateEl.value = s.state;
+  }
+
+  if (!r) {
+    $("#accKpis").innerHTML = "";
+    ["#accPnl", "#accCmp", "#accTrend", "#accStates", "#accDrill", "#accGaps"].forEach(sel => {
+      const el = $(sel); if (el) el.innerHTML = `<p class="gap-note">No figures loaded yet.</p>`;
+    });
+    return;
+  }
+
+  const gap = r.net_profit;
+  $("#accKpis").innerHTML = r.cards.map(c =>
+    `<div class="kpi"><span class="kpi-label">${esc(c.label)}</span>`
+    + `<span class="kpi-value">${esc(accMoney(c.value))}</span>`
+    + `<span class="kpi-note">${esc(c.note)}</span></div>`).join("")
+    + `<div class="kpi cmp-card-gap"><span class="kpi-label">${esc(gap.label || "Net profit")}<span class="chip off">Gap ${esc(gap.gap)}</span></span>`
+    + `<span class="kpi-value">No data yet</span><span class="kpi-note">${esc(gap.note)}</span></div>`;
+  $("#accPerfGaps").textContent = r.notes && r.notes.length ? r.notes.join(" ") : "";
+
+  renderAccPnl(r.profit_and_loss);
+  renderAccTrend(r);
+  renderAccStates(r);
+  renderAccDrill(r.receivables_by_distributor);
+  renderAccGaps(r.gaps);
+  renderAccountsCompare(cmp);
+}
+
+function renderAccPnl(pnl) {
+  if (!pnl) return;
+  const rows = (pnl.rows || []).map(row => row.available
+    ? `<tr><td class="strong">${esc(row.label)}</td><td class="n strong">${esc(accMoney(row.value))}</td></tr>`
+    : `<tr><td class="strong">${esc(row.label)}</td><td class="n"><span class="chip off">Gap ${esc(row.gap)}</span> <span class="gap-note">No data yet. ${esc(row.note || "")}</span></td></tr>`).join("");
+  $("#accPnl").innerHTML = `<div class="tw"><table>
+      <thead><tr><th>Line</th><th class="n">Amount</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted panel-note">${esc(pnl.note || "")}</p>`;
+}
+
+function renderAccTrend(r) {
+  const months = r.trend || [];
+  if (!months.length) {
+    $("#accTrend").innerHTML = `<p class="gap-note">No month falls in the trend window.</p>`;
+    return;
+  }
+  const selected = (r.to || "").slice(0, 7);
+  $("#accTrend").innerHTML = `<div class="tw"><table>
+      <thead><tr><th>Month</th><th class="n">Revenue</th><th class="n">Collections</th>`
+    + `<th class="n">Payments</th><th class="n">Net cash</th><th class="n">Output GST</th><th class="n">Returns</th></tr></thead><tbody>`
+    + months.map(m => {
+        const on = `${m.year}-${String(m.month).padStart(2, "0")}` === selected;
+        return `<tr${on ? ` class="on"` : ""}><td class="strong">${esc(m.label)}</td>`
+          + `<td class="n">${esc(accMoney(m.revenue))}</td><td class="n">${esc(accMoney(m.collections))}</td>`
+          + `<td class="n">${esc(accMoney(m.payments))}</td><td class="n">${esc(accMoney(m.net_cash))}</td>`
+          + `<td class="n">${esc(accMoney(m.output_gst))}</td><td class="n">${esc(accMoney(m.returns))}</td></tr>`;
+      }).join("")
+    + `</tbody></table></div><p class="muted panel-note">Net cash is receipts minus supplier payments. Output GST only; input tax is not captured (GAP-A05).</p>`;
+}
+
+function renderAccStates(r) {
+  const rows = r.states || [];
+  if (!rows.length) {
+    $("#accStates").innerHTML = `<p class="gap-note">No issued invoice falls in this window.</p>`;
+    return;
+  }
+  const total = rows.reduce((sum, x) => sum + Number(x.revenue || 0), 0);
+  $("#accStates").innerHTML = `<div class="tw"><table>
+      <thead><tr><th>State</th><th class="n">Invoices</th><th class="n">Revenue</th><th class="n">Share</th>`
+    + `<th class="n">Output GST</th><th class="n">Returns</th><th class="n">Outstanding</th><th></th></tr></thead><tbody>`
+    + rows.map(x => {
+        const share = total > 0 ? Number(x.revenue) / total * 100 : 0;
+        const btn = x.state ? `<button class="rowbtn" type="button" data-acc-state="${esc(x.state)}">Filter</button>` : "";
+        return `<tr><td class="strong">${esc(x.name)}</td><td class="n">${esc(qty(x.invoices))}</td>`
+          + `<td class="n">${esc(accMoney(x.revenue))}</td><td class="n">${esc(share.toFixed(1))}%</td>`
+          + `<td class="n">${esc(accMoney(x.output_gst))}</td><td class="n">${esc(accMoney(x.returns))}</td>`
+          + `<td class="n">${esc(accMoney(x.outstanding))}</td><td>${btn}</td></tr>`;
+      }).join("")
+    + `</tbody></table></div><p class="muted panel-note">Outstanding is grouped by the distributor's current state, because an invoice stores no distributor state snapshot apart from the buyer state used for revenue.</p>`;
+}
+
+function renderAccDrill(drill) {
+  if (!drill) return;
+  const canLedger = can("accounts:read");
+  $("#accDrillNote").textContent = `${drill.count} distributors · ${drill.note}`;
+  const rows = drill.rows || [];
+  $("#accDrill").innerHTML = rows.length ? `<div class="tw"><table>
+      <thead><tr><th>Distributor</th><th>State</th><th class="n">Invoices</th><th class="n">Outstanding</th><th></th></tr></thead><tbody>`
+    + rows.map(x => `<tr><td class="strong">${esc(x.name)}</td><td>${esc(x.state || "–")}</td>`
+        + `<td class="n">${esc(qty(x.invoices))}</td><td class="n strong">${esc(accMoney(x.outstanding))}</td>`
+        + `<td>${canLedger ? `<button class="rowbtn" type="button" data-act="acc-ledger" data-id="${x.distributor_id}">Open ledger</button>`
+                            : `<span class="gap-note">Needs accounts:read for the party ledger.</span>`}</td></tr>`).join("")
+    + `</tbody></table></div>`
+    : `<p class="gap-note">Nothing is outstanding.</p>`;
+}
+
+function renderAccGaps(gaps) {
+  const rows = gaps || [];
+  $("#accGaps").innerHTML = rows.length
+    ? `<ul class="gaps">${rows.map(g => `<li><b>${esc(g.code)}</b> ${esc(g.label)} <span>${esc(g.detail)}</span></li>`).join("")}</ul>`
+    : `<p class="muted">No gaps recorded.</p>`;
+}
+
+function renderAccountsCompare(cmp) {
+  const d = cmp.data;
+  if (!d) {
+    $("#accCmp").innerHTML = `<p class="gap-note">${cmp.error ? esc(cmp.error) : "Loading comparison…"}</p>`;
+    $("#accCmpNote").textContent = "";
+    return;
+  }
+  $("#accCmpNote").textContent = `${CMP_MODES[d.mode]} · ${CMP_STATE[d.month_state]} · ${d.month_label}${cmp.loading ? " · refreshing…" : ""}`;
+  const ranges = d.ranges;
+  const rangeRow = `<div class="cmp-ranges">${cmpRange(`Selected · ${CMP_MODES[d.mode]}`, ranges.current, true)}`
+    + `${cmpRange("Previous month", ranges.previous, false)}${cmpRange("Same month last year", ranges.last_year, false)}</div>`;
+  const unit = m => v => m.unit === "amount" ? accMoney(v) : qty(v);
+  const rows = (d.metrics || []).map(m => {
+    if (!m.available) {
+      return `<tr><td class="strong">${esc(m.label)}</td><td colspan="5"><span class="chip off">Gap ${esc(m.gap || "")}</span> <span class="gap-note">No data yet. ${esc(m.note || "")}</span></td></tr>`;
+    }
+    const f = unit(m);
+    return `<tr><td class="strong">${esc(m.label)}</td><td class="n">${esc(f(m.current))}</td>`
+      + `<td class="n">${esc(f(m.previous))}</td><td class="n">${cmpDelta(m.previous_change)}</td>`
+      + `<td class="n">${esc(f(m.last_year))}</td><td class="n">${cmpDelta(m.last_year_change)}</td></tr>`;
+  }).join("");
+  $("#accCmp").innerHTML = rangeRow + `<div class="tw"><table>
+      <thead><tr><th>Metric</th><th class="n">Selected window</th><th class="n">Previous month</th>`
+    + `<th class="n">Change</th><th class="n">Same month last year</th><th class="n">Change</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table></div>`
+    + `<p class="muted panel-note">Snapshot figures (receivables, payables) are as at each window's last day. A comparison against zero has no percentage.</p>`;
+}
+
+function setAccMode(mode) {
+  if (!CMP_MODES[mode]) return;
+  state.acc.cmp.mode = mode;
+  loadAccountsCompare();
+}
+function setAccMonth(value) {
+  state.acc.cmp.month = /^\d{4}-\d{2}$/.test(value || "") ? value : "";
+  loadAccountsCompare();
+}
+function setAccStateFilter(value) {
+  state.acc.state = /^\d{2}$/.test(value || "") ? value : "";
+  loadAccountsReport();
+}
+function setAccWindow(from, to) {
+  if (from) state.acc.from = from;
+  if (to) state.acc.to = to;
+  if (state.acc.from > state.acc.to) return;
+  loadAccountsReport();
+  loadAccountsCompare();
+}
+
+function exportAccCsv() {
+  const r = state.acc.report;
+  if (!r) return;
+  const rows = [["HERBANOVA accounts report"], ["From", r.from], ["To", r.to],
+                ["Region", r.region ? r.region.label : "All states"], ["Metric", "Amount (INR)"]];
+  (r.cards || []).forEach(c => rows.push([c.label, c.value]));
+  rows.push(["Net profit", "No data yet (GAP-A02)"], [],
+    ["Month", "Revenue", "Collections", "Payments", "Net cash", "Output GST", "Returns"],
+    ...(r.trend || []).map(m => [m.label, m.revenue, m.collections, m.payments, m.net_cash, m.output_gst, m.returns]),
+    [], ["State", "Invoices", "Revenue", "Output GST", "Returns", "Outstanding"],
+    ...(r.states || []).map(x => [x.name, x.invoices, x.revenue, x.output_gst, x.returns, x.outstanding]));
+  downloadCsv(`HERBANOVA_Accounts_${r.from}_${r.to}.csv`, rows);
+}
+
+async function openDistributorLedger(id) {
+  const res = await api(`/api/accounts/ledger/distributors/${encodeURIComponent(id)}`);
+  if (!res.ok) return toast(res, "Ledger could not be loaded");
+  const l = res.body;
+  const rows = (l.entries || []).map(e => `<tr><td>${esc(e.date)}</td><td class="strong">${esc(e.document)}</td>`
+    + `<td>${esc(e.kind.replace(/_/g, " "))}</td><td class="n">${Number(e.debit) ? money(e.debit) : ""}</td>`
+    + `<td class="n">${Number(e.credit) ? money(e.credit) : ""}</td><td class="n">${money(e.balance)}</td>`
+    + `<td>${esc(e.note || "")}</td></tr>`).join("");
+  openDrawer(`Ledger: ${l.party}`, `${plural((l.entries || []).length, "entry")} · a document is never edited`, `
+    <div class="tw"><table>
+      <thead><tr><th>Date</th><th>Document</th><th>Kind</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th><th class="n">Balance (₹)</th><th>Note</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="7"><span class="gap-note">No entries yet.</span></td></tr>`}</tbody>
+    </table></div>
+    <p class="closing">Closing balance <b>₹ ${money(l.closing_balance)}</b></p>`, true);
 }
 
 function entryForm(kind) {
@@ -5081,6 +5371,10 @@ async function doQuote(form) {
 document.addEventListener("click", e => {
   const modeBtn = e.target.closest("[data-cmp-mode]");
   if (modeBtn) return setCompareMode(modeBtn.dataset.cmpMode);
+  const accModeBtn = e.target.closest("[data-acc-mode]");
+  if (accModeBtn) return setAccMode(accModeBtn.dataset.accMode);
+  const accStateBtn = e.target.closest("[data-acc-state]");
+  if (accStateBtn) return setAccStateFilter(accStateBtn.dataset.accState);
   const geoTile = e.target.closest("[data-geo-code]");
   if (geoTile) return selectGeo(geoTile.dataset.geoCode);
   const geoSortBtn = e.target.closest("[data-geo-sort]");
@@ -5092,6 +5386,9 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
   if (a && a.dataset.act === "load-tb") return loadTrialBalance();
   if (a && a.dataset.act === "load-ageing") return loadAgeing();
+  if (a && a.dataset.act === "load-acc-report") return loadAccountsReport();
+  if (a && a.dataset.act === "export-acc") return exportAccCsv();
+  if (a && a.dataset.act === "acc-ledger") return openDistributorLedger(a.dataset.id);
   if (a && a.dataset.act === "open-search") return openPalette();
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
   if (a && a.dataset.act === "reload-compare") return loadCompare();
@@ -5438,6 +5735,14 @@ document.addEventListener("change", e => {
   }
   if (e.target.id === "srLogStatus") { state.sr.logStatus = e.target.value; loadDeliveries(); }
   if (e.target.id === "srLogPack") { state.sr.logPack = e.target.value; loadDeliveries(); }
+});
+// Accounts performance: the window reloads the report and the comparison; the
+// region narrows only the flows the server can attribute to a buyer state.
+document.addEventListener("change", e => {
+  if (e.target.id === "accFrom") return setAccWindow(e.target.value, null);
+  if (e.target.id === "accTo") return setAccWindow(null, e.target.value);
+  if (e.target.id === "accState") return setAccStateFilter(e.target.value);
+  if (e.target.id === "accMonth") return setAccMonth(e.target.value);
 });
 window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); closePalette(); route(); } });
 

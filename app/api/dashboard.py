@@ -1615,7 +1615,7 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
            "receivables_ageing": None, "stock_by_warehouse": None,
            "expiry_watch": None, "open_pos": None, "approvals": None,
            "top_products": None, "category_sales": None,
-           "recent_activity": None, "health": _health(db)}
+           "recent_activity": None, "health": _health(db), "accounts": None}
 
     stock = _stock(db, today) if "stock:read" in perms else None
     pos = _purchase_orders(db, start, end) if "stock:read" in perms else None
@@ -1711,6 +1711,25 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
                         for b in ageing["buckets"]],
             "total": _money(ageing["total"]), "count": ageing["count"],
             "note": "Same figures as the Receivables Ageing report."}
+    if "accounts:reports" in perms:
+        # One computation shared with the Accounts report, so the Overview tile
+        # and the Accounts screen can never disagree for the same dates (D-40).
+        from ..services import accounting
+
+        summary = accounting.window(db, start, end)
+        out["accounts"] = {
+            "from": start.isoformat(), "to": end.isoformat(),
+            "receivable_total": summary["outstanding"]["total"],
+            "overdue_60": summary["outstanding"]["overdue_60"],
+            "payable_total": summary["payables"]["total"],
+            "payable_due_this_week": summary["payables"]["due_this_week"],
+            "cash_bank_net": summary["cash_bank_net"],
+            "output_gst": summary["output_gst"]["total"],
+            "net_profit": None, "net_profit_gap": "GAP-A02",
+            "net_profit_note": "Cost of goods and expenses are not captured.",
+            "note": ("Receivables, payables and cash use the same wordings as the "
+                     "Accounts screen for this window."),
+        }
     if stock is not None:
         out["stock_by_warehouse"] = _stock_by_warehouse(db)
         out["expiry_watch"] = _expiry_watch(db, today)
