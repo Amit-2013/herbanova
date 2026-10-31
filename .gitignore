@@ -10,3 +10,5 @@ archive/
 
 .cloud-attachments/
 *.dump
+demo_seed_manifest.json
+demo_seed_manifest.json.tmp

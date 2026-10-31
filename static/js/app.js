@@ -10,7 +10,8 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money = n => new Intl.NumberFormat("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2}).format(Number(n) || 0);
 const qty = n => new Intl.NumberFormat("en-IN", {maximumFractionDigits: 3}).format(Number(n) || 0);
-const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const PLURALS = {batch: "batches", entry: "entries"};
+const plural = (n, w) => `${n} ${n === 1 ? w : (PLURALS[w] || w + "s")}`;
 const parseTs = s => new Date(/([zZ]|[+-]\d\d:?\d\d)$/.test(s) ? s : s + "Z");
 const fmtDate = d => d ? new Date(d + "T00:00:00").toLocaleDateString("en-IN", {day: "2-digit", month: "short", year: "numeric"}) : "–";
 const fmtStamp = s => s ? parseTs(s).toLocaleString("en-IN", {day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit"}) : "–";
@@ -27,9 +28,16 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
+               dashRange: 30, dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
+               expiry: {bucket: "all", loading: false, data: null},
+               palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
                hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: []}};
 state.rp.filters = {employee_id: "", department: "", branch_id: ""};
 state.rp.opts = null;
+try {
+  const saved = Number(localStorage.getItem("hb.dashRange"));
+  if ([7, 30, 90].includes(saved)) state.dashRange = saved;
+} catch (e) { /* storage blocked */ }
 const can = p => state.perms.has(p);
 
 /* ---------- server calls ---------- */
@@ -88,6 +96,12 @@ function enter(u) {
   state.user = u;
   state.perms = new Set(u.permissions || []);
   if (u.must_change_password) { showPasswordChange(u); return; }
+  state.dashboard = null;
+  state.dashLoading = true;
+  state.dashError = null;
+  state.expiry = {bucket: "all", loading: false, data: null};
+  state.chart.index = -1;
+  closePalette();
   $("#mustChange").classList.add("hide");
   $("#login").classList.add("hide");
   $("#shell").classList.remove("hide");
@@ -99,12 +113,29 @@ function enter(u) {
   show("#navAccounts", can("accounts:read"));
   show("#navHr", can("hr:read") || can("hr:attendance_self"));
   show("#navSettings", can("user:manage") || can("tax:read") || can("audit:read") || can("hr:read"));
+  // Every other module link follows the read permission its API requires, so a
+  // role is never offered a screen that can only answer 403.
+  const showView = (v, on) => $$(`.side a.nav[data-v="${v}"]`).forEach(a => a.classList.toggle("hide", !on));
+  showView("lost", can("lead:read"));
+  showView("followups", can("lead:read"));
+  showView("customers", can("sales:read"));
+  showView("sales", can("sales:read"));
+  showView("approvals", can("approval:read"));
+  showView("purchasing", can("stock:read"));
+  showView("products", can("product:read"));
+  showView("inventory", can("stock:read"));
+  showView("distributors", can("sales:read"));
+  showView("reports", ["accounts:read", "hr:reports", "sales:read", "stock:read",
+                       "supplier:read", "tax:read"].some(k => can(k)));
+  $$(".nav-group").forEach(g => g.classList.toggle("hide", !g.querySelector("a.nav:not(.hide)")));
   $("#role").textContent = u.role;
   route();
   loadAll();
 }
 function leave(msg) {
   state.user = null; state.perms = new Set(); state.movements = null;
+  state.dashboard = null; state.dashLoading = false; state.dashError = null;
+  closePalette();
   closeDrawer();
   $("#mustChange").classList.add("hide");
   $("#changePwForm").reset();
@@ -162,6 +193,7 @@ async function boot() {
 
 /* ---------- data ---------- */
 async function loadAll() {
+  if (!state.dashboard) { state.dashLoading = true; renderDash(); }
   const none = Promise.resolve({ok: true, body: []});
   const canUsers = can("user:manage");
   const canTax = can("tax:read");
@@ -169,9 +201,13 @@ async function loadAll() {
   const canAccounts = can("accounts:read");
   const canApprovals = can("approval:read");
   const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da] = await Promise.all([
-    api("/api/health"), api("/api/modules"), api("/api/products?page=1&page_size=200"), api("/api/warehouses"),
-    api("/api/inventory/batches"), api("/api/purchase-orders?page=1&page_size=200"),
-    api("/api/distributors?page=1&page_size=200"), api("/api/sales-orders?page=1&page_size=200"),
+    api("/api/health"), api("/api/modules"),
+    can("product:read") ? api("/api/products?page=1&page_size=200") : none,
+    can("stock:read") ? api("/api/warehouses") : none,
+    can("stock:read") ? api("/api/inventory/batches") : none,
+    can("stock:read") ? api("/api/purchase-orders?page=1&page_size=200") : none,
+    canSales ? api("/api/distributors?page=1&page_size=200") : none,
+    canSales ? api("/api/sales-orders?page=1&page_size=200") : none,
     canApprovals ? api("/api/approvals?page=1&page_size=200") : none,
     can("lead:read") ? api("/api/leads?page=1&page_size=200") : none,
     canUsers ? api("/api/users") : none, canUsers ? api("/api/roles") : none,
@@ -186,14 +222,21 @@ async function loadAll() {
     canAccounts ? api("/api/accounts/outstanding") : none,
     canAccounts ? api("/api/accounts/payments") : none,
     canAccounts ? api("/api/accounts/ageing") : none,
-    api("/api/dashboard")]);
+    api(`/api/dashboard?range=${state.dashRange}`)]);
   if (!state.user) return;
   // The register is load-bearing for the Overview: keep the last good copy if a
   // refresh fails rather than blanking the module panel.
   if (mo.ok && mo.body) state.modules = mo.body;
   // Overview figures are counted by the server over the whole database; the lists
   // below are capped at 200 rows and must never be used to compute a tile.
-  state.dashboard = da.ok && da.body && !Array.isArray(da.body) ? da.body : null;
+  state.dashLoading = false;
+  if (da.ok && da.body && !Array.isArray(da.body)) {
+    state.dashboard = da.body;
+    state.dashError = null;
+    state.expiry.data = null;
+  } else if (!state.dashboard) {
+    state.dashError = da.ok ? "The server returned an unexpected response." : detail(da.body);
+  }
   state.products = p.ok ? p.body : [];
   state.warehouses = w.ok ? w.body : [];
   state.batches = b.ok ? b.body : [];
@@ -222,6 +265,7 @@ async function loadAll() {
   const failed = [p, w, b, o, ds, so, canApprovals ? ap : null, ld, sp].find(r => r && !r.ok);
   if (failed) toast(failed, "Some data could not be loaded");
   renderAll();
+  if (state.dashboard && state.expiry.bucket !== "all") setExpiryBucket(state.expiry.bucket);
   if (state.movements) loadMovements();
 }
 async function loadMovements() {
@@ -242,12 +286,16 @@ const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", 
 const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
                    customers: "sales:read", users: "user:manage", audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
+                   products: "product:read", inventory: "stock:read", purchasing: "stock:read",
+                   distributors: "sales:read", sales: "sales:read", billing: "sales:read",
+                   approvals: "approval:read",
                    hr: "hr:read"};
 function route() {
   const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
   // Staff with only self-service attendance still reach the HR page for their own day.
   const allowed = !VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"));
   state.view = TITLES[v] && allowed ? v : "dash";
+  $("#shell").dataset.view = state.view;
   if (state.view === "inventory") state.tab = ["stock", "ledger", "warehouses"].includes(sub) ? sub : "stock";
   $$(".view").forEach(s => s.classList.toggle("hide", s.id !== "v-" + state.view));
   $$(".nav[data-v]").forEach(a => { const on = a.dataset.v === state.view; a.classList.toggle("on", on); on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"); });
@@ -271,7 +319,7 @@ function showTab() {
 function renderHead() {
   const v = state.view; let sub = "", act = "";
   if (v === "dash") {
-    sub = "Stock position and orders waiting for action.";
+    sub = "Every figure is counted by the server over the whole database. Open a tile to see the records behind it.";
     if (can("db:reset")) act = `<button class="btn" data-act="reset-db" type="button">Reset database</button>`;
   }
   if (v === "products") {
@@ -397,64 +445,795 @@ function renderAll() { renderHead(); renderDash(); renderProducts(); renderStock
 
 function renderDash() {
   const d = state.dashboard;
-  const tiles = [];
-  if (d) {
-    if (d.stock) tiles.push([qty(d.stock.units_on_hand), "Units on hand"], [d.stock.batches_in_stock, "Batches in stock"]);
-    if (d.active_products !== null) tiles.push([d.active_products, "Active products"]);
-    if (d.purchase_orders) tiles.push([d.purchase_orders.open_count, "Purchase orders awaiting goods"]);
-    if (d.stock) tiles.push([d.stock.expiring_count, "Batches expiring within 90 days"]);
-    if (d.orders_ready !== null) tiles.push([d.orders_ready, "Orders ready to dispatch"]);
-    if (d.approvals_waiting !== null) tiles.push([d.approvals_waiting, "Approvals waiting"]);
-    if (d.leads) tiles.push([d.leads.overdue, "Follow-ups overdue"], [d.leads.due_today, "Follow-ups due today"]);
+  const loading = state.dashLoading;
+  const err = state.dashError;
+  const u = state.user;
+
+  $("#dashGreet").textContent = u ? `${greeting()}, ${u.username}` : "Overview";
+  $("#dashDate").textContent = new Date().toLocaleDateString("en-IN", {
+    weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  $$("[data-dash-range]").forEach(b =>
+    b.setAttribute("aria-pressed", String(Number(b.dataset.dashRange) === state.dashRange)));
+  $("#dashNewSo").classList.toggle("hide", !can("sales:write"));
+  $("#dashReset").classList.toggle("hide", !can("db:reset"));
+
+  $("#dashSkeleton").classList.toggle("hide", !(loading && !d));
+  $("#dashError").classList.toggle("hide", !err);
+  $("#dashContent").classList.toggle("hide", !d);
+  $("#dashContent").setAttribute("aria-busy", loading ? "true" : "false");
+  if (err) {
+    $("#dashErrText").textContent = d
+      ? ` The last figures loaded are shown. ${err}`
+      : ` ${err}`;
   }
+
   // A failed load is shown as such. It must never be drawn as zeros.
-  $("#stats").innerHTML = d
-    ? tiles.map(s => `<div class="stat"><b>${esc(s[0])}</b><span>${esc(s[1])}</span></div>`).join("")
-    : `<div class="stat"><b>–</b><span>Dashboard figures could not be loaded. Refresh to try again.</span></div>`;
-
   $("#whCallout").classList.toggle("hide", !d || d.warehouse_count !== 0 || !can("stock:write"));
-
-  const watch = d && d.stock ? d.stock.expiring : [];
-  const watchTotal = d && d.stock ? d.stock.expiring_count : 0;
-  $("#watchNote").textContent = watchTotal > watch.length ? `Showing ${watch.length} of ${watchTotal}` : "";
-  $("#watch").innerHTML = watch.length ? watch.map(b => {
-    const dl = b.days_left;
-    const chip = dl < 0 ? "bad" : "warn";
-    const txt = dl < 0 ? `Expired ${plural(-dl, "day")} ago` : dl === 0 ? "Expires today" : `${plural(dl, "day")} left`;
-    return `<li><div>${esc(b.product_name)}<small>Batch ${esc(b.batch_no)} in ${esc(b.warehouse)}, ${esc(qty(b.on_hand))} on hand</small></div><span class="chip ${chip}">${esc(txt)}</span></li>`;
-  }).join("") : `<li><span class="none">Nothing in stock expires in the next 90 days.</span></li>`;
-
-  const open = d && d.purchase_orders ? d.purchase_orders.open : [];
-  const openTotal = d && d.purchase_orders ? d.purchase_orders.open_count : 0;
-  const poLine = p => p.status === "partially_received"
-    ? `${qty(p.remaining_units)} unit${Number(p.remaining_units) === 1 ? "" : "s"} still to come`
-    : `${plural(p.receipt_count, "receipt")} so far`;
-  $("#openpos").innerHTML = open.length ? open.map(p => `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button><small>${esc(p.supplier)}, ${esc(poLine(p))}</small></div>
-    <div class="r"><span class="num">₹ ${money(p.value)}</span></div></li>`).join("")
-    : `<li><span class="none">No purchase orders are waiting for goods.</span></li>`;
-
-  // The module list and every figure come from GET /api/modules, which is built
-  // from app/core/module_register.py. The browser holds no copy of the list, so
-  // it cannot show a total the server does not imply (COR-007).
-  const reg = state.modules;
-  if (reg) {
-    const t = reg.totals, CHIP = reg.chips;
-    $("#prog").textContent = `${t.working} of ${t.counted} modules working`
-      + (t.conditional ? ` · ${t.conditional} conditional not counted` : "");
-    $("#barfill").style.width = `${t.percent}%`;
-    $("#mods").innerHTML = reg.groups.map(g => {
-      const rows = reg.modules.filter(m => m.group === g.name);
-      return `<li class="grp"><b>${esc(g.name)}</b><span>${g.counted ? `${g.working} of ${g.counted} working` : "optional"}</span></li>` +
-        rows.map(m => {
-          const chip = CHIP[m.status] || ["off", m.status];
-          return `<li><div>${esc(m.name)}<small>${esc(m.does)}</small></div><span class="chip ${chip[0]}">${esc(chip[1])}</span></li>`;
-        }).join("");
-    }).join("");
+  if (!d) {
+    $("#dashUpdated").textContent = loading ? "Loading figures from the server…" : "";
+    return;
   }
 
-  const n = openTotal, c = $("#poCount");
-  c.textContent = n; c.classList.toggle("hide", !n);
-  c.setAttribute("aria-label", `${n} open purchase orders`);
+  const period = d.from === d.to ? fmtDate(d.from) : `${fmtDate(d.from)} to ${fmtDate(d.to)}`;
+  $("#dashUpdated").innerHTML = loading
+    ? `Refreshing the ${esc(String(d.range))}-day period…`
+    : `As at <b>${esc(fmtDate(d.as_of))}</b> · ${esc(String(d.range))}-day period, `
+      + `${esc(period)} · updated ${esc(fmtStamp(d.generated_at))}`;
+
+  renderAttention(d.attention || []);
+  renderKpis(d.kpis || []);
+  renderChart(d.sales_vs_purchases);
+  renderDashAgeing(d.receivables_ageing);
+  renderExpiry(d);
+  renderDashWarehouses(d.stock_by_warehouse);
+  renderOpenPos(d.open_pos);
+  renderDashApprovals(d.approvals);
+  renderTopProducts(d.top_products, d);
+  renderCategory(d.category_sales);
+  renderInsights(d.insights);
+  renderActivity(d.recent_activity);
+  renderHealth(d.health);
+  renderModuleList();
+
+  const openTotal = d.purchase_orders ? d.purchase_orders.open_count : 0;
+  const c = $("#poCount");
+  c.textContent = openTotal; c.classList.toggle("hide", !openTotal);
+  c.setAttribute("aria-label", `${openTotal} open purchase orders`);
+}
+
+/* ---------- dashboard fragments ---------- */
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+}
+
+function inrShort(n) {
+  const v = Number(n) || 0, a = Math.abs(v);
+  if (a >= 1e7) return `₹${(v / 1e7).toFixed(a >= 1e8 ? 0 : 1)} Cr`;
+  if (a >= 1e5) return `₹${(v / 1e5).toFixed(a >= 1e6 ? 0 : 1)} L`;
+  if (a >= 1e3) return `₹${(v / 1e3).toFixed(a >= 1e4 ? 0 : 1)} K`;
+  return `₹${Math.round(v)}`;
+}
+const dayLabel = iso => iso
+  ? new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short" })
+  : "";
+
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const power = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / power;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * power;
+}
+
+function deltaText(v) {
+  if (v === null || v === undefined) return `<span class="delta flat">no prior period to compare</span>`;
+  const n = Number(v);
+  if (!isFinite(n)) return `<span class="delta flat">no prior period to compare</span>`;
+  const dir = n > 0 ? "up" : n < 0 ? "down" : "flat";
+  const arrow = n > 0 ? "▲" : n < 0 ? "▼" : "■";
+  return `<span class="delta ${dir}">${arrow} ${Math.abs(n).toFixed(1)}% against the previous period</span>`;
+}
+
+function sparkline(values) {
+  const vals = values.map(Number).filter(Number.isFinite);
+  if (vals.length < 2) return "";
+  const w = 112, h = 30, max = Math.max(...vals), min = Math.min(...vals);
+  const step = w / (vals.length - 1);
+  const y = v => max === min ? h / 2 : h - 4 - ((v - min) / (max - min)) * (h - 8);
+  const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false"><polyline points="${pts}"/></svg>`;
+}
+
+function renderAttention(items) {
+  const el = $("#attention"), note = $("#attNote");
+  const live = items.filter(i => i.available && i.severity !== "ok");
+  const gaps = items.filter(i => !i.available);
+  const shown = [...live, ...gaps];
+  note.textContent = shown.length
+    ? `${plural(shown.length, "item")}${gaps.length ? ` · ${gaps.length} data gap${gaps.length === 1 ? "" : "s"}` : ""}`
+    : "";
+  if (!shown.length) {
+    el.innerHTML = `<li class="att-empty">Nothing needs attention in the figures the server can see.</li>`;
+    return;
+  }
+  el.innerHTML = shown.map(i => {
+    if (!i.available) {
+      const gap = i.gap ? ` (${i.gap})` : "";
+      return `<li><span class="att-item att-off"><span class="att-body"><b>${esc(i.label)}</b><span>${esc(i.note || "This figure cannot be sourced yet.")}${esc(gap)}</span></span><span class="chip off">No data</span></span></li>`;
+    }
+    const bits = [];
+    if (i.count !== null && i.count !== undefined) bits.push(plural(i.count, "record"));
+    if (i.units !== null && i.units !== undefined) bits.push(`${qty(i.units)} units`);
+    if (i.amount) bits.push(`₹ ${money(i.amount)}`);
+    const sev = i.severity === "bad" ? "att-bad" : "att-warn";
+    const tag = i.href ? "a" : "span";
+    const href = i.href ? ` href="${esc(i.href)}"` : "";
+    return `<li><${tag} class="att-item ${sev}"${href}><span class="att-body"><b>${esc(i.label)}</b><span>${esc(bits.join(" · ") || "Open the records behind this figure.")}</span></span>${i.href ? `<span class="att-go">Open</span>` : ""}</${tag}></li>`;
+  }).join("");
+}
+
+function renderKpis(kpis) {
+  const el = $("#stats");
+  if (!kpis.length) {
+    el.innerHTML = `<div class="att-empty">No figure on this screen is available to your role.</div>`;
+    return;
+  }
+  el.innerHTML = kpis.map(k => {
+    const trend = Array.isArray(k.trend) && k.trend.length > 1 ? sparkline(k.trend) : "";
+    return `<a class="kpi" href="${esc(k.href)}">
+      <span class="kpi-label">${esc(k.label)}</span>
+      <span class="kpi-value">${esc(qty(k.value))}</span>
+      ${k.note && trend ? `<span class="kpi-note">${esc(k.note)}</span>` : ""}
+      ${trend ? `<span class="kpi-trend">${trend}<em>${esc(k.trend_note || "")}</em></span>`
+              : `<span class="kpi-trend off"><em>${esc(k.trend_note || k.note || "")}</em></span>`}
+    </a>`;
+  }).join("");
+}
+
+function hideChartTip() {
+  const tip = $("#chartTip");
+  if (tip) tip.classList.add("hide");
+  $$("#salesChart .hit.on").forEach(h => h.classList.remove("on"));
+  state.chart.index = -1;
+}
+
+function chartTip(i) {
+  const c = state.dashboard && state.dashboard.sales_vs_purchases;
+  if (!c || !c.series || !c.series[i]) return;
+  const pt = c.series[i], n = c.series.length;
+  const svg = $("#salesChart"), tip = $("#chartTip");
+  if (!svg || !tip) return;
+  state.chart.index = i;
+  $$(".hit", svg).forEach((h, j) => h.classList.toggle("on", j === i));
+  tip.innerHTML = `<b>${esc(fmtDate(pt.date))}</b>`
+    + (c.sales_visible ? `<span><i class="sales"></i>Sales ₹ ${money(pt.sales)}</span>` : "")
+    + (c.purchases_visible ? `<span><i class="purchases"></i>Purchases ₹ ${money(pt.purchases)}</span>` : "");
+  tip.classList.remove("hide");
+  const ratio = n > 1 ? i / (n - 1) : 0.5;
+  const left = 58 + ratio * (744 - 58);
+  tip.style.left = `${(left / 760) * 100}%`;
+  tip.style.top = "50%";
+}
+
+function renderChart(c) {
+  const panel = $("#chartPanel"), svg = $("#salesChart");
+  const legend = $("#chartLegend"), totals = $("#chartTotals");
+  const note = $("#chartNote"), title = $("#chartTitle");
+  hideChartTip();
+  if (!c) {
+    panel.classList.add("hide");
+    return;
+  }
+  panel.classList.remove("hide");
+  const from = fmtDate(c.from), to = fmtDate(c.to);
+  note.textContent = `${from} to ${to}; the previous period is `
+    + `${fmtDate(c.previous_from)} to ${fmtDate(c.previous_to)}.`;
+  title.textContent = c.sales_visible && c.purchases_visible ? "Sales and purchases"
+    : c.sales_visible ? "Sales" : "Purchases received";
+  legend.innerHTML = (c.sales_visible ? `<span class="sales"><i></i>Sales</span>` : "")
+    + (c.purchases_visible ? `<span class="purchases"><i></i>Purchases</span>` : "");
+
+  const series = c.series || [];
+  if (!series.length) {
+    svg.innerHTML = "";
+    totals.innerHTML = `<span class="gap-note">No days fall in this period.</span>`;
+    return;
+  }
+
+  const W = 760, x0 = 58, x1 = 744, y0 = 14, y1 = 218;
+  const vals = [];
+  series.forEach(p => {
+    if (c.sales_visible && p.sales != null) vals.push(Number(p.sales));
+    if (c.purchases_visible && p.purchases != null) vals.push(Number(p.purchases));
+  });
+  const max = niceMax(Math.max(...vals, 0));
+  const x = i => x0 + (series.length === 1 ? 0.5 : i / (series.length - 1)) * (x1 - x0);
+  const y = v => y1 - (Number(v) / max) * (y1 - y0);
+
+  const grid = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const gy = y1 - f * (y1 - y0);
+    return `<line class="grid-line" x1="${x0}" y1="${gy.toFixed(1)}" x2="${x1}" y2="${gy.toFixed(1)}"/>`
+      + `<text class="axis-label" x="${x0 - 8}" y="${(gy + 4).toFixed(1)}" text-anchor="end">${esc(inrShort(max * f))}</text>`;
+  }).join("");
+
+  const every = Math.max(1, Math.ceil(series.length / 6));
+  const xlabels = series.map((p, i) => (i % every === 0 || i === series.length - 1)
+    ? `<text class="axis-label" x="${x(i).toFixed(1)}" y="${y1 + 20}" text-anchor="middle">${esc(dayLabel(p.date))}</text>`
+    : "").join("");
+
+  const line = key => series.map((p, i) =>
+    `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[key] ?? 0).toFixed(1)}`).join(" ");
+  const dots = key => series.map((p, i) =>
+    `<circle class="dot ${key}" cx="${x(i).toFixed(1)}" cy="${y(p[key] ?? 0).toFixed(1)}" r="2.6"/>`).join("");
+  const area = c.sales_visible
+    ? `<path d="${line("sales")} L${x(series.length - 1).toFixed(1)},${y1} L${x0},${y1} Z" fill="url(#salesFill)" stroke="none"/>`
+    : "";
+
+  const step = series.length > 1 ? (x1 - x0) / (series.length - 1) : (x1 - x0);
+  const hits = series.map((p, i) => {
+    const left = Math.max(x0, x(i) - step / 2);
+    const right = Math.min(x1, x(i) + step / 2);
+    return `<rect class="hit" data-i="${i}" x="${left.toFixed(1)}" y="${y0}" width="${(right - left).toFixed(1)}" height="${y1 - y0}"/>`;
+  }).join("");
+
+  svg.innerHTML = `<defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--moss)" stop-opacity=".20"/>
+      <stop offset="1" stop-color="var(--moss)" stop-opacity="0"/>
+    </linearGradient></defs>${grid}${xlabels}
+    ${c.sales_visible ? area + `<path class="series-sales" d="${line("sales")}"/>` + dots("sales") : ""}
+    ${c.purchases_visible ? `<path class="series-purchases" d="${line("purchases")}"/>` + dots("purchases") : ""}
+    ${hits}`;
+  svg.setAttribute("aria-label",
+    `${title.textContent} from ${from} to ${to}. `
+    + (c.sales_visible ? `Sales total ${money(c.sales_total)} rupees. ` : "")
+    + (c.purchases_visible ? `Purchases total ${money(c.purchases_total)} rupees. ` : "")
+    + "Use the left and right arrow keys to read each day.");
+  state.chart.index = -1;
+
+  const bits = [];
+  if (c.sales_visible) bits.push(`<span><b>Sales</b> ₹ ${money(c.sales_total)} ${deltaText(c.sales_change)}</span>`);
+  if (c.purchases_visible) bits.push(`<span><b>Purchases</b> ₹ ${money(c.purchases_total)} ${deltaText(c.purchases_change)}</span>`);
+  bits.push(`<span class="source-line">${esc(c.note || "")}</span>`);
+  totals.innerHTML = bits.join("");
+}
+
+function renderDashAgeing(a) {
+  const el = $("#ageing"), note = $("#ageNote");
+  if (!a) {
+    note.textContent = "";
+    el.innerHTML = `<p class="gap-note">Receivables are not shown because your role cannot read accounting.</p>`;
+    return;
+  }
+  note.textContent = `As at ${fmtDate(a.as_of)} · ${plural(a.count, "invoice")}`;
+  const max = Math.max(...a.buckets.map(b => Number(b.amount)), 0) || 1;
+  el.innerHTML = a.buckets.map(b => {
+    const amt = Number(b.amount);
+    const pct = amt > 0 ? Math.max(2, amt / max * 100) : 0;
+    const tone = b.key === "90+" ? "bad" : b.key === "61-90" ? "warn" : "ok";
+    return `<div class="age-row">
+      <div class="age-top"><span>${esc(b.label)} <small>${plural(b.count, "invoice")}</small></span><b>₹ ${money(amt)}</b></div>
+      <div class="age-bar ${tone}" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div>
+    </div>`;
+  }).join("")
+  + `<p class="age-total"><span>Total outstanding</span><b>₹ ${money(a.total)}</b></p>`
+  + `<p class="gap-note">${esc(a.note || "")}</p>`;
+}
+
+function expiryLabel(bucket) {
+  return { expired: "already expired", lt30: "expiring within 30 days", lt90: "expiring in 31 to 90 days" }[bucket]
+    || "expiring within 90 days";
+}
+
+function renderExpiry(d) {
+  const w = d && d.expiry_watch;
+  const el = $("#watch"), note = $("#watchNote");
+  $$("[data-eb]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.eb === state.expiry.bucket)));
+  if (state.expiry.loading) {
+    note.textContent = "Loading…";
+    el.innerHTML = `<li><span class="none">Loading the batches in this window…</span></li>`;
+    return;
+  }
+  if (!w) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Stock is not available to your role.</span></li>`;
+    return;
+  }
+  let rows, total;
+  if (state.expiry.bucket === "all") {
+    rows = w.rows || [];
+    total = w.shown_of != null ? w.shown_of : rows.length;
+  } else {
+    const x = state.expiry.data;
+    if (x && x.error) {
+      note.textContent = "";
+      el.innerHTML = `<li><span class="none">${esc(x.error)}</span></li>`;
+      return;
+    }
+    rows = x && x.rows ? x.rows : [];
+    total = x && x.total != null ? x.total : rows.length;
+  }
+  note.textContent = `${total > rows.length ? `Showing ${rows.length} of ${total}. ` : ""}${plural(total, "batch")} ${expiryLabel(state.expiry.bucket)}.`;
+  el.innerHTML = (rows.length ? rows.map(b => {
+    const left = b.days_left < 0 ? `Expired ${plural(-b.days_left, "day")} ago`
+      : b.days_left === 0 ? "Expires today" : `${plural(b.days_left, "day")} left`;
+    const tone = b.tone === "bad" ? "bad" : b.tone === "warn" ? "warn" : "off";
+    return `<li><div><button class="rowbtn" data-act="expiry-detail" data-id="${b.batch_id}" type="button">${esc(b.product_name)}</button>
+      <small>Batch ${esc(b.batch_no)} · ${esc(b.warehouse)} · ${esc(qty(b.on_hand))} on hand</small></div>
+      <div class="r"><span class="chip ${tone}">${esc(left)}</span></div></li>`;
+  }).join("") : `<li><span class="none">Nothing in stock falls in this window.</span></li>`)
+  + `<li><span class="gap-note">Batch value is not shown because stock carries no cost (GAP-D04).</span></li>`;
+}
+
+async function setExpiryBucket(bucket) {
+  state.expiry.bucket = bucket;
+  $$("[data-eb]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.eb === bucket)));
+  if (bucket === "all") {
+    state.expiry.loading = false;
+    state.expiry.data = null;
+    renderExpiry(state.dashboard || {});
+    return;
+  }
+  state.expiry.loading = true;
+  state.expiry.data = null;
+  renderExpiry(state.dashboard || {});
+  const res = await api(`/api/dashboard/expiry?bucket=${encodeURIComponent(bucket)}&page_size=25`);
+  if (state.expiry.bucket !== bucket) return;
+  state.expiry.loading = false;
+  state.expiry.data = res.ok ? res.body : { error: detail(res.body) };
+  if (!res.ok) toast(res, "Expiry list could not be loaded");
+  renderExpiry(state.dashboard || {});
+}
+
+function expiryDetail(id) {
+  const d = state.dashboard;
+  if (!d) return;
+  const pool = [];
+  if (d.expiry_watch) pool.push(...(d.expiry_watch.rows || []));
+  if (state.expiry.data && state.expiry.data.rows) pool.push(...state.expiry.data.rows);
+  const b = pool.find(r => Number(r.batch_id) === Number(id));
+  if (!b) return;
+  const left = b.days_left < 0 ? `Expired ${plural(-b.days_left, "day")} ago`
+    : b.days_left === 0 ? "Expires today" : `${plural(b.days_left, "day")} left`;
+  openDrawer("Batch expiry", `${b.product_name} · ${b.sku}`, `
+    <dl class="dl">
+      <dt>Batch</dt><dd>${esc(b.batch_no)}</dd>
+      <dt>Warehouse</dt><dd>${esc(b.warehouse)}</dd>
+      <dt>On hand</dt><dd>${esc(qty(b.on_hand))} units</dd>
+      <dt>Expiry</dt><dd>${esc(fmtDate(b.expiry))} <span class="chip ${b.tone === "bad" ? "bad" : b.tone === "warn" ? "warn" : "off"}">${esc(left)}</span></dd>
+      <dt>Suggested action</dt><dd>${esc(b.action)}</dd>
+    </dl>
+    <div class="note">The value of this stock is not shown because a batch carries no cost (GAP-D04).</div>
+    <div class="actions"><a class="btn ghost" href="#/inventory/stock">Open inventory</a><button class="btn ghost" type="button" data-act="close">Close</button></div>`);
+}
+
+function renderDashWarehouses(list) {
+  const el = $("#whList");
+  if (!list) {
+    el.innerHTML = `<li class="gap-note">Stock by warehouse is not available to your role.</li>`;
+    return;
+  }
+  const total = list.reduce((s, w) => s + Number(w.units), 0);
+  el.innerHTML = (list.length ? list.map(w => {
+    const units = Number(w.units);
+    const share = total > 0 ? units / total * 100 : 0;
+    const shareText = units > 0 && share < 0.5 ? "<1%" : `${share.toFixed(0)}%`;
+    return `<li><div class="wh-top"><span><b>${esc(w.name)}</b><small>${plural(w.batches, "batch")} in stock</small></span>
+      <span class="num">${esc(qty(units))} units<small>${shareText} of stock</small></span></div>
+      <div class="wh-bar" aria-hidden="true"><i style="width:${share.toFixed(1)}%"></i></div></li>`;
+  }).join("") : `<li><span class="none">No warehouse has been added yet.</span></li>`)
+  + `<li><span class="gap-note">Capacity is not captured (GAP-D03), so a fill level against capacity cannot be shown.</span></li>`;
+}
+
+function renderOpenPos(o) {
+  const el = $("#openpos"), note = $("#poNote");
+  if (!o) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Purchase orders are not available to your role.</span></li>`;
+    return;
+  }
+  const rows = o.rows || [];
+  note.textContent = (o.count > o.shown ? `Showing ${o.shown} of ${o.count}. ` : "") + (o.note || "");
+  el.innerHTML = rows.length ? rows.map(p => {
+    const pct = Math.max(0, Math.min(100, Number(p.pct_received) || 0));
+    return `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button>
+      <small>${esc(p.supplier)} · ${esc(qty(p.received_units))} of ${esc(qty(p.ordered_units))} units received</small>
+      <div class="wh-bar" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div></div>
+      <div class="r"><span class="num">₹ ${money(p.value)}<small>${pct.toFixed(0)}% received</small></span></div></li>`;
+  }).join("") : `<li><span class="none">No purchase order is waiting for goods.</span></li>`;
+}
+
+function renderDashApprovals(a) {
+  const el = $("#approvalList"), note = $("#apNote");
+  if (!a) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Approvals are not available to your role.</span></li>`;
+    return;
+  }
+  const rows = a.rows || [];
+  note.textContent = (a.count > a.shown ? `Showing ${a.shown} of ${a.count}. ` : "") + (a.note || "");
+  el.innerHTML = rows.length ? rows.map(x => `<li><div>
+      <button class="rowbtn" data-act="dash-ap" data-id="${x.id}" type="button">${esc(x.request_no || x.document_number || "Request")}</button>
+      <small>${esc(x.request_type_label)} · ${esc(x.subject || x.document_number || "")} · raised by ${esc(x.requested_by)}</small></div>
+      <div class="r">${(x.reasons || []).includes("credit_limit")
+        ? `<span class="chip bad">Over credit limit</span>` : `<span class="chip warn">Pending</span>`}</div></li>`).join("")
+    : `<li><span class="none">Nothing is waiting for a decision.</span></li>`;
+}
+
+function dashOpenApproval(id) {
+  if (state.approvals.some(a => a.id === Number(id))) return apDetail(id);
+  const a = state.dashboard && state.dashboard.approvals
+    ? (state.dashboard.approvals.rows || []).find(x => x.id === Number(id)) : null;
+  if (!a) return;
+  state.approvals = [a, ...state.approvals.filter(x => x.id !== a.id)];
+  apDetail(id);
+}
+
+function renderTopProducts(t, d) {
+  const el = $("#topProducts"), note = $("#topNote");
+  if (!t) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Sales are not available to your role.</span></li>`;
+    return;
+  }
+  note.textContent = `${fmtDate(d.from)} to ${fmtDate(d.to)}, taxable value before GST`;
+  const rows = t.rows || [];
+  if (!rows.length) {
+    el.innerHTML = `<li><span class="none">No issued invoice falls in this period.</span></li>`;
+    return;
+  }
+  const max = Math.max(...rows.map(r => Number(r.revenue)), 0) || 1;
+  el.innerHTML = rows.map(r => {
+    const rev = Number(r.revenue), prev = Number(r.previous_revenue);
+    const pct = Math.max(0, rev / max * 100);
+    const change = r.change == null
+      ? (prev === 0 && rev > 0 ? `<span class="delta up">new this period</span>` : `<span class="delta flat">no prior sales</span>`)
+      : Number(r.change) > 0 ? `<span class="delta up">▲ ${Number(r.change).toFixed(1)}%</span>`
+      : Number(r.change) < 0 ? `<span class="delta down">▼ ${Math.abs(Number(r.change)).toFixed(1)}%</span>`
+      : `<span class="delta flat">no change</span>`;
+    return `<li><div><b>${esc(r.name)}</b><small>${esc(r.sku)} · ${esc(qty(r.qty))} units</small>
+      <div class="wh-bar" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div></div>
+      <div class="r"><span class="num">₹ ${money(rev)}<small>${change}</small></span></div></li>`;
+  }).join("");
+}
+
+function renderCategory(c) {
+  const el = $("#category");
+  if (!c || c.available === false) {
+    el.innerHTML = `<div class="category-empty"><div class="donut" aria-hidden="true"></div>
+      <div><b>No data yet</b><p>${esc(c && c.note || "Sales cannot be grouped by category until a category is captured on each product.")}</p>
+      <code>${esc(c && c.gap || "GAP-D01")}</code></div></div>`;
+    return;
+  }
+  el.innerHTML = `<p class="gap-note">Category totals are not available.</p>`;
+}
+
+/* ---------- phase 3 insight cards ---------- */
+function renderInsights(ins) {
+  renderInsightPipeline(ins && ins.pipeline);
+  renderInsightCustomers(ins && ins.customers);
+  renderInsightPurchasing(ins && ins.purchasing);
+  renderInsightCorrections(ins && ins.corrections);
+  renderInsightHrToday(ins && ins.hr);
+}
+
+function renderInsightPipeline(p) {
+  const show = !!(p && (p.sales || p.leads));
+  $("#pipePanel").classList.toggle("hide", !show);
+  if (!show) return;
+  const col = (title, rows, render, extra = "") => `<div><h3 class="ins-h">${esc(title)}</h3>
+    <ul class="rows">${rows.length ? rows.map(render).join("") : `<li><span class="none">None.</span></li>`}</ul>${extra}</div>`;
+  const parts = [];
+  if (p.sales) {
+    const d = p.sales.dispatch || {};
+    const dispatch = d.average_days != null
+      ? `Raised to dispatch: ${d.average_days} days on average across ${plural(d.measured, "dispatched order")}. ${d.note || ""}`
+      : `Order-to-dispatch time is not available yet. ${d.note || ""}`;
+    parts.push(col(`Sales orders · ${plural(p.sales.total, "order")}`, p.sales.rows,
+      r => `<li><div><b>${esc(r.label)}</b><small>${plural(r.count, "order")}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.value)}</span></div></li>`,
+      `<p class="gap-note">${esc(dispatch)}</p>`));
+  }
+  if (p.leads) parts.push(col(`Leads · ${plural(p.leads.total, "lead")}`, p.leads.rows,
+    r => `<li><div><b>${esc(r.label)}</b></div><span class="num">${qty(r.count)}</span></li>`));
+  $("#pipeBody").innerHTML = parts.join("");
+}
+
+function renderInsightCustomers(c) {
+  $("#custPanel").classList.toggle("hide", !c);
+  if (!c) return;
+  $("#custNote").textContent = `${fmtDate(c.from)} to ${fmtDate(c.to)} · top by invoiced value`;
+  $("#custTop").innerHTML = c.top
+    ? (c.top.length ? c.top.map(r => `<li><div><b>${esc(r.name)}</b><small>${plural(r.invoices, "invoice")}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.revenue)}</span></div></li>`).join("")
+      : `<li><span class="none">No issued invoice falls in this period.</span></li>`)
+    : `<li><span class="none">Top customers are not available to your role.</span></li>`;
+  $("#custOutWrap").classList.toggle("hide", !c.outstanding);
+  if (c.outstanding) {
+    $("#custOut").innerHTML = (c.outstanding.length ? c.outstanding.map(r => `<li><div><b>${esc(r.name)}</b><small>${plural(r.invoices, "invoice")}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.outstanding)}</span></div></li>`).join("")
+      : `<li><span class="none">Nothing is outstanding.</span></li>`)
+      + `<li><div><b>Total outstanding</b></div><span class="num">₹ ${money(c.outstanding_total)}</span></li>`;
+  }
+  $("#custCreditWrap").classList.toggle("hide", !c.credit);
+  if (c.credit) {
+    $("#custCredit").innerHTML = (c.credit.length ? c.credit.map(r => {
+      const pct = Number(r.pct_used) || 0;
+      const pctText = `${pct.toLocaleString("en-IN", {maximumFractionDigits: 0})}%`;
+      return `<li><div><b>${esc(r.name)}</b><small>₹ ${money(r.exposure)} of ₹ ${money(r.credit_limit)} in use</small>
+        <div class="meter use" aria-hidden="true"><i style="width:${Math.min(pct, 100).toFixed(1)}%;background:${pct > 100 ? "var(--bad)" : pct >= 80 ? "var(--turmeric)" : "var(--moss)"}"></i></div></div>
+        <div class="r"><span class="num">${pctText}${pct > 100 ? "<small>over limit</small>" : ""}</span></div></li>`;
+    }).join("") : `<li><span class="none">No distributor has a credit limit.</span></li>`);
+  }
+}
+
+function renderInsightPurchasing(p) {
+  $("#purPanel").classList.toggle("hide", !p);
+  if (!p) return;
+  $("#purNote").textContent = `${plural(p.open_count, "open purchase order")}`
+    + ` · ${p.no_receipt} with no goods received · ${p.partial} part received`;
+  $("#purAge").innerHTML = (p.rows || []).map(r => `<li><div><b>${esc(r.label)}</b><small>${plural(r.count, "order")}</small></div>
+    <div class="r"><span class="num">₹ ${money(r.value)}</span></div></li>`).join("")
+    || `<li><span class="none">No purchase order is waiting for goods.</span></li>`;
+  $("#purGap").textContent = p.note || "";
+}
+
+function renderInsightCorrections(c) {
+  $("#corrPanel").classList.toggle("hide", !c);
+  if (!c) return;
+  $("#corrNote").textContent = `${fmtDate(c.from)} to ${fmtDate(c.to)}`;
+  const latest = [...(c.credit_notes.rows || []).map(r => ({...r, kind: "Credit"})),
+                  ...(c.debit_notes.rows || []).map(r => ({...r, kind: "Debit"}))]
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 6);
+  $("#corrNotes").innerHTML =
+    `<li><div><b>Credit notes</b><small>${plural(c.credit_notes.count, "note")}</small></div>
+      <div class="r"><span class="num">₹ ${money(c.credit_notes.value)}</span></div></li>`
+    + `<li><div><b>Debit notes</b><small>${plural(c.debit_notes.count, "note")}</small></div>
+      <div class="r"><span class="num">₹ ${money(c.debit_notes.value)}</span></div></li>`
+    + (latest.length ? latest.map(r => `<li><div><b>${esc(r.kind)} note ${esc(r.number)}</b>
+        <small>${esc(r.invoice)} · ${esc(r.distributor)} · ${esc(r.reason)}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.total)}</span></div></li>`).join("")
+      : `<li><span class="none">No credit or debit note was issued in this period.</span></li>`);
+  $("#postWrap").classList.remove("hide");
+  const posts = c.post_billing;
+  $("#corrPosts").innerHTML = posts.count
+    ? posts.rows.map(r => {
+        const tone = r.status === "approved" ? "ok" : r.status === "rejected" ? "bad" : r.status === "pending" ? "warn" : "off";
+        return `<li><div><b>${esc(r.request_no || "—")}</b><small>${esc(r.document || "")} ${esc(r.subject || "")}</small></div>
+          <div class="r"><span class="chip ${tone}">${esc(r.status)}</span>
+          <small>${esc(fmtStamp(r.requested_at))}</small></div></li>`;
+      }).join("")
+    : `<li><span class="none">No post-billing request in this period.</span></li>`;
+}
+
+function renderInsightHrToday(h) {
+  $("#hrPanel").classList.toggle("hide", !h);
+  if (!h) return;
+  $("#hrNote").textContent = fmtDate(h.date);
+  const stat = (n, label) => `<div><b>${qty(n)}</b><span>${esc(label)}</span></div>`;
+  $("#hrStats").innerHTML = stat(h.headcount, "active employees")
+    + stat(h.marked, "attendance marked") + stat(h.not_marked, "not marked")
+    + stat(h.leave_pending, "leave pending") + stat(h.od_pending, "on-duty pending");
+  const rows = (h.attendance || []).filter(r => r.count > 0);
+  $("#hrAtt").innerHTML = rows.length
+    ? rows.map(r => `<li><div><b>${esc(r.label)}</b></div><span class="num">${qty(r.count)}</span></li>`).join("")
+    : `<li><span class="none">No attendance is marked for today.</span></li>`;
+}
+
+function renderActivity(a) {
+  const el = $("#activity"), note = $("#actNote");
+  if (!a) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">The audit trail is not available to your role.</span></li>`;
+    return;
+  }
+  const rows = a.rows || [];
+  note.textContent = a.total > a.shown ? `Latest ${a.shown} of ${a.total} entries.` : `${plural(a.total, "entry")}.`;
+  el.innerHTML = rows.length ? rows.map(r => {
+    const changed = r.changes && Object.keys(r.changes).length ? ` · ${Object.keys(r.changes).join(", ")}` : "";
+    return `<li><div><span class="who-done">${esc(r.actor)}</span>
+      <span class="what">${esc(r.action)} · ${esc(r.record)}${esc(changed)}</span></div>
+      <time datetime="${esc(r.at || "")}">${esc(fmtStamp(r.at))}</time></li>`;
+  }).join("") : `<li><span class="none">No activity has been recorded yet.</span></li>`;
+}
+
+function renderHealth(h) {
+  const el = $("#health"), prog = $("#prog"), bar = $("#barfill");
+  if (!h) {
+    prog.textContent = "";
+    el.innerHTML = `<p class="gap-note">Health information is not available.</p>`;
+    return;
+  }
+  const m = h.modules || {}, s = h.schema || {}, b = h.backup || {}, al = h.alerts || {};
+  prog.textContent = `${m.working ?? 0} of ${m.counted ?? 0} modules working`;
+  bar.style.width = `${Number(m.percent) || 0}%`;
+  const schemaOk = !!s.at_head;
+  const schemaText = s.current
+    ? `${s.current}${schemaOk ? " · at the latest migration" : s.head ? ` · latest is ${s.head}` : ""}`
+    : "No migration version recorded";
+  const backupOk = !!b.status && b.status !== "not_recorded";
+  el.innerHTML = `
+    <div class="health-row"><div class="h-label"><b>Modules</b><span>From the server's module register.</span></div>
+      <span class="chip ${m.counted && m.working === m.counted ? "ok" : "warn"}">${m.working ?? 0} of ${m.counted ?? 0}</span></div>
+    <div class="health-row"><div class="h-label"><b>Schema migration</b><span>${esc(schemaText)}</span></div>
+      <span class="chip ${schemaOk ? "ok" : "warn"}">${schemaOk ? "At head" : "Check"}</span></div>
+    <div class="health-row"><div class="h-label"><b>Backup and restore</b><span>${esc(b.note || "Not recorded.")}</span></div>
+      <span class="chip ${backupOk ? "ok" : "warn"}">${backupOk ? "Recorded" : "Not recorded"}</span></div>
+    <div class="health-row"><div class="h-label"><b>Alert channel</b><span>${esc(al.note || "")}</span></div>
+      <span class="chip ${al.configured ? "ok" : "off"}">${al.configured ? "Configured" : "Not configured"}</span></div>`;
+}
+
+function renderModuleList() {
+  const reg = state.modules;
+  if (!reg) return;
+  const CHIP = reg.chips;
+  $("#mods").innerHTML = reg.groups.map(g => {
+    const rows = reg.modules.filter(m => m.group === g.name);
+    return `<li class="grp"><b>${esc(g.name)}</b><span>${g.counted ? `${g.working} of ${g.counted} working` : "optional"}</span></li>`
+      + rows.map(m => {
+        const chip = CHIP[m.status] || ["off", m.status];
+        return `<li><div>${esc(m.name)}<small>${esc(m.does)}</small></div><span class="chip ${chip[0]}">${esc(chip[1])}</span></li>`;
+      }).join("");
+  }).join("");
+}
+
+async function loadDashboard() {
+  const seq = ++state.dashSeq;
+  state.dashLoading = true;
+  state.dashError = null;
+  renderDash();
+  const res = await api(`/api/dashboard?range=${state.dashRange}`);
+  if (seq !== state.dashSeq || !state.user) return;
+  state.dashLoading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    state.dashboard = res.body;
+    state.dashError = null;
+    state.expiry.data = null;
+    state.chart.index = -1;
+  } else {
+    state.dashError = detail(res.body);
+  }
+  renderDash();
+  if (state.dashboard && state.expiry.bucket !== "all") setExpiryBucket(state.expiry.bucket);
+}
+
+function setDashRange(days) {
+  if (![7, 30, 90].includes(days) || days === state.dashRange) return;
+  state.dashRange = days;
+  try { localStorage.setItem("hb.dashRange", String(days)); } catch (e) { /* storage blocked */ }
+  $$("[data-dash-range]").forEach(b =>
+    b.setAttribute("aria-pressed", String(Number(b.dataset.dashRange) === days)));
+  loadDashboard();
+}
+
+/* ---------- command palette ---------- */
+function openPalette() {
+  if (!state.user) return;
+  state.palette.open = true;
+  state.palette.seq++;
+  state.palette.items = [];
+  state.palette.i = -1;
+  clearTimeout(state.palette.timer);
+  $("#palette").classList.remove("hide");
+  $("#paletteQ").value = "";
+  $("#paletteQ").setAttribute("aria-activedescendant", "");
+  $("#paletteResults").innerHTML = "";
+  $("#paletteNote").textContent = "Type at least two characters. Results follow what your role may read.";
+  $("#paletteQ").focus();
+}
+
+function closePalette() {
+  const p = $("#palette");
+  state.palette.open = false;
+  state.palette.seq++;
+  clearTimeout(state.palette.timer);
+  state.palette.items = [];
+  state.palette.i = -1;
+  if (!p) return;
+  p.classList.add("hide");
+  $("#paletteQ").value = "";
+  $("#paletteResults").innerHTML = "";
+}
+
+function paletteSetIndex(i) {
+  const items = state.palette.items;
+  if (!items.length) { state.palette.i = -1; return; }
+  state.palette.i = Math.max(0, Math.min(items.length - 1, i));
+  items.forEach((el, j) => {
+    el.classList.toggle("on", j === state.palette.i);
+    el.setAttribute("aria-selected", String(j === state.palette.i));
+  });
+  const active = items[state.palette.i];
+  if (active) {
+    if (!active.id) active.id = `palette-item-${state.palette.i}`;
+    $("#paletteQ").setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function renderPalette(body, term) {
+  const groups = body && body.groups ? body.groups : [];
+  const box = $("#paletteResults");
+  if (!groups.length) {
+    box.innerHTML = `<p class="palette-empty">No record matches “${esc(term)}” in the sections your role can read.</p>`;
+    $("#paletteNote").textContent = "Nothing to open.";
+    state.palette.items = [];
+    state.palette.i = -1;
+    return;
+  }
+  box.innerHTML = groups.map(g => `<div class="palette-group" role="group" aria-label="${esc(g.label)}">
+    <h3>${esc(g.label)}</h3>
+    ${(g.items || []).map(it => `<button class="palette-item" type="button" role="option" aria-selected="false"
+      data-href="${esc(it.href)}" data-group="${esc(g.key)}" data-id="${esc(it.id)}">
+      <b>${esc(it.title)}</b><span>${esc(it.subtitle || "")}</span></button>`).join("")}
+  </div>`).join("");
+  state.palette.items = $$(".palette-item", box);
+  const count = state.palette.items.length;
+  $("#paletteNote").textContent = `${plural(count, "result")} across ${plural(groups.length, "section")} · `
+    + "↑ ↓ to move · Enter to open · Esc to close";
+  paletteSetIndex(0);
+}
+
+async function paletteSearch(term) {
+  const seq = ++state.palette.seq;
+  if (term.length < 2) {
+    $("#paletteResults").innerHTML = "";
+    state.palette.items = [];
+    state.palette.i = -1;
+    $("#paletteNote").textContent = "Type at least two characters. Results follow what your role may read.";
+    return;
+  }
+  $("#paletteNote").textContent = "Searching…";
+  const res = await api(`/api/dashboard/search?q=${encodeURIComponent(term)}`);
+  if (seq !== state.palette.seq || !state.palette.open) return;
+  if (!res.ok) {
+    $("#paletteResults").innerHTML = `<p class="palette-empty">${esc(detail(res.body))}</p>`;
+    $("#paletteNote").textContent = "The search could not run.";
+    state.palette.items = [];
+    state.palette.i = -1;
+    return;
+  }
+  renderPalette(res.body, term);
+}
+
+function paletteGo(btn) {
+  const href = btn.dataset.href || "#/dash";
+  const group = btn.dataset.group, id = btn.dataset.id;
+  closePalette();
+  if (location.hash !== href) location.hash = href;
+  else route();
+  if (!id) return;
+  // Let the screen render before a record drawer opens on top of it.
+  setTimeout(() => {
+    if (group === "sales_orders") soDetail(id);
+    else if (group === "invoices") invDetail(id);
+    else if (group === "purchase_orders") poDetail(id);
+    else if (group === "distributors") distForm(id);
+    else if (group === "suppliers") supplierDetail(id);
+    else if (group === "leads") leadDetail(id);
+    else if (group === "products") productDrawer(id, "open");
+  }, 80);
+}
+
+/* ---------- theme ---------- */
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const b = $("#themeToggle");
+  if (b) {
+    b.setAttribute("aria-pressed", String(dark));
+    b.textContent = dark ? "Light theme" : "Dark theme";
+  }
+  const d = $("#dashTheme");
+  if (d) {
+    d.setAttribute("aria-pressed", String(dark));
+    d.textContent = dark ? "Light theme" : "Dark theme";
+  }
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem("hb.theme", next); } catch (e) { /* storage blocked */ }
+  applyTheme(next);
 }
 
 /* ---------- accounts ---------- */
@@ -642,8 +1421,11 @@ function renderHr() {
   const wholeTeam = can("hr:read");
   $("#hrStats").classList.toggle("hide", !wholeTeam);
   $("#hrDirectory").classList.toggle("hide", !wholeTeam);
-  ["hr-employees", "hr-leave", "hr-od", "hr-payroll"].forEach(a =>
+  ["hr-employees", "hr-leave", "hr-od"].forEach(a =>
     $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !wholeTeam)));
+  // Payroll is a closed book: the API needs hr:payroll_prepare to even list a period.
+  $$('#v-hr [data-act="hr-payroll"]').forEach(b =>
+    b.classList.toggle("hide", !(wholeTeam && can("hr:payroll_prepare"))));
   // Shift policy is an HR/administrator setting, not something every reader edits.
   $$('#v-hr [data-act="hr-shifts"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:write"))));
@@ -679,47 +1461,6 @@ async function hrEmployees() {
   openDrawer("Employee master", `${emps.length} employee record(s). Deactivate, never delete.`, `
     ${can("hr:write") ? `<div class="actions"><button class="btn" type="button" data-act="hr-new-emp">New employee</button></div>` : ""}
     <div class="tw"><table><thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Designation</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`, true);
-}
-async function hrEmployeeForm(id) {
-  const x = id ? state.hr.employees.find(e => e.id === Number(id)) : null;
-  const [b, o, s] = await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts")]);
-  const opts = (arr, sel, label) => (arr.ok ? arr.body : []).map(v => `<option value="${v.id}"${sel === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
-  openDrawer(x ? `Edit ${x.code}` : "New employee", "The HR master extends the existing employee record; the login link is unchanged.", `
-    <form id="hrEmpForm" data-id="${x ? x.id : ""}" novalidate>
-      <div class="row2"><div><label>Employee code</label><input name="code" value="${x ? esc(x.code) : ""}"${x ? " readonly" : ""} autocomplete="off"></div>
-      <div><label>Full name</label><input name="full_name" value="${x ? esc(x.full_name) : ""}" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Department</label><input name="department" value="${x ? esc(x.department || "") : ""}" autocomplete="off"></div>
-      <div><label>Designation</label><input name="designation" value="${x ? esc(x.designation || "") : ""}" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Phone</label><input name="phone" value="${x ? esc(x.phone || "") : ""}" autocomplete="off"></div>
-      <div><label>Email</label><input name="email" value="${x ? esc(x.email || "") : ""}" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Joining date</label><input name="joining_date" type="date" value="${x && x.joining_date ? x.joining_date : ""}"></div>
-      <div><label>Employment type</label><input name="employment_type" value="${x ? esc(x.employment_type || "") : ""}" placeholder="Full time / Contract" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Branch</label><select name="branch_id"><option value="">—</option>${opts(b, x ? x.branch_id : null, v => v.name)}</select></div>
-      <div><label>Office / work location</label><select name="office_id"><option value="">—</option>${opts(o, x ? x.office_id : null, v => v.name)}</select></div></div>
-      <div class="row2"><div><label>Shift</label><select name="shift_id"><option value="">—</option>${opts(s, x ? x.shift_id : null, v => v.name)}</select></div>
-      <div><label>Status</label><select name="status"><option value="active"${x && x.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${x && x.status === "inactive" ? " selected" : ""}>Inactive</option></select></div></div>
-      <div class="err" role="alert"></div>
-      <div class="actions"><button class="btn" type="submit">${x ? "Save employee" : "Create employee"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
-    </form>`, true);
-}
-async function saveHrEmployee(form) {
-  const f = form.elements, err = $(".err", form), id = form.dataset.id ? Number(form.dataset.id) : null;
-  err.textContent = "";
-  const body = {full_name: f.full_name.value.trim(), department: f.department.value || null,
-                designation: f.designation.value || null, phone: f.phone.value || null,
-                email: f.email.value || null, joining_date: f.joining_date.value || null,
-                employment_type: f.employment_type.value || null,
-                branch_id: f.branch_id.value ? Number(f.branch_id.value) : null,
-                office_id: f.office_id.value ? Number(f.office_id.value) : null,
-                shift_id: f.shift_id.value ? Number(f.shift_id.value) : null,
-                status: f.status.value};
-  if (!body.full_name || body.full_name.length < 2) { err.textContent = "Enter the employee's full name."; return; }
-  if (!id) body.code = f.code.value.trim();
-  if (!id && !body.code) { err.textContent = "Enter an employee code."; return; }
-  const res = await api(id ? `/api/hr/employees/${id}` : "/api/hr/employees", {method: id ? "PATCH" : "POST", body});
-  toast(res, res.ok ? "Employee saved" : "Employee not saved");
-  if (!res.ok) { err.textContent = detail(res.body); return; }
-  closeDrawer(); openHr();
 }
 const HR_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const hrTime = v => (v || "").slice(0, 5);
@@ -895,10 +1636,10 @@ async function hrPayroll() {
       <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Create period</button></div></form>
     <div class="tw"><table><thead><tr><th>Period</th><th>Status</th><th class="n">Entries</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
       ${rows.map(x => `<tr><td class="strong">${x.year}-${String(x.month).padStart(2, "0")}</td><td>${esc(x.status)}</td><td class="n">${x.entries}</td><td class="n">${money(x.net)}</td>
-        <td class="rowacts">${["draft", "under_review"].includes(x.status) ? `<button class="btn ghost sm" type="button" data-act="pay-prepare" data-id="${x.id}">${x.status === "draft" ? "Prepare" : "Recalculate"}</button>` : ""}
-        ${x.status === "under_review" ? `<button class="btn ghost sm" type="button" data-act="pay-submit" data-id="${x.id}">Submit for approval</button>` : ""}
-        ${x.status === "approved" ? `<button class="btn ghost sm" type="button" data-act="pay-process" data-id="${x.id}">Process</button>` : ""}
-        ${x.status === "processed" ? `<button class="btn ghost sm" type="button" data-act="pay-paid" data-id="${x.id}">Mark paid</button>` : ""}
+        <td class="rowacts">${can("hr:payroll_prepare") && ["draft", "under_review"].includes(x.status) ? `<button class="btn ghost sm" type="button" data-act="pay-prepare" data-id="${x.id}">${x.status === "draft" ? "Prepare" : "Recalculate"}</button>` : ""}
+        ${can("hr:payroll_prepare") && x.status === "under_review" ? `<button class="btn ghost sm" type="button" data-act="pay-submit" data-id="${x.id}">Submit for approval</button>` : ""}
+        ${can("hr:payroll_approve") && x.status === "approved" ? `<button class="btn ghost sm" type="button" data-act="pay-process" data-id="${x.id}">Process</button>` : ""}
+        ${can("hr:payroll_approve") && x.status === "processed" ? `<button class="btn ghost sm" type="button" data-act="pay-paid" data-id="${x.id}">Mark paid</button>` : ""}
         <button class="btn ghost sm" type="button" data-act="pay-open" data-id="${x.id}">Open</button></td></tr>`).join("") || '<tr><td colspan="5" class="empty-row">No payroll periods.</td></tr>'}</tbody></table></div>`, true);
 }
 async function hrPayrollOpen(id) {
@@ -909,7 +1650,7 @@ async function hrPayrollOpen(id) {
     <div class="tw"><table><thead><tr><th>Employee</th><th>Department</th><th class="n">Payable days</th><th class="n">LOP</th><th class="n">Gross (₹)</th><th class="n">Deductions (₹)</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
       ${p.entries.map(e => `<tr><td>${esc(e.employee)}<small>${esc(e.employee_code)}</small></td><td>${esc(e.department || "–")}</td><td class="n">${qty(e.payable_days)}</td><td class="n">${qty(e.lop_days)}</td><td class="n">${money(e.gross)}</td><td class="n">${money(e.deductions)}</td><td class="n strong">${money(e.net)}</td>
         <td>${can("hr:confidential") ? `<a class="link-btn" href="/api/hr/payroll/entries/${e.id}/slip" download>Slip</a>` : ""}</td></tr>`).join("")}</tbody></table></div>
-    <a class="btn ghost" href="/api/reports/hr_payroll/export?format=xlsx" download>Download salary register (Excel)</a>`, true);
+    ${can("hr:reports") && can("report:export") ? `<a class="btn ghost" href="/api/reports/hr_payroll/export?format=xlsx" download>Download salary register (Excel)</a>` : ""}`, true);
 }
 async function saveHrPeriod(form) {
   const f = form.elements, err = $(".err", form);
@@ -1832,13 +2573,14 @@ function invDetail(id, err, notice) {
         <div class="note">Only non-financial fields can be amended. Amounts and tax are corrected with a credit or debit note.</div>
         <div class="err" role="alert"></div>
         <div class="actions"><button class="btn ghost" type="submit">Save amendment</button></div></form>`;
-    else foot += `<div class="note">After billing, only an Administrator can amend an issued invoice. You may request a non-financial change; an Administrator must approve it.</div>
+    else if (can("invoice:write")) foot += `<div class="note">After billing, only an Administrator can amend an issued invoice. You may request a non-financial change; an Administrator must approve it.</div>
       <form id="amendReqForm" data-id="${inv.id}" novalidate><h3>Request a post-billing change</h3>
         <div class="row2"><div><label for="ar-dc">Delivery challan</label><input id="ar-dc" name="challan" value="${esc(inv.delivery_challan_number || "")}"></div>
         <div><label for="ar-veh">Vehicle</label><input id="ar-veh" name="vehicle" value="${esc(inv.vehicle_number || "")}"></div></div>
         <label for="ar-r">Reason</label><input id="ar-r" name="reason" placeholder="Why is the change needed?" autocomplete="off">
         <div class="err" role="alert"></div>
         <div class="actions"><button class="btn ghost" type="submit">Send for Administrator approval</button></div></form>`;
+    else foot += `<div class="note">After billing, only an Administrator can amend an issued invoice.</div>`;
     if (can("note:write")) foot += noteForm("cn", "Credit note") + noteForm("dn", "Debit note");
     if (can("invoice:cancel")) foot += `<form id="invCancelForm" data-id="${inv.id}" novalidate><h3>Cancel the invoice</h3>
         <div class="note">Cancelling keeps the document and its number, marked CANCELLED. It cannot be undone.</div>
@@ -1965,12 +2707,10 @@ function apDetail(id, err) {
   if (err) foot += `<div class="err" role="alert">${esc(err)}</div>`;
   if (a.status !== "pending") {
     foot += `<div class="note">${esc((AP[a.status] || [a.status])[0])}${a.decided_by ? ` by ${esc(a.decided_by)} on ${esc(fmtStamp(a.decided_at))}` : ""}.${a.decision_reason ? ` Reason: ${esc(a.decision_reason)}` : ""}</div>`;
-  } else if (!a.can_decide || (a.request_type === "sales_order" && !can("approval:decide"))) {
-    foot += `<div class="note">Your role can view this request but not decide it.${a.reasons.includes("credit_limit") ? " Only an Administrator can decide an over-credit-limit request." : ""}</div>`;
-  } else if (a.reasons.includes("credit_limit") && !can("approval:credit_limit")) {
-    foot += `<div class="note">Only an Administrator can decide a request that exceeds the credit limit.</div>`;
   } else if (mine) {
     foot += `<div class="note">You raised this request, so a different approver must decide it.</div>`;
+  } else if (!a.can_decide) {
+    foot += `<div class="note">Your role can view this request but not decide it.${a.reasons.includes("credit_limit") ? " Only an Administrator can decide an over-credit-limit request." : ""}</div>`;
   } else {
     foot += `<form id="decideForm" data-id="${a.id}" novalidate><h3>Your decision</h3>
       <label for="a-r">Reason</label><input id="a-r" name="reason" placeholder="Record why you are approving or rejecting" autocomplete="off">
@@ -2476,21 +3216,58 @@ function showSecret(title, sub, username, password) {
 }
 
 function userForm() {
-  const unlinked = state.employees.filter(e => !e.user_id);
+  const active = state.employees.filter(e => !e.user_id && e.status === "active");
   openDrawer("New user", "A temporary password is generated and shown once. The user must change it at first sign-in.", `
     <form id="userForm" novalidate>
-      <label for="nu-name">Username</label><input id="nu-name" name="username" autocomplete="off" placeholder="e.g. priya.sales">
+      <label for="nu-emp">Employee (active, no login)</label>
+      <select id="nu-emp" name="employee_id">
+        <option value="">— Not linked —</option>
+        ${active.map(e => `<option value="${e.id}">${esc(e.code)} – ${esc(e.full_name)}</option>`).join("")}
+      </select>
+      <label for="nu-name">Username</label>
+      <select id="nu-name" name="username" disabled><option value="">Choose an employee first</option></select>
+      <input id="nu-name-manual" name="username_manual" autocomplete="off" placeholder="e.g. priya.sales" class="hide">
       <label for="nu-role">Role</label><select id="nu-role" name="role">${state.roles.map(r => `<option value="${r.id}">${esc(r.display_name)} (${esc(r.name)})</option>`).join("")}</select>
-      <label for="nu-emp">Employee (optional)</label><select id="nu-emp" name="employee_id"><option value="">Not linked</option>${unlinked.map(e => `<option value="${e.id}">${esc(e.code)} – ${esc(e.full_name)}</option>`).join("")}</select>
-      <div class="note">Usernames are matched case-insensitively. A password needs 12+ characters and three of: lowercase, uppercase, digits, symbols.</div>
+      <div class="note">Usernames are matched case-insensitively. A password needs 12+ characters and three of: lowercase, uppercase, digits, symbols. Only active employees without a login are listed; choose “Not linked” to type a username.</div>
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">Create user</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`);
+  const emp = $("#nu-emp"), name = $("#nu-name"), manual = $("#nu-name-manual");
+  const slug = s => (s || "").toLowerCase().replace(/[^a-z0-9._-]+/g, ".").replace(/^[._-]+|[._-]+$/g, "");
+  const taken = new Set(state.users.map(u => u.username.toLowerCase()));
+  const candidates = e => [...new Set([
+    e.email ? slug(e.email.split("@")[0]) : "",
+    slug(e.code),
+    slug(e.full_name)
+  ].filter(u => u.length >= 3 && !taken.has(u)))].slice(0, 4);
+  const sync = () => {
+    const e = active.find(x => x.id === Number(emp.value));
+    const opts = e ? candidates(e) : [];
+    if (!opts.length) {
+      name.disabled = true;
+      name.innerHTML = `<option value="">Type a username below</option>`;
+      manual.classList.remove("hide"); manual.disabled = false;
+      return;
+    }
+    name.disabled = false;
+    name.innerHTML = opts.map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join("");
+    manual.classList.add("hide"); manual.disabled = true; manual.value = "";
+  };
+  emp.addEventListener("change", sync);
+  sync();
 }
 async function saveUser(form) {
-  const f = new FormData(form), err = $(".err", form), btn = $("button[type=submit]", form);
+  const err = $(".err", form), btn = $("button[type=submit]", form);
   err.textContent = ""; btn.disabled = true;
-  const res = await api("/api/users", {method: "POST", body: {username: f.get("username"), role: f.get("role"), employee_id: f.get("employee_id") || null}});
+  const sel = form.elements.username, manual = form.elements.username_manual;
+  const username = (!sel.disabled && sel.value ? sel.value : manual.value).trim();
+  const employee_id = form.elements.employee_id.value || null;
+  if (!username) {
+    btn.disabled = false;
+    err.textContent = "Choose an employee or type a username.";
+    return;
+  }
+  const res = await api("/api/users", {method: "POST", body: {username, role: form.elements.role.value, employee_id}});
   btn.disabled = false;
   if (!res.ok) { err.textContent = detail(res.body); return; }
   toast(res, "User created");
@@ -2562,34 +3339,65 @@ async function saveRole(form) {
   if (res.ok) { closeDrawer(); loadAll(); } else $(".err", form).textContent = detail(res.body);
 }
 
-function employeeForm(empId) {
-  const e = empId ? state.employees.find(x => x.id === Number(empId)) : null;
-  openDrawer(e ? `Employee ${e.code}` : "New employee", "Employees are deactivated, never deleted. Link a login from the Users section above.", `
+async function employeeForm(empId) {
+  const rich = can("hr:write");
+  let e = empId ? state.employees.find(x => x.id === Number(empId)) : null;
+  if (empId && can("hr:read")) {
+    // The settings list omits the HR master fields; read the full record so the
+    // same form edits it identically from either entry point.
+    const full = await api(`/api/hr/employees/${empId}`);
+    if (full.ok) e = full.body;
+  }
+  const [b, o, s] = rich
+    ? await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts")])
+    : [null, null, null];
+  const opts = (res, sel, label) => (res && res.ok ? res.body : [])
+    .map(v => `<option value="${v.id}"${sel === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+  const hrFields = rich ? `
+      <div class="row2"><div><label for="ne-join">Joining date</label><input id="ne-join" name="joining_date" type="date" value="${e && e.joining_date ? e.joining_date : ""}"></div>
+      <div><label for="ne-type">Employment type</label><input id="ne-type" name="employment_type" autocomplete="off" value="${e && e.employment_type ? esc(e.employment_type) : ""}" placeholder="Full time / Contract"></div></div>
+      <div class="row2"><div><label for="ne-branch">Branch</label><select id="ne-branch" name="branch_id"><option value="">—</option>${opts(b, e ? e.branch_id : null, v => v.name)}</select></div>
+      <div><label for="ne-office">Office / work location</label><select id="ne-office" name="office_id"><option value="">—</option>${opts(o, e ? e.office_id : null, v => v.name)}</select></div></div>
+      <div class="row2"><div><label for="ne-shift">Shift</label><select id="ne-shift" name="shift_id"><option value="">—</option>${opts(s, e ? e.shift_id : null, v => v.name)}</select></div>
+      <div><label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${!e || e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e && e.status === "inactive" ? "selected" : ""}>Inactive</option></select></div></div>`
+    : `<label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${!e || e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e && e.status === "inactive" ? "selected" : ""}>Inactive</option></select>`;
+  openDrawer(e ? `Employee ${e.code}` : "New employee",
+    "One employee master for HR and settings. Employees are deactivated, never deleted.", `
     <form id="empForm" data-id="${e ? e.id : ""}" novalidate>
-      <label for="ne-code">Employee code</label><input id="ne-code" name="code" autocomplete="off" value="${e ? esc(e.code) : ""}" ${e ? "disabled" : ""}>
-      <label for="ne-name">Full name</label><input id="ne-name" name="full_name" autocomplete="off" value="${e ? esc(e.full_name) : ""}">
-      <div class="row2"><div><label for="ne-des">Designation</label><input id="ne-des" name="designation" autocomplete="off" value="${e && e.designation ? esc(e.designation) : ""}"></div>
-      <div><label for="ne-dept">Department</label><input id="ne-dept" name="department" autocomplete="off" value="${e && e.department ? esc(e.department) : ""}"></div></div>
+      <div class="row2"><div><label for="ne-code">Employee code</label><input id="ne-code" name="code" autocomplete="off" value="${e ? esc(e.code) : ""}" ${e ? "readonly" : ""}></div>
+      <div><label for="ne-name">Full name</label><input id="ne-name" name="full_name" autocomplete="off" value="${e ? esc(e.full_name) : ""}"></div></div>
+      <div class="row2"><div><label for="ne-dept">Department</label><input id="ne-dept" name="department" autocomplete="off" value="${e && e.department ? esc(e.department) : ""}"></div>
+      <div><label for="ne-des">Designation</label><input id="ne-des" name="designation" autocomplete="off" value="${e && e.designation ? esc(e.designation) : ""}"></div></div>
       <div class="row2"><div><label for="ne-phone">Phone</label><input id="ne-phone" name="phone" autocomplete="off" value="${e && e.phone ? esc(e.phone) : ""}"></div>
       <div><label for="ne-email">Email</label><input id="ne-email" name="email" autocomplete="off" value="${e && e.email ? esc(e.email) : ""}"></div></div>
-      ${e ? `<label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e.status === "inactive" ? "selected" : ""}>Inactive</option></select>` : ""}
+      ${hrFields}
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">${e ? "Save employee" : "Create employee"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
-    </form>`);
+    </form>`, true);
 }
 async function saveEmployee(form) {
-  const f = new FormData(form), body = {};
-  for (const k of ["full_name", "designation", "department", "phone", "email", "status"]) {
-    const v = f.get(k);
-    if (v !== null && v !== "") body[k] = v;
+  const f = form.elements, err = $(".err", form), id = form.dataset.id || null, rich = can("hr:write");
+  err.textContent = "";
+  const body = {full_name: f.full_name.value.trim(), department: f.department.value || null,
+                designation: f.designation.value || null, phone: f.phone.value || null,
+                email: f.email.value || null, status: f.status.value};
+  if (body.full_name.length < 2) { err.textContent = "Enter the employee's full name."; return; }
+  if (!id) body.code = f.code.value.trim();
+  if (!id && !body.code) { err.textContent = "Enter an employee code."; return; }
+  if (rich) {
+    body.joining_date = f.joining_date.value || null;
+    body.employment_type = f.employment_type.value || null;
+    body.branch_id = f.branch_id.value ? Number(f.branch_id.value) : null;
+    body.office_id = f.office_id.value ? Number(f.office_id.value) : null;
+    body.shift_id = f.shift_id.value ? Number(f.shift_id.value) : null;
   }
-  if (!form.dataset.id) body.code = f.get("code");
-  const id = form.dataset.id;
-  const res = id
-    ? await api(`/api/employees/${id}`, {method: "PATCH", body})
-    : await api("/api/employees", {method: "POST", body});
+  const base = rich ? "/api/hr/employees" : "/api/employees";
+  const res = await api(id ? `${base}/${id}` : base, {method: id ? "PATCH" : "POST", body});
   toast(res, res.ok ? "Employee saved" : "Employee not saved");
-  if (res.ok) { closeDrawer(); loadAll(); } else $(".err", form).textContent = detail(res.body);
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer();
+  await loadAll();
+  if (can("hr:read")) await openHr();
 }
 
 /* ---------- audit trail ---------- */
@@ -2977,6 +3785,10 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
   if (a && a.dataset.act === "load-tb") return loadTrialBalance();
   if (a && a.dataset.act === "load-ageing") return loadAgeing();
+  if (a && a.dataset.act === "open-search") return openPalette();
+  if (a && a.dataset.act === "reload-dash") return loadDashboard();
+  if (a && a.dataset.act === "dash-ap") return dashOpenApproval(a.dataset.id);
+  if (a && a.dataset.act === "expiry-detail") return expiryDetail(a.dataset.id);
   if (a) {
     const act = a.dataset.act;
     if (act === "close") closeDrawer();
@@ -2989,8 +3801,8 @@ document.addEventListener("click", e => {
     else if (act === "hr-shifts") hrShifts();
     else if (act === "hr-new-shift") hrShiftForm();
     else if (act === "hr-edit-shift") hrShiftForm(a.dataset.id);
-    else if (act === "hr-new-emp") hrEmployeeForm();
-    else if (act === "hr-edit-emp") hrEmployeeForm(a.dataset.id);
+    else if (act === "hr-new-emp") employeeForm();
+    else if (act === "hr-edit-emp") employeeForm(a.dataset.id);
     else if (act === "hr-attendance") hrAttendance();
     else if (act === "hr-checkin") hrCheckIn();
     else if (act === "hr-checkout") api("/api/hr/attendance/check-out", {method: "POST", body: {}}).then(r => { toast(r, r.ok ? "Checked out" : "Check-out not recorded"); if (r.ok) hrAttendance(); });
@@ -3049,6 +3861,10 @@ document.addEventListener("click", e => {
   }
   const tab = e.target.closest("[data-tab]");
   if (tab) { location.hash = "#/inventory/" + tab.dataset.tab; return; }
+  const dr = e.target.closest("[data-dash-range]");
+  if (dr) { setDashRange(Number(dr.dataset.dashRange)); return; }
+  const expb = e.target.closest("[data-eb]");
+  if (expb) { setExpiryBucket(expb.dataset.eb); return; }
   const pf = e.target.closest("[data-pf]");
   if (pf) { state.poFilter = pf.dataset.pf; $$("[data-pf]").forEach(b => b.setAttribute("aria-pressed", String(b === pf))); renderPOs(); return; }
   const inf = e.target.closest("[data-if]");
@@ -3127,7 +3943,6 @@ document.addEventListener("submit", e => {
   else if (f.id === "slabForm") saveSlab(f);
   else if (f.id === "slabPatchForm") saveSlabPatch(f);
   else if (f.id === "quoteForm") doQuote(f);
-  else if (f.id === "hrEmpForm") saveHrEmployee(f);
   else if (f.id === "hrShiftForm") saveHrShift(f);
   else if (f.id === "hrManualForm") saveManualAttendance(f);
   else if (f.id === "hrLeaveForm") saveHrLeave(f);
@@ -3148,6 +3963,36 @@ document.addEventListener("change", e => {
   if (e.target.id === "rpCategory") { state.rpCategory = e.target.value; drawRpTabs(); }
 });
 document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    state.palette.open ? closePalette() : openPalette();
+    return;
+  }
+  if (!state.palette.open) return;
+  if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closePalette(); return; }
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const n = state.palette.items.length;
+    if (!n) return;
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    const base = state.palette.i < 0 ? (step > 0 ? -1 : n) : state.palette.i;
+    paletteSetIndex(base + step);
+    return;
+  }
+  if (e.key === "Enter") {
+    const item = state.palette.items[state.palette.i];
+    if (item) { e.preventDefault(); paletteGo(item); }
+    return;
+  }
+  if (e.key === "Tab") {
+    const f = $$("#palette button, #palette input").filter(x => x.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); e.stopImmediatePropagation(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); e.stopImmediatePropagation(); first.focus(); }
+  }
+});
+document.addEventListener("keydown", e => {
   if (!drawerOpen()) return;
   if (e.key === "Escape") { closeDrawer(); return; }
   if (e.key === "Tab") {                                   // keep focus inside the open drawer
@@ -3163,6 +4008,39 @@ $("#dclose").addEventListener("click", closeDrawer);
 const signOut = async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); };
 $("#out").addEventListener("click", signOut);
 $("#mcOut").addEventListener("click", signOut);
+$("#themeToggle").addEventListener("click", toggleTheme);
+$("#dashTheme").addEventListener("click", toggleTheme);
+$("#paletteQ").addEventListener("input", e => {
+  clearTimeout(state.palette.timer);
+  const term = e.target.value.trim();
+  state.palette.timer = setTimeout(() => paletteSearch(term), 180);
+});
+$("#paletteResults").addEventListener("click", e => {
+  const item = e.target.closest(".palette-item");
+  if (item) paletteGo(item);
+});
+$("#palette").addEventListener("click", e => { if (e.target.id === "palette") closePalette(); });
+const chartEl = $("#salesChart");
+chartEl.addEventListener("pointermove", e => {
+  const hit = e.target.closest("[data-i]");
+  if (hit) chartTip(Number(hit.dataset.i));
+});
+chartEl.addEventListener("pointerleave", hideChartTip);
+chartEl.addEventListener("blur", hideChartTip);
+chartEl.addEventListener("keydown", e => {
+  const c = state.dashboard && state.dashboard.sales_vs_purchases;
+  if (!c || !c.series || !c.series.length) return;
+  const n = c.series.length;
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    e.preventDefault();
+    const i = state.chart.index < 0
+      ? (e.key === "ArrowRight" ? 0 : n - 1)
+      : Math.max(0, Math.min(n - 1, state.chart.index + (e.key === "ArrowRight" ? 1 : -1)));
+    chartTip(i);
+  } else if (e.key === "Escape") {
+    hideChartTip();
+  }
+});
 ["pq", "sq", "lq", "oq"].forEach(id => $("#" + id).addEventListener("input", () => ({pq: renderProducts, sq: renderStock, lq: renderLedger, oq: renderPOs})[id]()));
 $("#supq").addEventListener("input", renderSuppliers);
 $("#soq").addEventListener("input", renderSales);
@@ -3195,7 +4073,14 @@ document.addEventListener("change", e => {
   state.distFilter = e.target.value;
   renderDists();   // the header's own copy of the select keeps the chosen value
 });
-window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); route(); } });
+window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); closePalette(); route(); } });
+
+let startTheme = "light";
+try {
+  startTheme = localStorage.getItem("hb.theme")
+    || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+} catch (e) { /* storage blocked */ }
+applyTheme(startTheme === "dark" ? "dark" : "light");
 
 boot();
 })();

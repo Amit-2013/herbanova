@@ -24,11 +24,11 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 
 ### F-01 — Money quantisation (paisa)
 - **Formula:** `money(x) = Decimal(x or 0).quantize(0.01, ROUND_HALF_UP)`
-- **Source:** `app/services/tax.py:35-36`; the same quantiser is re-declared in `app/services/ledger.py:37`, `app/services/payroll.py:28`, and `app/services/reports.py:195-201`.
+- **Source:** `app/services/tax.py:35-36`; the same quantiser is re-declared in `app/services/ledger.py:37-41`, `app/services/payroll.py:28`, and `app/services/reports.py:195-201`.
 - **Conditions:** applied to unit prices, line values, tax heads, totals, outstanding balances and payroll amounts.
 - **Rounding:** half-up to two decimal places.
 - **Tests:** indirect across every issued invoice assertion in `tests/test_report_reconciliation.py`.
-- **Status:** VERIFIED (code).
+- **Status:** VERIFIED (code). Fixed 2026-11-01: `ledger.money` was using the Decimal default (half-even) and now explicitly uses `ROUND_HALF_UP`, matching the documented rule and the tax/payroll helpers.
 
 ### F-02 — GST rate resolution by HSN and date
 - **Formula:** select the `TaxRate` where `hsn = requested HSN`, `effective_from <= on`, and `effective_to IS NULL OR effective_to >= on`; order by `effective_from` descending and take the first. No match returns `None`.
@@ -72,10 +72,10 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 
 ### F-07 — Discount percent implied by price below MRP (sales order)
 - **Formula:** `discount_pct = ((mrp − price) ÷ mrp × 100).quantize(0.1, ROUND_HALF_UP)`; zero when MRP is zero.
-- **Source:** `app/services/order_tax.py:42-46`; a second implementation for validation is at `app/api/sales_orders.py:33-36`.
+- **Source:** `app/services/order_tax.py:42-46` — one implementation, imported by `app/api/sales_orders.py:21` (approval check and order output) and `app/services/invoice.py:19` (invoice discount snapshot).
 - **Conditions:** price above MRP is refused by order validation; equality yields 0 percent.
 - **Tests:** discount approval reasons are exercised in `tests/test_approvals.py`.
-- **Status:** VERIFIED (code); two separate implementations are a drift risk noted for consolidation.
+- **Status:** VERIFIED (code). Consolidated 2026-11-01: the second implementation in `app/api/sales_orders.py` was removed so the approval check, tax preview and invoice snapshot cannot drift.
 
 ### F-08 — Discount slab applicability
 - **Formula:** a slab applies when it is active, `effective_from <= on`, `effective_to IS NULL OR effective_to >= on`, its scope matches (`product` by product id, `group` by distributor group, `all`), and the quantity and/or value bands contain the line (a missing bound is open-ended).
@@ -172,8 +172,8 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 - **Status:** VERIFIED.
 
 ### F-23 — Approval decision authority
-- **Formula:** a `credit_limit` request can only be decided by a literal administrator; ordinary sales-order decisions need `approval:decide` or administrator; the requester and the order creator cannot decide; a request can be decided once.
-- **Source:** `app/api/approvals.py:163-201`.
+- **Formula:** a `credit_limit` request can only be decided by a literal administrator; ordinary sales-order decisions need `approval:decide` or administrator; the requester and the order creator cannot decide; a request can be decided once. The same rules compute the queue's `can_decide` flag (HR types additionally need their per-type permission — `hr:leave_approve`, `hr:attendance_manage` or `hr:payroll_approve`), so the screen offers a decision only where the server would accept it.
+- **Source:** `app/api/approvals.py:192-253`.
 - **Tests:** `tests/test_approvals.py:30-76`.
 - **Status:** VERIFIED.
 

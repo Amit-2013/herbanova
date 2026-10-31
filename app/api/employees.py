@@ -71,10 +71,14 @@ class EmployeeOut(BaseModel):
 
 def _with_username(db: Session, e: Employee) -> EmployeeOut:
     out = EmployeeOut.model_validate(e)
-    if e.user_id:
-        from ..models.core import User
-        user = db.get(User, e.user_id)
-        out.username = user.username if user else None
+    from ..models.core import User
+    # The login link is stored on both sides; read the user side too so an
+    # older one-way link still shows as linked and is never offered as free.
+    user = (db.get(User, e.user_id) if e.user_id
+            else db.scalar(select(User).where(User.employee_id == e.id)))
+    if user:
+        out.user_id = user.id
+        out.username = user.username
     return out
 
 

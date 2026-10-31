@@ -31,6 +31,17 @@ from ..services.audit import audit
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
+# The permission each decidable HR request type needs. Request types with no
+# handler here (overtime, salary revision, reimbursement) have nothing to
+# decide yet and are refused by /decide.
+HR_DECIDE_PERMISSION = {
+    "hr_leave": "hr:leave_approve",
+    "hr_od": "hr:leave_approve",
+    "hr_attendance_correction": "hr:attendance_manage",
+    "hr_geofence_exception": "hr:attendance_manage",
+    "hr_payroll": "hr:payroll_approve",
+}
+
 
 class DecisionIn(BaseModel):
     decision: Literal["approve", "reject"]
@@ -83,6 +94,25 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
     uids = {a.requested_by for a in rows} | {a.decided_by for a in rows if a.decided_by}
     users = {u.id: u.username for u in db.scalars(select(User).where(User.id.in_(uids))).all()}
     admin = is_admin(db, user)
+    perms = role_permissions(db, user)
+
+    def can_decide(a: ApprovalRequest) -> bool:
+        """Whether *this* user could decide the request now — the same rules the
+        decide handlers enforce, so the UI never offers a decision that will 403."""
+        if a.status != "pending" or a.requested_by == user.id:
+            return False
+        if a.record_type == "sales_order":
+            so = orders.get(a.record_id)
+            if so and so.created_by == user.id:
+                return False
+            if "credit_limit" in (a.reasons or []) and not admin:
+                return False
+            return admin or "approval:decide" in perms
+        if a.record_type == "invoice_post_billing":
+            return admin
+        need = HR_DECIDE_PERMISSION.get(a.record_type)
+        return bool(need) and (admin or need in perms)
+
     out = []
     for a in rows:
         so = orders.get(a.record_id) if a.record_type == "sales_order" else None
@@ -97,7 +127,6 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
         if subject is None and inv:
             subject = f"Invoice {inv.invoice_number} · ₹ {inv.grand_total}"
         reasons = a.reasons or []
-        credit = "credit_limit" in reasons
         out.append(ApprovalOut(
             id=a.id, request_type=a.record_type,
             request_type_label=APPROVAL_TYPES.get(a.record_type,
@@ -113,7 +142,7 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
             decided_at=a.decided_at, decision_reason=a.decision_reason,
             pending_approver_role=a.pending_approver_role,
             detail=a.detail,
-            can_decide=(a.status == "pending" and (admin if credit else True))))
+            can_decide=can_decide(a)))
     return out
 
 

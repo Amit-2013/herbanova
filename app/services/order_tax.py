@@ -39,8 +39,9 @@ class CannotQuote(Exception):
     for instance). The message is meant for the person reading the screen."""
 
 
-def _discount_pct(mrp: Decimal, price: Decimal) -> Decimal:
-    """The discount the price carries, in percent (the same rule the order API uses)."""
+def discount_pct(mrp: Decimal, price: Decimal) -> Decimal:
+    """The discount the price carries, in percent. One rule for the order
+    approval check, the tax preview and the invoice snapshot."""
     return (Decimal(0) if mrp <= 0
             else ((mrp - price) / mrp * 100).quantize(Decimal("0.1"), ROUND_HALF_UP))
 
@@ -85,7 +86,7 @@ def order_preview(db: Session, order: SalesOrder, *, on: date | None = None) -> 
     for ln in sorted(order.lines, key=lambda x: x.product_id):
         p = products.get(ln.product_id)
         hsn = (p.hsn or "").strip() if p else ""
-        applied = _discount_pct(p.mrp, ln.unit_price) if p else Decimal(0)
+        applied = discount_pct(p.mrp, ln.unit_price) if p else Decimal(0)
         gross = money(ln.qty * ln.unit_price)
         slab = discounts.best_slab(db, on=when, product_id=ln.product_id,
                                    group_name=dist.group_name, qty=ln.qty,
