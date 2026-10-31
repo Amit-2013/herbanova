@@ -38,14 +38,14 @@ This file records every decision taken without the owner present, so each one ca
 
 ## D-06. Approvals are decided inline, using the existing endpoint
 
-**Decision.** Each row on the Overview gets Approve and Reject buttons. Approve sends the existing `POST /api/approvals/{id}/decide` with a default reason "Approved from the dashboard"; Reject asks for a reason in a drawer field and requires at least 3 characters. The card, the KPI tile and the sidebar badge refresh from one extra `/api/dashboard` call after a decision.
-**Why.** Reusing the endpoint keeps every rule (segregation of duties, admin-only credit limits, audit log) in one place. The reason field is required by the API (`min_length=3`), so the UI supplies a truthful, visible default rather than inventing one on the server.
-**Consequence.** A user who cannot decide sees the row with disabled buttons and the reason in words; a requester sees "You raised this request".
+**Decision.** Each row on the Overview gets Approve and Reject buttons. Approve sends the existing `POST /api/approvals/{id}/decide` with a default reason "Approved from the dashboard"; Reject swaps the buttons for an inline reason field and requires at least 3 characters. The card, the KPI tile and the sidebar badge refresh from one `loadAll()` reload after a decision, and the server retires the cached dashboard payload on every successful decision so a stale count cannot come back for 45 seconds.
+**Why.** Reusing the endpoint keeps every rule (segregation of duties, admin-only credit limits, audit log) in one place. The reason field is required by the API (`min_length=3`), so the UI supplies a truthful, visible default rather than inventing one on the server. The inline form keeps the decision in context instead of opening a drawer.
+**Consequence.** A user who cannot decide sees no buttons and the rule in words; a requester sees "You raised this request".
 
 ## D-07. "Who may decide" is described, not guessed
 
-**Decision.** The API returns `deciders` as a list of role words derived from the same rule `can_decide` uses: "Administrator" for credit-limit and post-billing; "Administrator or an approver with approval:decide" for sales orders; the specific HR permission for HR types. Pending request types with no handler say "No decision handler yet".
-**Why.** Naming the rule in words is honest; naming individual people would be wrong (any holder of the permission may decide) and could go stale.
+**Decision.** The API returns `deciders` as a list of role words derived from the same rule `can_decide` uses: "Administrator" for credit-limit and post-billing; "Administrator or an approver with approval:decide" for sales orders; the specific HR permission for HR types. Pending request types with no handler say "No decision handler yet". It also returns `age_days`, counted in whole days in `Asia/Kolkata` (the report timezone) and never negative, because a request cannot be raised in the future.
+**Why.** Naming the rule in words is honest; naming individual people would be wrong (any holder of the permission may decide) and could go stale. Age in UTC would show yesterday's request as "today" after 05:30 IST; the business day is what a user reads.
 
 ## D-08. Purchases remain valued at order cost
 

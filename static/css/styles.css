@@ -333,6 +333,13 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .dash-updated{font-size:12.5px;color:var(--mute);margin-top:-4px}
 .dash-dateerr{font-size:12.5px;color:var(--bad);margin-top:-4px}
 .dash-content{display:grid;gap:16px}
+.ap-row{align-items:flex-start}
+.ap-who{margin-top:2px}
+.ap-acts{display:flex;gap:6px;align-items:center;flex:none}
+.ap-reject{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap;max-width:320px}
+.ap-reject input{min-height:34px;width:180px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:12.5px;color:var(--ink);background:var(--surface)}
+.ap-reject input:focus{outline:2px solid var(--moss);outline-offset:1px}
+.ap-err{flex-basis:100%;font-size:12px;color:var(--bad);text-align:right}
 .attention-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
 .attention-head h2{font-size:16px;font-weight:700;letter-spacing:-.01em}
 .attention{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:10px}

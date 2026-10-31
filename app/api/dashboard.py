@@ -55,6 +55,17 @@ HR_MANAGER_PERMS = {"hr:write", "hr:attendance_manage", "hr:leave_approve",
 # In-process cache. Disabled for tests and for any database whose name ends in
 # _test, so a test never reads a payload seeded by the previous test.
 _CACHE: dict[tuple, tuple[float, dict]] = {}
+_CACHE_GENERATION = 0
+
+
+def invalidate_dashboard_cache() -> None:
+    """Retire every cached payload after a write that changes a dashboard figure.
+
+    The cache is keyed by generation rather than cleared, so a request already
+    inside the route cannot have its own payload evicted mid-flight.
+    """
+    global _CACHE_GENERATION
+    _CACHE_GENERATION += 1
 
 
 def _money(value) -> str:
@@ -860,7 +871,7 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
     start, end, days = _period(from_date, to_date, range_days, today)
     admin = is_admin(db, user)
 
-    key = (user.id, tuple(sorted(perms)), start, end, admin)
+    key = (user.id, tuple(sorted(perms)), start, end, admin, _CACHE_GENERATION)
     now = datetime.now(timezone.utc).timestamp()
     if _cache_enabled(db):
         hit = _CACHE.get(key)

@@ -883,6 +883,8 @@ function renderOpenPos(o) {
   }).join("") : `<li><span class="none">No purchase order is waiting for goods.</span></li>`;
 }
 
+let dashRejectId = null;
+
 function renderDashApprovals(a) {
   const el = $("#approvalList"), note = $("#apNote");
   if (!a) {
@@ -891,13 +893,65 @@ function renderDashApprovals(a) {
     return;
   }
   const rows = a.rows || [];
-  note.textContent = (a.count > a.shown ? `Showing ${a.shown} of ${a.count}. ` : "") + (a.note || "");
-  el.innerHTML = rows.length ? rows.map(x => `<li><div>
+  note.textContent = (a.count > a.shown ? `Showing ${a.shown} of ${a.count}. ` : "")
+    + (a.note || "");
+  el.innerHTML = rows.length ? rows.map(x => {
+    const me = state.user && x.requested_by === state.user.username;
+    const amount = x.order_total != null ? `₹ ${money(x.order_total)}`
+      : (x.requested_dates || "");
+    const age = x.age_days == null ? ""
+      : x.age_days === 0 ? "raised today" : `${plural(x.age_days, "day")} old`;
+    const who = me ? "You raised this request"
+      : (x.deciders || []).length ? `Awaiting ${x.deciders.join(" or ")}` : "";
+    const overLimit = (x.reasons || []).includes("credit_limit");
+    const meta = [x.request_type_label, x.requested_by, amount, age]
+      .filter(Boolean).map(v => esc(v)).join(" · ");
+    let acts = "";
+    if (x.can_decide) {
+      acts = dashRejectId === x.id
+        ? `<form class="ap-reject" id="dashRejectForm" data-id="${x.id}" novalidate>
+            <input name="reason" placeholder="Reason (required)" maxlength="300" autocomplete="off"
+              aria-label="Reason for rejecting ${esc(x.request_no || x.document_number || "this request")}">
+            <button class="btn sm" type="submit">Reject</button>
+            <button class="btn ghost sm" type="button" data-act="dash-reject-cancel">Cancel</button>
+            <div class="ap-err" role="alert"></div></form>`
+        : `<div class="ap-acts">
+            <button class="btn ghost sm" type="button" data-act="dash-reject" data-id="${x.id}">Reject</button>
+            <button class="btn sm" type="button" data-act="dash-approve" data-id="${x.id}">Approve</button></div>`;
+    }
+    return `<li class="ap-row"><div>
       <button class="rowbtn" data-act="dash-ap" data-id="${x.id}" type="button">${esc(x.request_no || x.document_number || "Request")}</button>
-      <small>${esc(x.request_type_label)} · ${esc(x.subject || x.document_number || "")} · raised by ${esc(x.requested_by)}</small></div>
-      <div class="r">${(x.reasons || []).includes("credit_limit")
-        ? `<span class="chip bad">Over credit limit</span>` : `<span class="chip warn">Pending</span>`}</div></li>`).join("")
+      <small>${meta}</small>
+      ${who ? `<small class="ap-who">${esc(who)}</small>` : ""}
+      ${overLimit ? `<span class="chip bad">Over credit limit</span>` : ""}</div>
+      ${acts}</li>`;
+  }).join("")
     : `<li><span class="none">Nothing is waiting for a decision.</span></li>`;
+}
+
+async function dashApprove(id) {
+  const res = await api(`/api/approvals/${id}/decide`, {
+    method: "POST", body: {decision: "approve", reason: "Approved from the dashboard"}});
+  toast(res, res.ok ? "Approved" : "Decision not saved");
+  if (!res.ok) return;
+  dashRejectId = null;
+  await loadAll();
+}
+
+async function sendDashReject(form) {
+  const err = $(".ap-err", form), reason = form.elements.reason.value.trim();
+  err.textContent = "";
+  if (reason.length < 3) {
+    err.textContent = "Give a reason of at least three characters.";
+    form.elements.reason.focus();
+    return;
+  }
+  const res = await api(`/api/approvals/${form.dataset.id}/decide`, {
+    method: "POST", body: {decision: "reject", reason}});
+  toast(res, res.ok ? "Rejected" : "Decision not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  dashRejectId = null;
+  await loadAll();
 }
 
 function dashOpenApproval(id) {
@@ -3845,6 +3899,18 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "open-search") return openPalette();
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
   if (a && a.dataset.act === "dash-ap") return dashOpenApproval(a.dataset.id);
+  if (a && a.dataset.act === "dash-approve") return dashApprove(a.dataset.id);
+  if (a && a.dataset.act === "dash-reject") {
+    dashRejectId = Number(a.dataset.id);
+    renderDashApprovals(state.dashboard && state.dashboard.approvals);
+    const inp = $("#dashRejectForm input");
+    if (inp) inp.focus();
+    return;
+  }
+  if (a && a.dataset.act === "dash-reject-cancel") {
+    dashRejectId = null;
+    return renderDashApprovals(state.dashboard && state.dashboard.approvals);
+  }
   if (a && a.dataset.act === "expiry-detail") return expiryDetail(a.dataset.id);
   if (a) {
     const act = a.dataset.act;
@@ -3974,6 +4040,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "cancelForm") cancelSO(f);
   else if (f.id === "dispForm") postDispatch(f);
   else if (f.id === "decideForm") decide(f, (e.submitter && e.submitter.value) || "approve");
+  else if (f.id === "dashRejectForm") sendDashReject(f);
   else if (f.id === "distForm") saveDist(f);
   else if (f.id === "moveForm") saveInvoiceMovement(f);
   else if (f.id === "amendReqForm") requestInvoiceAmendment(f);

@@ -16,6 +16,7 @@ Rules enforced here:
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -25,7 +26,7 @@ from sqlalchemy.orm import Session
 from ..core.db import get_db
 from ..core.pagination import page_params, paginate
 from ..core.rbac import is_admin, require, role_permissions
-from ..core.rules import APPROVAL_TYPES
+from ..core.rules import APPROVAL_TYPES, REPORT_TZ
 from ..models.core import ApprovalRequest, Distributor, Invoice, SalesOrder, User
 from ..services.audit import audit
 
@@ -71,6 +72,8 @@ class ApprovalOut(BaseModel):
     pending_approver_role: str | None = None
     detail: dict | None
     can_decide: bool = False
+    age_days: int | None = None
+    deciders: list[str] = []
 
 
 def _category_allowed(db: Session, user, record_type: str) -> bool:
@@ -79,6 +82,16 @@ def _category_allowed(db: Session, user, record_type: str) -> bool:
     if record_type.startswith("hr_"):
         return bool({"hr:read", "approval:read"} & role_permissions(db, user))
     return True
+
+
+def _age_days(raised: datetime | None) -> int | None:
+    """Whole business days since the request was raised, in the report timezone."""
+    if not raised:
+        return None
+    tz = ZoneInfo(REPORT_TZ)
+    local = raised.replace(tzinfo=tz) if raised.tzinfo is None else raised.astimezone(tz)
+    # A request cannot be raised in the future; clock skew is reported as today.
+    return max(0, (datetime.now(tz).date() - local.date()).days)
 
 
 def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
@@ -95,6 +108,22 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
     users = {u.id: u.username for u in db.scalars(select(User).where(User.id.in_(uids))).all()}
     admin = is_admin(db, user)
     perms = role_permissions(db, user)
+
+    def deciders(a: ApprovalRequest) -> list[str]:
+        """Who may decide, in words taken from the same rule `can_decide` uses.
+
+        Naming people would go stale and could be wrong; naming the rule is true.
+        """
+        if a.status != "pending":
+            return []
+        if a.record_type == "sales_order":
+            if "credit_limit" in (a.reasons or []):
+                return ["Administrator"]
+            return ["Administrator", "Approver with approval:decide"]
+        if a.record_type == "invoice_post_billing":
+            return ["Administrator"]
+        need = HR_DECIDE_PERMISSION.get(a.record_type)
+        return [f"Role with {need}"] if need else ["No decision handler yet"]
 
     def can_decide(a: ApprovalRequest) -> bool:
         """Whether *this* user could decide the request now — the same rules the
@@ -142,7 +171,9 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
             decided_at=a.decided_at, decision_reason=a.decision_reason,
             pending_approver_role=a.pending_approver_role,
             detail=a.detail,
-            can_decide=can_decide(a)))
+            can_decide=can_decide(a),
+            age_days=_age_days(a.requested_at),
+            deciders=deciders(a)))
     return out
 
 
@@ -180,13 +211,19 @@ def decide(approval_id: int, body: DecisionIn, db: Session = Depends(get_db),
     if not first:
         raise HTTPException(404, "Approval request not found")
     if first.record_type == "sales_order":
-        return _decide_sales_order(db, approval_id, body, user)
-    if first.record_type.startswith("hr_"):
+        out = _decide_sales_order(db, approval_id, body, user)
+    elif first.record_type.startswith("hr_"):
         from ..services.hr_approvals import decide_hr_request
-        return decide_hr_request(db, approval_id, body, user)
-    if first.record_type == "invoice_post_billing":
-        return _decide_post_billing(db, approval_id, body, user)
-    raise HTTPException(409, "This request type cannot be decided here")
+        out = decide_hr_request(db, approval_id, body, user)
+    elif first.record_type == "invoice_post_billing":
+        out = _decide_post_billing(db, approval_id, body, user)
+    else:
+        raise HTTPException(409, "This request type cannot be decided here")
+    # The dashboard counts pending requests, so a decision retires its cached
+    # payload: the badge, the KPI and the card must agree on the next load.
+    from .dashboard import invalidate_dashboard_cache
+    invalidate_dashboard_cache()
+    return out
 
 
 def _decide_sales_order(db: Session, approval_id: int, body: DecisionIn, user):
