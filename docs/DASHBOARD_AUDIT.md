@@ -250,3 +250,102 @@ Every card below can be correct today; where data is absent the card shows **"No
 5. Tests: seeded correctness, permission per role, reconciliation, empty and not-configured states.
 
 **No migration is required for Phase 2.** Migrations appear only in Phase 3 for approved capture fields (category, reorder level, capacity, expected date, due date), each with a rollback.
+
+---
+
+# Dashboard v2 audit — date filter, approvals, capacity, MoM/YoY and geography
+
+**Date:** 1 November 2026
+**Scope:** the additional requirements A–I. Read-only audit of what the system already holds and what must be captured. No schema, code or data was changed while auditing.
+**Evidence markers:** **VERIFIED** (read in code), **MEASURED** (queried read-only), **PARTIAL**, **MISSING**.
+
+## A1. Date filtering on `/api/dashboard`
+
+| Item | Today | Gap |
+|---|---|---|
+| Period parameter | `GET /api/dashboard?range=7|30|90` only; the window always ends today | **GAP-V01** `from_date`/`to_date` are not accepted |
+| Per-card periods | Sales vs purchases, top products and corrections take `start,end`; ageing, stock, expiry, POs, approvals, activity are as-of today | Cards must be labelled either "selected range" or "as of today" |
+| Validation | Range is a fixed choice | **GAP-V02** no check that from ≤ to, or that a date is not in the future |
+| Persistence | `hb.dashRange` in localStorage | **GAP-V03** selected dates are not kept between dashboards |
+| Reconciliation | `tests/test_dashboard_phase2.py` compares ageing and sales with the report service | Extend to every date-based card |
+
+## A2. Approvals workflow and roles
+
+**VERIFIED.** `approval_requests` stores request type, record, reasons, requester, timestamps, decision and reason. `POST /api/approvals/{id}/decide` enforces: `approval:read` to open, administrator-only credit-limit and post-billing decisions, a different person from the requester (and order creator), one decision per request, reason of at least 3 characters, and an audit entry.
+
+**MEASURED today:** 1 pending request in the live database (demo seed), 4 sales orders.
+
+| Requirement | Today | Gap |
+|---|---|---|
+| Row shows type, reference, requester, amount/days, who may decide, age | Type, reference, requester, subject and amount are returned; age and "who may decide" are not explicit fields | **GAP-V04** add `age_days` and `deciders` (role words) to `ApprovalOut` |
+| Inline Approve/Reject | The Overview opens the shared approval drawer, which posts the decision | **GAP-V05** rows have no inline decision controls; rejection reason is captured in the drawer |
+| Decision refreshes badge, KPI and attention strip | The drawer reload then refetches the dashboard | **GAP-V05** no targeted refresh before the next reload |
+| Request types with no handler | `hr_overtime`, `hr_salary_revision`, `hr_reimbursement` have no decision handler | Correctly report `can_decide: false`; shown as "No decision handler yet" |
+
+## A3. Sales and purchase aggregation
+
+| Metric | Source today | Quality |
+|---|---|---|
+| Sales | Issued `invoices.grand_total` by `invoice_date` (includes GST) | **VERIFIED**; matches the Sales Invoice Register |
+| Purchases | GRN lines × `purchase_order_lines.unit_cost` by receipt day | **PARTIAL** — valued at order cost, not invoiced cost; a line with no cost counts as zero |
+| Returns | Issued `credit_notes.grand_total` by `note_date` | **VERIFIED** |
+| Receipts | `payments.kind='receipt'` by `paid_on` | **VERIFIED** |
+| Gross margin | Invoice revenue minus cost | **MISSING** — invoice lines and batches carry no cost (GAP-D04), so margin cannot be computed without inventing it |
+| Orders | `sales_orders` by `created_at` | **VERIFIED** |
+| New leads / customers | `leads.created_at`; `distributors` has **no** `created_at` | **PARTIAL** — new customers per period cannot be measured |
+
+## A4. Warehouse capacity
+
+**MISSING.** `warehouses` has only `id` and `name`; no capacity, unit or location. `batches.on_hand` gives live units per warehouse, so used/percentage needs only a capacity column. No transfer endpoint exists (`StockMovement.movement_type='transfer'` is modelled but no route posts it). Receiving (`POST /api/purchase-orders/{id}/receive`) and dispatch (`POST /api/sales-orders/{id}/dispatch`) do not check capacity.
+
+Gaps: **GAP-V06** capacity column; **GAP-V07** capacity checks at receipt and dispatch; **GAP-V08** utilisation report; **GAP-V09** transfer check (blocked by no transfer feature).
+
+## A5. Returns and credit note data
+
+**VERIFIED.** `credit_notes` links invoice, sales order, distributor, reason, `return_warehouse_id`, money totals; `credit_note_lines` carries product, qty and tax. A return restores stock to the same batches when a warehouse is given. There is no structured return-reason code — `reason` is free text (up to 300 characters). **GAP-V10** return reasons cannot be grouped reliably; the geography section will show the free-text reason as recorded, without invented categories.
+
+## A6. Location data
+
+| Place | Fields today | Usable for geography? |
+|---|---|---|
+| Invoice (frozen snapshot) | `buyer_state_code`, buyer name, address lines 1–2; **no city, district or pincode** | State yes; district/city no |
+| Distributor master | `state_code`, `territory` (free text), billing/shipping address (free text) | State yes; territory inconsistent |
+| Warehouse | name only | No |
+| GST | invoice `place_of_supply_state_code`, `place_of_supply_kind`, seller state | State yes |
+
+**MEASURED today:** 2 invoices, both state `07` (Delhi); 0 invoices without a state code; 6 distributors all with a state code; territories read `EAST DELHI`, `NARELA`, `SAHIBABAD`, `GURGAON`, `North`, `West` — a mix of city and region names, so they cannot be treated as one vocabulary.
+
+Gaps: **GAP-V11** no district/city/pincode capture; **GAP-V12** territory is free text with no standard list; **GAP-V13** warehouse has no city/state; **GAP-V14** sales orders do not record a dispatch region separate from the buyer state.
+
+## A7. New gap register
+
+| ID | Gap | Blocks | Proposed handling in v2 |
+|---|---|---|---|
+| GAP-V01 | No `from_date`/`to_date` | Date filter | Add parameters with defaults and validation |
+| GAP-V02 | No date validation | Date filter | 422 when from > to or a date is in the future |
+| GAP-V03 | Dates not remembered | Date filter | Keep in `state` and localStorage |
+| GAP-V04 | Approval age / deciders / amount not explicit | Approvals card | Derive age from `requested_at`; name the role rule in words |
+| GAP-V05 | No inline approval actions | Approvals card | Inline Approve/Reject with reason; refresh the card after a decision |
+| GAP-V06 | No warehouse capacity | Capacity, alerts | Add `warehouses.capacity_units` (migration + rollback) |
+| GAP-V07 | No capacity check at receipt/dispatch | Capacity | Warn with an explicit administrator override (audit-logged); dispatch checks the source warehouse's stock only |
+| GAP-V08 | No utilisation report | Reports | Add a read-only report built from the same query as the dashboard |
+| GAP-V09 | No transfer endpoint | Transfers | Not built; no warning can be attached to a feature that does not exist |
+| GAP-V10 | Free-text return reason | Returns by region | Show as recorded; no invented categories |
+| GAP-V11 | No district/city/pincode | Geography drill-down | Show state only; "Location not recorded" row |
+| GAP-V12 | Territory not standardised | Regional reports | Not used as a geographic key; state code is |
+| GAP-V13 | Warehouse has no location | Warehouse map | Not shown geographically |
+| GAP-V14 | No dispatch region | Dispatch geography | Dispatch region = buyer state, labelled as such |
+| GAP-V15 | No cost on stock or invoice lines | Gross margin, MoM margin card | Show "No data yet — cost is not captured (GAP-D04)" |
+| GAP-V16 | No `distributors.created_at` | New customers | Show "No data yet" for new customers; active customers is computable |
+| GAP-V17 | No last-year data | YoY | Show "No data yet" until the comparison year exists |
+
+## A8. What v2 can build honestly, in the requested order
+
+1. **Date filter** — backend parameters, presets, validation, persistence; every date card states its range.
+2. **Approvals** — inline decisions, age, decider rule, immediate refresh.
+3. **Sales vs purchases** — pills, line keys, area fill, hover readout, reconciled to the invoice register.
+4. **Warehouse capacity** — migration with rollback, editor for Administrators, dashboard bars, receipt warning with override, utilisation report.
+5. **MoM/YoY** — new page and endpoint, full-month and month-to-date, prior-year comparisons where data exists, "No data yet" where it does not.
+6. **Geography** — state-level table and ranked lists from invoice snapshots, a locally drawn state tile map (no external map service), "Location not recorded" row; district/city drill-down is not possible without GAP-V11.
+
+No figure in v2 will be invented. Missing inputs are returned as `null` with a gap code and rendered as "No data yet".
