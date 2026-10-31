@@ -321,6 +321,8 @@ Gaps: **GAP-V06** capacity column; **GAP-V07** capacity checks at receipt and di
 
 Gaps: **GAP-V11** no district/city/pincode capture; **GAP-V12** territory is free text with no standard list; **GAP-V13** warehouse has no city/state; **GAP-V14** sales orders do not record a dispatch region separate from the buyer state.
 
+**Built in v2.** `GET /api/dashboard/geo` groups issued invoices by `coalesce(buyer_state_code, distributor.state_code)` for the selected window and returns sales, taxable value, invoice count, customer count, tax split, returns and the 37-code map list. Invoices with no state at all stay in a "Location not recorded" row so the window total still reconciles. Tax and return fields are omitted without `tax:read` / `accounts:read`. The UI renders a fixed tile grid (labelled "State tile map — not a geographic outline"), ranked top/bottom lists and a sortable table with CSV export. District, city and pincode remain "No data yet" (GAP-V11); territory is not used as a key (GAP-V12); no user is territory-scoped (D-14).
+
 ## A7. New gap register
 
 | ID | Gap | Blocks | Proposed handling in v2 |

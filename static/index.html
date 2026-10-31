@@ -88,6 +88,7 @@
         <p class="nav-grp">Finance and insight</p>
         <a class="nav hide" href="#/accounts" data-v="accounts" id="navAccounts">Accounting &amp; Finance</a>
         <a class="nav" href="#/reports" data-v="reports" id="navReports">Reports</a>
+        <a class="nav hide" href="#/geo" data-v="geo" id="navGeo">Geography</a>
       </div>
       <div class="nav-group">
         <p class="nav-grp">People and admin</p>
@@ -350,6 +351,83 @@
 
         <p class="muted cmp-foot" id="cmpFooter"></p>
         <ul class="cmp-notes" id="cmpNotes"></ul>
+      </div>
+    </section>
+
+    <!-- Geography -->
+    <section id="v-geo" class="view geo hide">
+      <div class="panel cmp-toolbar">
+        <div class="cmp-controls">
+          <label class="cmp-month" for="geoFrom">From
+            <input type="date" id="geoFrom" aria-label="From date">
+          </label>
+          <label class="cmp-month" for="geoTo">To
+            <input type="date" id="geoTo" aria-label="To date">
+          </label>
+          <a class="btn ghost sm" href="#/compare">MoM &amp; YoY</a>
+          <a class="btn ghost sm" href="#/dash">Back to Overview</a>
+        </div>
+        <p class="muted" id="geoNote">Loading figures from the server…</p>
+      </div>
+      <p class="dash-dateerr hide" id="geoDateErr" role="alert"></p>
+
+      <div id="geoError" class="dash-error hide" role="alert">
+        <div><b>Geography could not be loaded.</b><span id="geoErrText"></span></div>
+        <button class="btn ghost" type="button" data-act="reload-geo">Try again</button>
+      </div>
+
+      <div id="geoSkeleton" class="dash-skeleton" aria-hidden="true">
+        <div class="sk-row">
+          <div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div>
+        </div>
+        <div class="sk-row"><div class="sk sk-chart"></div><div class="sk sk-chart"></div></div>
+      </div>
+
+      <div id="geoContent" class="dash-content hide" aria-busy="false">
+        <div class="geo-levels" id="geoLevels"></div>
+        <div class="kpis" id="geoKpis"></div>
+
+        <div class="dash-grid geo-map-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h">
+              <h2>State tile map</h2>
+              <span class="muted">Shaded by sales · not to scale</span>
+            </div>
+            <div id="geoMap" class="geo-map" role="group" aria-label="State tile map shaded by sales"></div>
+            <p class="gap-note" id="geoMapNote">Tiles are a fixed local layout, not a geographic outline. Select a tile to highlight its row in the table.</p>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top and bottom states</h2><span class="muted">By sales in the selected window</span></div>
+            <h3 class="ins-h">Top 5</h3>
+            <ol class="geo-rank" id="geoTop"></ol>
+            <h3 class="ins-h">Lowest 5 with a recorded sale</h3>
+            <ol class="geo-rank" id="geoBottom"></ol>
+          </div>
+        </div>
+
+        <div class="panel dash-panel">
+          <div class="panel-h">
+            <div><h2>Sales by state</h2><span class="muted" id="geoTableNote"></span></div>
+            <div class="cmp-h-tools">
+              <button class="btn ghost sm" type="button" data-act="geo-csv">Export CSV</button>
+            </div>
+          </div>
+          <div class="tw"><table id="geoTable" class="cmp-table"></table></div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Returns by state</h2><span class="muted">Issued credit notes</span></div>
+            <div id="geoReturns"></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>GST state split</h2><span class="muted">As printed on issued invoices</span></div>
+            <div id="geoGst"></div>
+          </div>
+        </div>
+
+        <p class="muted cmp-foot" id="geoFooter"></p>
+        <ul class="cmp-notes" id="geoNotes"></ul>
       </div>
     </section>
 

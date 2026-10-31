@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..core.db import get_db
+from ..core.india_states import STATE_CODES, state_name
 from ..core import module_register
 from ..core.rbac import is_admin, require, require_login, role_permissions
 from ..core.rules import REPORT_TZ
@@ -894,6 +895,8 @@ def _parse_month(month: str | None, today: date) -> date:
 def _window_label(start: date, end: date) -> str:
     if start > end:
         return "No days in this window yet"
+    if start == end:
+        return f"{start.day} {MONTH_NAMES[start.month - 1]} {start.year}"
     if (start.year, start.month) == (end.year, end.month):
         return f"{start.day}–{end.day} {MONTH_NAMES[start.month - 1]} {start.year}"
     return (f"{start.day} {MONTH_NAMES[start.month - 1]} {start.year} – "
@@ -1277,6 +1280,287 @@ def compare(mode: str = "full_month", month: str | None = None,
             ("Gross margin and new customers are shown as gaps because the "
              "database holds no cost and no customer creation date."),
         ],
+    }
+    if _cache_enabled(db):
+        _CACHE[key] = (now + DASHBOARD_TTL_SECONDS, out)
+    return out
+
+
+# --------------------------------------------------------------- geography
+GEO_REASON_CAP = 5
+
+
+def _geo_state_column():
+    """The invoice's frozen buyer state, with the master as a last resort.
+
+    Issued invoices always store the state snapshot at issue time. The
+    distributor's current state is used only for a row that predates the
+    snapshot, which is why it is a coalesce and not the primary source.
+    """
+    return func.coalesce(Invoice.buyer_state_code, Distributor.state_code)
+
+
+def _geo_states(db: Session, start: date, end: date) -> list[dict]:
+    if start > end:
+        return []
+    code = _geo_state_column()
+    rows = db.execute(
+        select(code.label("code"),
+               func.count(Invoice.id),
+               func.count(func.distinct(Invoice.distributor_id)),
+               func.coalesce(func.sum(Invoice.grand_total), 0),
+               func.coalesce(func.sum(Invoice.taxable_value), 0),
+               func.coalesce(func.sum(Invoice.cgst_total), 0),
+               func.coalesce(func.sum(Invoice.sgst_total), 0),
+               func.coalesce(func.sum(Invoice.igst_total), 0),
+               func.coalesce(func.sum(Invoice.cess_total), 0),
+               func.coalesce(func.sum(Invoice.tax_total), 0))
+        .select_from(Invoice)
+        .join(Distributor, Distributor.id == Invoice.distributor_id)
+        .where(Invoice.status == "issued", Invoice.invoice_date >= start,
+               Invoice.invoice_date <= end)
+        .group_by(code)).all()
+    out = []
+    for row in rows:
+        raw_code = row[0]
+        state_code = str(raw_code).zfill(2) if raw_code else None
+        name = state_name(state_code) if state_code else None
+        out.append({
+            "code": state_code,
+            "key": state_code or "unrecorded",
+            "name": name or ("Location not recorded" if not state_code
+                             else f"Unknown state ({state_code})"),
+            "known": bool(name),
+            "recorded": bool(state_code),
+            "invoice_count": int(row[1]),
+            "customers": int(row[2]),
+            "_sales": Decimal(row[3]),
+            "_taxable": Decimal(row[4]),
+            "_cgst": Decimal(row[5]),
+            "_sgst": Decimal(row[6]),
+            "_igst": Decimal(row[7]),
+            "_cess": Decimal(row[8]),
+            "_tax": Decimal(row[9]),
+        })
+    return out
+
+
+def _geo_returns(db: Session, start: date, end: date) -> dict[str, dict]:
+    """Issued credit notes in the window, grouped by the invoice's buyer state."""
+    if start > end:
+        return {}
+    code = _geo_state_column()
+    rows = db.execute(
+        select(code, CreditNote.grand_total, CreditNote.reason)
+        .select_from(CreditNote)
+        .join(Invoice, Invoice.id == CreditNote.invoice_id)
+        .join(Distributor, Distributor.id == Invoice.distributor_id)
+        .where(CreditNote.status == "issued", CreditNote.note_date >= start,
+               CreditNote.note_date <= end)).all()
+    grouped: dict[str, dict] = {}
+    for raw_code, total, reason in rows:
+        state_code = str(raw_code).zfill(2) if raw_code else "unrecorded"
+        entry = grouped.setdefault(state_code, {"value": Decimal(0), "count": 0,
+                                                "reasons": {}})
+        entry["value"] += Decimal(total or 0)
+        entry["count"] += 1
+        text = (reason or "").strip()
+        if text:
+            entry["reasons"][text] = entry["reasons"].get(text, 0) + 1
+    return grouped
+
+
+def _geo_count_snapshot(db: Session, start: date, end: date) -> tuple[int, int]:
+    if start > end:
+        return 0, 0
+    base = (Invoice.status == "issued", Invoice.invoice_date >= start,
+            Invoice.invoice_date <= end)
+    snapshot = db.scalar(select(func.count()).select_from(Invoice)
+                         .where(*base, Invoice.buyer_state_code.is_not(None))) or 0
+    missing = db.scalar(select(func.count()).select_from(Invoice)
+                        .where(*base, Invoice.buyer_state_code.is_(None))) or 0
+    return int(snapshot), int(missing)
+
+
+def _geo_row(row: dict, total_sales: Decimal, with_tax: bool,
+             returns: dict | None) -> dict:
+    out = {
+        "code": row["code"], "key": row["key"], "name": row["name"],
+        "known": row["known"], "recorded": row["recorded"],
+        "invoice_count": row["invoice_count"], "customers": row["customers"],
+        "sales": _money(row["_sales"]),
+        "share": (round(float(row["_sales"] / total_sales * 100), 2)
+                  if total_sales > 0 else None),
+    }
+    if with_tax:
+        out.update({
+            "taxable": _money(row["_taxable"]), "cgst": _money(row["_cgst"]),
+            "sgst": _money(row["_sgst"]), "igst": _money(row["_igst"]),
+            "cess": _money(row["_cess"]), "tax": _money(row["_tax"]),
+        })
+    if returns is not None:
+        entry = returns.get(row["key"], {"value": Decimal(0), "count": 0,
+                                         "reasons": {}})
+        reasons = sorted(entry["reasons"].items(), key=lambda item: (-item[1], item[0]))
+        out["return_value"] = _money(entry["value"])
+        out["return_count"] = entry["count"]
+        out["reasons"] = [text for text, _ in reasons[:GEO_REASON_CAP]]
+        out["reasons_total"] = len(reasons)
+    return out
+
+
+def _geo_rank(rows: list[dict]) -> list[dict]:
+    return [{
+        "code": r["code"], "key": r["key"], "name": r["name"],
+        "sales": r["sales"], "invoice_count": r["invoice_count"],
+        "share": r["share"],
+    } for r in rows]
+
+
+@router.get("/geo")
+def geography(from_date: date | None = None, to_date: date | None = None,
+              db: Session = Depends(get_db), user=Depends(require("sales:read"))):
+    """Sales, returns and GST by the invoice's frozen buyer state."""
+    perms = role_permissions(db, user)
+    today = date.today()
+    start, end, days = _period(from_date, to_date, None, today)
+
+    key = (user.id, tuple(sorted(perms)), "geo", start, end, _CACHE_GENERATION)
+    now = datetime.now(timezone.utc).timestamp()
+    if _cache_enabled(db):
+        hit = _CACHE.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+
+    with_tax = "tax:read" in perms
+    returns = _geo_returns(db, start, end) if "accounts:read" in perms else None
+    rows = _geo_states(db, start, end)
+    total_sales = sum((r["_sales"] for r in rows), Decimal(0))
+    total_taxable = sum((r["_taxable"] for r in rows), Decimal(0))
+    total_tax = sum((r["_tax"] for r in rows), Decimal(0))
+    total_invoices = sum(r["invoice_count"] for r in rows)
+
+    ordered = sorted(rows, key=lambda r: (r["_sales"], r["name"]), reverse=True)
+    serialized = [_geo_row(r, total_sales, with_tax, returns) for r in ordered]
+    recorded = [r for r in serialized if r["recorded"]]
+    positive = [r for r in serialized if Decimal(r["sales"]) > 0]
+    bottom = list(reversed(positive))[:5]
+    unrecorded_row = next((r for r in serialized if not r["recorded"]), None)
+    snapshot, missing = _geo_count_snapshot(db, start, end)
+
+    mapped = []
+    for state_code in sorted(STATE_CODES):
+        found = next((r for r in serialized if r["code"] == state_code), None)
+        mapped.append({
+            "code": state_code, "name": state_name(state_code),
+            "recorded": bool(found),
+            "sales": found["sales"] if found else "0.00",
+            "share": found["share"] if found else None,
+        })
+
+    returns_out = None
+    if returns is not None:
+        entries = []
+        for r in serialized:
+            entry = returns.get(r["key"])
+            if not entry:
+                continue
+            reasons = sorted(entry["reasons"].items(),
+                             key=lambda item: (-item[1], item[0]))
+            entries.append({
+                "code": r["code"], "key": r["key"], "name": r["name"],
+                "value": _money(entry["value"]), "count": entry["count"],
+                "reasons": [text for text, _ in reasons[:GEO_REASON_CAP]],
+                "reasons_total": len(reasons),
+            })
+        total_return_value = sum((returns[r["key"]]["value"] for r in serialized
+                                  if r["key"] in returns), Decimal(0))
+        returns_out = {
+            "available": True,
+            "rows": entries,
+            "value": _money(total_return_value),
+            "count": sum(e["count"] for e in entries),
+            "reason_cap": GEO_REASON_CAP,
+            "gap": "GAP-V10",
+            "note": ("Return value and count come from issued credit notes grouped "
+                     "by the invoice's buyer state. Reasons are the free text "
+                     "recorded on each note; no categories are invented."),
+        }
+    else:
+        returns_out = {
+            "available": False, "gap": "accounts:read",
+            "note": ("Returns are read from credit notes, so they need "
+                     "accounts:read. Your role does not have it."),
+        }
+
+    if with_tax:
+        gst_out = {
+            "available": True,
+            "rows": [{"code": r["code"], "key": r["key"], "name": r["name"],
+                      "taxable": r["taxable"], "cgst": r["cgst"],
+                      "sgst": r["sgst"], "igst": r["igst"], "cess": r["cess"],
+                      "tax": r["tax"]} for r in serialized if r["recorded"]],
+            "taxable": _money(total_taxable), "tax": _money(total_tax),
+            "note": ("Amounts as printed on issued invoices: taxable value before "
+                     "GST and the tax split actually charged. This is not a "
+                     "statutory filing export."),
+        }
+    else:
+        gst_out = {
+            "available": False, "gap": "tax:read",
+            "note": ("The GST split comes from invoice tax snapshots and needs "
+                     "tax:read. Your role does not have it."),
+        }
+
+    notes = [
+        ("State is the buyer state frozen on the issued invoice, so a later "
+         "change to the distributor master cannot move a past sale."),
+        (f"Invoices carrying a state snapshot: {snapshot}. "
+         f"Falling back to the distributor master: {missing}."),
+        ("District, city and pincode are not captured on invoices or distributors "
+         "(GAP-V11), so this page stops at state and does not guess."),
+        ("The free-text distributor territory is not used as a geographic key "
+         "(GAP-V12); the GST state code is."),
+        ("There is no territory-scoped user model, so every user with sales:read "
+         "sees every state in their permitted figures (D-14)."),
+    ]
+    out = {
+        "from": start.isoformat(), "to": end.isoformat(), "days": days,
+        "range_label": _window_label(start, end),
+        "basis": {
+            "snapshot": snapshot,
+            "fallback": max(missing - (unrecorded_row["invoice_count"]
+                                       if unrecorded_row else 0), 0),
+            "unrecorded": unrecorded_row["invoice_count"] if unrecorded_row else 0,
+            "invoices": total_invoices,
+        },
+        "totals": {
+            "sales": _money(total_sales), "invoice_count": total_invoices,
+            "states": len(recorded),
+            "taxable": _money(total_taxable) if with_tax else None,
+            "tax": _money(total_tax) if with_tax else None,
+            "returns": returns_out.get("value") if returns is not None else None,
+            "return_count": returns_out.get("count") if returns is not None else None,
+        },
+        "levels": [
+            {"level": "state", "available": True, "gap": None,
+             "note": "Sold by the buyer state on the invoice."},
+            {"level": "district", "available": False, "gap": "GAP-V11",
+             "note": "Not recorded on invoices or distributors."},
+            {"level": "city", "available": False, "gap": "GAP-V11",
+             "note": "Not recorded on invoices or distributors."},
+            {"level": "pincode", "available": False, "gap": "GAP-V11",
+             "note": "Not recorded on invoices or distributors."},
+        ],
+        "states": serialized,
+        "top": _geo_rank(serialized[:5]),
+        "bottom": _geo_rank(bottom),
+        "map": mapped,
+        "unrecorded": unrecorded_row,
+        "returns": returns_out,
+        "gst": gst_out,
+        "notes": notes,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     if _cache_enabled(db):
         _CACHE[key] = (now + DASHBOARD_TTL_SECONDS, out)
