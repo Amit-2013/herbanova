@@ -165,6 +165,7 @@ class LeadOut(BaseModel):
     follow_up_state: str                 # overdue | today | upcoming | none | closed
     days_overdue: int | None
     closed_reason: str | None
+    last_remark: str | None
     created_at: datetime | None
     last_activity_at: datetime | None
 
@@ -198,6 +199,11 @@ def _build(db: Session, leads: list[Lead]) -> list[LeadOut]:
         User.id.in_({l.owner_id for l in leads}))).all()}
     last = dict(db.execute(select(LeadActivity.lead_id, func.max(LeadActivity.created_at))
                            .where(LeadActivity.lead_id.in_(ids)).group_by(LeadActivity.lead_id)).all())
+    remarks = {}
+    for lead_id, summary in db.execute(select(LeadActivity.lead_id, LeadActivity.summary)
+                                       .where(LeadActivity.lead_id.in_(ids))
+                                       .order_by(LeadActivity.id.desc())).all():
+        remarks.setdefault(lead_id, summary)
     today, out = date.today(), []
     for l in leads:
         st, od = _state(l, today)
@@ -205,7 +211,8 @@ def _build(db: Session, leads: list[Lead]) -> list[LeadOut]:
             id=l.id, lead_no=l.lead_no, name=l.name, company=l.company, phone=l.phone, email=l.email,
             source=l.source, status=l.status, owner_id=l.owner_id, owner=owners.get(l.owner_id, "?"),
             next_follow_up=l.next_follow_up, follow_up_state=st, days_overdue=od,
-            closed_reason=l.closed_reason, created_at=l.created_at, last_activity_at=last.get(l.id)))
+            closed_reason=l.closed_reason, last_remark=remarks.get(l.id),
+            created_at=l.created_at, last_activity_at=last.get(l.id)))
     return out
 
 

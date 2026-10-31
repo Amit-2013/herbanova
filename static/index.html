@@ -39,6 +39,25 @@
   </div>
 </section>
 
+<!-- Forced password change -->
+<section id="mustChange" class="hide" aria-labelledby="mcTitle">
+  <form class="formbox" id="changePwForm" novalidate>
+    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+    <h2 id="mcTitle">Set a new password</h2>
+    <p class="sub">This account still has a temporary password. Choose your own to continue as <b id="mcUser"></b>.</p>
+    <label for="mcCurrent">Current password</label>
+    <input id="mcCurrent" name="current_password" type="password" autocomplete="current-password">
+    <label for="mcNew">New password</label>
+    <input id="mcNew" name="new_password" type="password" autocomplete="new-password">
+    <label for="mcConfirm">Confirm new password</label>
+    <input id="mcConfirm" name="confirm_password" type="password" autocomplete="new-password">
+    <div class="note">12 to 128 characters, combining at least three of lowercase, uppercase, digits and symbols. It must differ from the current password.</div>
+    <button class="btn block" id="mcBtn" type="submit">Change password and continue</button>
+    <div class="err" id="mcErr" role="alert"></div>
+    <p class="sub"><button class="link-btn" id="mcOut" type="button">Sign out</button></p>
+  </form>
+</section>
+
 <!-- App shell -->
 <div id="shell" class="hide">
   <aside class="side">
@@ -259,7 +278,7 @@
       </div>
     </section>
 
-    <!-- Approvals -->
+    <!-- Accounting and finance -->
     <section id="v-accounts" class="view hide">
       <div class="panel flush">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables</h2><span class="muted" id="recvSub">What distributors still owe on issued invoices.</span></div>
