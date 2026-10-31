@@ -51,6 +51,7 @@ This file records every decision taken without the owner present, so each one ca
 
 **Decision.** The purchases line continues to value received goods at `purchase_order_lines.unit_cost`, labelled in the card and the metric register.
 **Why.** There is no purchase invoice or landed-cost capture. Using the order cost is the only sourced number; zero-cost lines count as zero because the alternative would be to guess a cost.
+**Revision (v2).** The card draws sales as a solid green line with the area under it filled and purchases as a dashed amber line. Both legend entries are pills that show or hide their series; the last visible series cannot be hidden, so the card never becomes blank. Sales totals reconcile with the Sales Invoice Register and purchases with the Goods Receipt Register over the same dates; tests check both independently.
 **Consequence.** Sales (tax-inclusive) and purchases (cost, exclusive of tax) are different bases; the card legend says so.
 
 ## D-09. Warehouse capacity is stored in units with one optional unit word
