@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..core.db import get_db
 from ..core.rbac import current_user, is_admin, require, role_permissions
-from ..models.core import ApprovalRequest
+from ..models.core import ApprovalRequest, User
 from ..models.hr import (Attendance, AttendanceCorrection, Branch, Department, Holiday,
                          LeaveApplication, LeaveBalance, LeaveType, ODRequest, PayrollEntry,
                          PayrollPeriod, SalaryComponent, SalaryStructure, SalaryStructureLine,
@@ -113,6 +113,15 @@ class EmployeeIn(BaseModel):
     @classmethod
     def norm_code(cls, v): return v.strip().upper()
 
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v):
+        # The settings employee form and this one write the same table, so the
+        # same address rule applies whichever entry point created the record.
+        if v and ("@" not in v or "." not in v.split("@")[-1]):
+            raise ValueError("invalid email address")
+        return v
+
 
 class EmployeePatch(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=120)
@@ -143,6 +152,13 @@ class EmployeePatch(BaseModel):
     leave_policy: str | None = None
     status: str | None = None
 
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v):
+        if v and ("@" not in v or "." not in v.split("@")[-1]):
+            raise ValueError("invalid email address")
+        return v
+
 
 EMPLOYEE_FIELDS = ["id", "code", "full_name", "department", "designation", "phone", "email",
                    "joining_date", "manager_id", "status", "branch_id", "office_id",
@@ -152,9 +168,13 @@ EMPLOYEE_FIELDS = ["id", "code", "full_name", "department", "designation", "phon
                    "uan", "esi_no", "attendance_policy", "leave_policy"]
 
 
-def _employee_dict(e: Employee) -> dict:
+def _employee_dict(db: Session, e: Employee) -> dict:
     d = {k: getattr(e, k) for k in EMPLOYEE_FIELDS}
-    d["user_id"] = e.user_id
+    # The login link is stored on both sides; read the user side too so an
+    # older one-way link still shows as linked and is never offered as free.
+    user = (db.get(User, e.user_id) if e.user_id
+            else db.scalar(select(User).where(User.employee_id == e.id)))
+    d["user_id"] = user.id if user else None
     return d
 
 
@@ -221,7 +241,7 @@ def list_employees(response: Response, q: str | None = None, department: str | N
     stmt = stmt.order_by(Employee.code)
     if page:
         stmt = stmt.limit(page_size).offset((page - 1) * page_size)
-    return [_employee_dict(e) for e in db.scalars(stmt).all()]
+    return [_employee_dict(db, e) for e in db.scalars(stmt).all()]
 
 
 @router.post("/employees", status_code=201)
@@ -246,7 +266,7 @@ def create_employee(body: EmployeeIn, db: Session = Depends(get_db),
     audit(db, actor.id, "employee.create", f"employee:{e.id}",
           {"code": e.code, "full_name": e.full_name})
     db.commit()
-    return _employee_dict(e)
+    return _employee_dict(db, e)
 
 
 @router.patch("/employees/{employee_id}")
@@ -258,8 +278,11 @@ def update_employee(employee_id: int, body: EmployeePatch, db: Session = Depends
     data = body.model_dump(exclude_unset=True)
     if data.get("status") not in (None, "active", "inactive"):
         raise HTTPException(422, "status must be active or inactive")
-    if data.get("manager_id") == employee_id:
-        raise HTTPException(422, "An employee cannot report to themselves")
+    if data.get("manager_id"):
+        if not db.get(Employee, data["manager_id"]):
+            raise HTTPException(404, "Manager not found")
+        if data["manager_id"] == employee_id:
+            raise HTTPException(422, "An employee cannot report to themselves")
     changed = {}
     for k, v in data.items():
         if getattr(e, k) != v:
@@ -270,7 +293,7 @@ def update_employee(employee_id: int, body: EmployeePatch, db: Session = Depends
         audit(db, actor.id, "employee.update", f"employee:{e.id}",
               {"code": e.code, **changed})
     db.commit()
-    return _employee_dict(e)
+    return _employee_dict(db, e)
 
 
 @router.get("/employees/{employee_id}")
@@ -282,7 +305,7 @@ def get_employee(employee_id: int, db: Session = Depends(get_db),
     me = hr_svc.employee_for_user(db, user)
     if not _can(db, user, "hr:write") and (not me or me.id != e.id):
         raise HTTPException(403, "You can only view your own profile")
-    return _employee_dict(e)
+    return _employee_dict(db, e)
 
 
 # --------------------------------------------------------------- config

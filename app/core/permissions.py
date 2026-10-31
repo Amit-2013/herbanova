@@ -35,7 +35,7 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "distributor:write": ("Create and edit distributors", "Sales"),
     "credit:manage":     ("Change distributor credit limits", "Sales"),
     "dispatch:write":    ("Dispatch approved sales orders", "Sales"),
-    "invoice:write":     ("Record the delivery challan and e-way bill details on an issued invoice", "Billing"),
+    "invoice:write":     ("Ask an Administrator to change the challan or e-way bill after billing", "Billing"),
     "invoice:cancel":    ("Cancel an issued invoice, with a reason", "Billing"),
     "note:write":        ("Issue credit and debit notes against an issued invoice", "Billing"),
     "print:document":    ("Print an invoice, credit note or debit note as a secure PDF", "Billing"),

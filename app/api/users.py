@@ -94,7 +94,8 @@ def create_user(body: CreateUserIn, db: Session = Depends(get_db),
         employee = db.get(Employee, body.employee_id)
         if not employee:
             raise HTTPException(404, "Employee not found")
-        if employee.user_id:
+        if employee.user_id or db.scalar(
+                select(User.id).where(User.employee_id == employee.id)):
             raise HTTPException(409, "That employee already has a login")
 
     password = body.password or generate_temp_password()
@@ -162,6 +163,8 @@ def update_user(user_id: int, body: UpdateUserIn, db: Session = Depends(get_db),
             if not emp:
                 raise HTTPException(404, "Employee not found")
             if emp.user_id and emp.user_id != u.id:
+                raise HTTPException(409, "That employee already has a login")
+            if db.scalar(select(User.id).where(User.employee_id == emp.id, User.id != u.id)):
                 raise HTTPException(409, "That employee already has a login")
             if u.employee_id and u.employee_id != emp.id:
                 old = db.get(Employee, u.employee_id)

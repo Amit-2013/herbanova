@@ -19,8 +19,8 @@
 
 Two endpoints add their own administrator checks rather than relying on `require_admin`:
 
-- `POST /api/approvals/{id}/decide` — a sales-order request whose reasons include `credit_limit` can only be decided by the Administrator (`app/api/approvals.py:171-173`); post-billing amendment requests can only be decided by an Administrator **other than the requester** (`approvals.py:199-203`); the requester or creator of a sales order can never decide it (`approvals.py:176-178`).
-- `GET /api/dashboard` — the administrative panels are shown only to the Administrator or to a user holding the relevant module permissions (`app/api/dashboard.py:122`).
+- `POST /api/approvals/{id}/decide` — a sales-order request whose reasons include `credit_limit` can only be decided by the Administrator (`app/api/approvals.py:200-202`); post-billing amendment requests can only be decided by an Administrator **other than the requester** (`approvals.py:228-232`); the requester or creator of a sales order can never decide it (`approvals.py:205-207`).
+- `GET /api/dashboard` — the payload is built per permission: stock sections need `stock:read`; orders, top products and category need `sales:read`; ageing needs `accounts:read`; approvals need `approval:read`; follow-ups need `lead:read`; active products need `product:read`; activity needs `audit:read`. The Phase 3 insight cards repeat the same gates: pipeline sales/top customers/credit/corrections need `sales:read`, pipeline leads needs `lead:read`, customer outstanding needs `accounts:read`, PO ageing needs `stock:read`, HR today needs `hr:read`. A section the caller cannot read is `null`, never zero, and the chart's unreadable side is masked in the payload (`app/api/dashboard.py:825-975`). `GET /api/dashboard/expiry` adds its own `stock:read` gate (`dashboard.py:582`). The section-by-section matrix is in `docs/DASHBOARD_FEATURES.md` §7.
 
 ## Roles
 
@@ -106,7 +106,7 @@ The live Administrator set matches the 42-key catalogue exactly: no catalogue ke
 | `approval:read` | Y | Y | Y |  | Y | Y | Y | Y |
 | `approval:credit_limit` | Y |  |  |  |  |  |  |  |
 
-`approval:credit_limit` describes the authority; the deciding check is the **role** check at `app/api/approvals.py:171`. A custom role holding this key still cannot decide an over-limit request.
+`approval:credit_limit` describes the authority; the deciding check is the **role** check at `app/api/approvals.py:200`. A custom role holding this key still cannot decide an over-limit request.
 
 ### Billing
 
@@ -118,7 +118,7 @@ The live Administrator set matches the 42-key catalogue exactly: no catalogue ke
 | `note:write` | Y | Y |  |  |  |  |  |  |
 | `print:document` | Y | Y | Y |  |  |  |  |  |
 
-`invoice:write` records the delivery challan and e-way bill on an **issued** invoice; it does not create the invoice. `invoice:cancel` is administrator-only in the live sets but is enforced as a permission, not as a role.
+`invoice:write` asks an Administrator to change the delivery challan or e-way bill on an **issued** invoice; it does not create the invoice, and the change itself needs `invoice:edit_post_billing` (Administrator) at `PATCH /api/invoices/{id}/movement`. `invoice:cancel` is administrator-only in the live sets but is enforced as a permission, not as a role.
 
 ### Accounts
 
@@ -161,20 +161,21 @@ Report **viewing** is not governed by `report:export` alone: each report declare
 
 ## Route groups by permission
 
-Counts are the literal `require(...)` call sites in `app/api/` on 31 October 2026.
+Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1 November 2026 after the Phase 2 dashboard routes.
 
 | Permission | Routes guarded | Representative surface |
 |---|---:|---|
 | `hr:read` | 13 | HR dashboard, employee master, attendance reads, leave/OD reads, payroll reads |
 | `hr:write` | 11 | Employees, offices, branches, shifts, holidays, salary components/structures, policies |
-| `sales:read` | 10 | Sales orders, distributors, customers |
+| `sales:read` | 11 | Sales orders, invoices, credit/debit notes, distributors, customers, invoice-line expiry history |
 | `user:manage` | 9 | Users, roles, secondary password, employee login link |
 | `hr:payroll_prepare` | 9 | Payroll runs, payslips, exports |
 | `accounts:read` | 7 | Outstanding, party ledgers, GST register, trial balance, receipts/payments reads |
-| `tax:read` / `note:write` / `hr:attendance_self` | 6 each | Rate master and slabs; credit/debit notes; own check-in/out and requests |
-| `tax:write` / `stock:read` / `print:document` / `lead:write` | 5 each | Settings and rates; stock and warehouses; PDFs; leads |
+| `tax:read` / `note:write` / `hr:attendance_self` / `stock:read` | 6 each | Rate master and slabs; credit/debit notes; own check-in/out and requests; stock, warehouses, dashboard expiry drill-down |
+| `tax:write` / `print:document` / `lead:write` | 5 each | Settings and rates; PDFs; leads |
 | `stock:write` | 4 | Warehouses, POs, goods receipts |
-| `supplier:read` / `sales:write` / `lead:read` / `audit:read` | 3 each | Suppliers; sales orders; leads; audit trail |
+| `audit:read` | 4 | Audit trail and dashboard activity feed |
+| `supplier:read` / `sales:write` / `lead:read` | 3 each | Suppliers; sales orders; leads |
 | `supplier:write` / `product:write` / `product:read` / `invoice:write` / `invoice:cancel` / `hr:payroll_approve` / `employee:write` / `employee:read` / `distributor:write` / `approval:read` | 2 each | Respective masters and documents |
 | `user:manage` (no-arg form), `supplier:bank` | 1 each | Secondary password; bank-change request |
 
@@ -186,7 +187,7 @@ Counts are the literal `require(...)` call sites in `app/api/` on 31 October 202
 | Live Administrator set equals the catalogue | VERIFIED | read-only `roles` query, 31 Oct 2026 |
 | Role grants shown above match the live database | VERIFIED | same query; regenerated, not hand-typed |
 | `require` / `require_admin` / forced-password / revocation semantics | VERIFIED (code) | `app/core/rbac.py:27-98` |
-| Administrator-only approval decisions and segregation of duties | VERIFIED (code) | `app/api/approvals.py:147-224` |
+| Administrator-only approval decisions and segregation of duties | VERIFIED (code) | `app/api/approvals.py:177-253` |
 | `db:reset` requires the secondary password | VERIFIED (code) | `app/api/db_reset.py:113`; `app/api/admin.py:35-59` |
 | Frozen role parity with the seeded roles | **VERIFIED** | `tests/test_roles_parity.py` — catalogue coverage, admin completeness, baseline subset, seeded-role equality and unknown-key rejection |
 | Authentication, permission denial, the Administrator role gate, immediate DB-role edits, baseline fallback, deactivation and forced password change | **VERIFIED** | `tests/test_authz.py` (7 tests) |
@@ -197,4 +198,5 @@ Counts are the literal `require(...)` call sites in `app/api/` on 31 October 202
 1. **Parity test added.** `tests/test_roles_parity.py` now exists and passes, closing the former unverified-docstring gap. It asserts that every `require(...)`/`require_admin(...)` key and every report permission is in the catalogue, that all baseline sets use catalogue keys, that the Administrator holds the whole catalogue, and that the live seeded roles equal the frozen sets.
 2. **Live-only roles and the string fallback.** `employee`, `hr_manager`, `payroll_officer` and `reporting_manager` have no entry in `BASELINE_ROLE_PERMS`. A user holding one of those role names **without** a `role_id` would receive an empty permission set. This is safe (fail closed) but should be confirmed as intentional.
 3. **Permission edits are immediate.** Because resolution reads the database on each request, an administrator changing a role takes effect on the next request without re-login; there is no audit event dedicated to a permission-set change beyond the generic user/role write audit. See the Stage 1 audit finding on role-change auditing.
-4. **`approval:credit_limit` is descriptive.** It is in the catalogue and granted to the Administrator, but the deciding gate is the role check at `app/api/approvals.py:171`; a custom role granted only this key gets no authority. Recorded so a future reader does not mistake the key for the control.
+4. **`approval:credit_limit` is descriptive.** It is in the catalogue and granted to the Administrator, but the deciding gate is the role check at `app/api/approvals.py:200`; a custom role granted only this key gets no authority. Recorded so a future reader does not mistake the key for the control.
+5. **UI gating re-checked from zero (1 November 2026).** Every sidebar link now follows the read permission its API requires, so a role is not offered a screen that can only answer 403; data loads in `loadAll` are guarded the same way (`product:read`, `stock:read`, `sales:read`). The payroll drawer opens only with `hr:payroll_prepare`, and Process / Mark paid appear only with `hr:payroll_approve`. An approval's `can_decide` flag is computed from the same rules the decide handler enforces (per-type HR permission, `approval:decide` or Administrator for sales orders, Administrator for credit-limit and post-billing, never your own request), so Approve/Reject is not offered where the server would refuse. The server remains the control; these are the matching affordances.

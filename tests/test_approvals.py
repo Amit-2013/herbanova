@@ -42,6 +42,8 @@ def test_credit_limit_approval_is_admin_only(client, world):
     assert queue.status_code == 200
     sales_row = next(a for a in queue.json() if a["id"] == approval_id)
     assert sales_row["pending_approver_role"] == "admin"
+    # The queue tells the truth about who can decide, not just who can see.
+    assert sales_row["can_decide"] is False
     assert sales.post(f"/api/approvals/{approval_id}/decide",
                       json={"decision": "approve", "reason": "denied"}).status_code == 403
 
@@ -51,6 +53,9 @@ def test_credit_limit_approval_is_admin_only(client, world):
                           json={"decision": "approve", "reason": "denied"}).status_code == 403
 
     admin = client.as_user("admin")
+    admin_row = next(a for a in admin.get("/api/approvals", params={"status": "pending"}).json()
+                     if a["id"] == approval_id)
+    assert admin_row["can_decide"] is True
     decided = admin.post(f"/api/approvals/{approval_id}/decide",
                          json={"decision": "approve", "reason": "Limit temporarily raised"})
     assert decided.status_code == 200, decided.text

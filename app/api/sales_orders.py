@@ -18,7 +18,7 @@ from ..models.core import (ApprovalRequest, Distributor, Product, SalesOrder, Sa
 from ..services.audit import audit
 from ..services.discounts import best_slab
 from ..services.inventory import post_movement
-from ..services.order_tax import CannotQuote, order_preview
+from ..services.order_tax import CannotQuote, discount_pct, order_preview
 from ..services.invoice import create_invoice_for_order
 from ..services.sales import allocate_fefo, available_stock, credit_exposure
 
@@ -28,10 +28,6 @@ CENT = Decimal("0.01")
 
 def _money(d: Decimal) -> Decimal:
     return d.quantize(CENT, ROUND_HALF_UP)
-
-
-def _discount_pct(mrp: Decimal, price: Decimal) -> Decimal:
-    return Decimal(0) if mrp <= 0 else ((mrp - price) / mrp * 100).quantize(Decimal("0.1"), ROUND_HALF_UP)
 
 
 # ---------------------------------------------------------------- schemas
@@ -141,7 +137,7 @@ def _build(db: Session, orders: list[SalesOrder]) -> list[SOOut]:
             dispatched_at=o.dispatched_at, cancel_reason=o.cancel_reason,
             lines=[SOLineOut(sku=prods[ln.product_id].sku, product_name=prods[ln.product_id].name,
                              qty=ln.qty, unit_price=ln.unit_price, mrp=prods[ln.product_id].mrp,
-                             discount_pct=_discount_pct(prods[ln.product_id].mrp, ln.unit_price),
+                             discount_pct=discount_pct(prods[ln.product_id].mrp, ln.unit_price),
                              line_total=ln.line_total) for ln in o.lines],
             approval=ApprovalBrief(id=a.id, status=a.status, reasons=a.reasons) if a else None))
     return out
@@ -266,7 +262,7 @@ def submit_order(order_id: int, db: Session = Depends(get_db), user=Depends(requ
     # baseline percentage in core/rules.py applies.
     max_disc, disc_threshold = Decimal(0), DISCOUNT_APPROVAL_PCT
     for ln in so.lines:
-        line_disc = _discount_pct(prods[ln.product_id].mrp, ln.unit_price)
+        line_disc = discount_pct(prods[ln.product_id].mrp, ln.unit_price)
         slab = best_slab(db, on=date.today(), product_id=ln.product_id,
                          group_name=dist.group_name, qty=ln.qty, value=so.total)
         threshold = (Decimal(slab.approval_above)

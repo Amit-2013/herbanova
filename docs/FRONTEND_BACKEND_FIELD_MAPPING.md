@@ -5,7 +5,7 @@
 **Date:** 31 October 2026
 **Scope:** every write workflow and every read surface reachable from the browser, traced from the HTML/JavaScript control through the HTTP request, the Pydantic schema, the service function, the database column, the permission gate, and the report that consumes it.
 
-**Evidence basis:** `static/index.html`, `static/js/app.js` (3,160 lines), the FastAPI application object (introspected, 158 `/api/` routes), every request schema in `app/api/`, the services in `app/services/`, the models in `app/models/`, and read-only catalogue queries against the development database. **No application code, configuration, or business data was changed to produce this document.**
+**Evidence basis:** `static/index.html`, `static/js/app.js` (3,914 lines), the FastAPI application object (introspected, 161 `/api/` routes), every request schema in `app/api/`, the services in `app/services/`, the models in `app/models/`, and read-only catalogue queries against the development database. **No application code, configuration, or business data was changed to produce this document.**
 
 ## How to read this document
 
@@ -28,7 +28,7 @@ The browser talks to the API through one helper, `api()` at `static/js/app.js:36
 
 | Surface | Count | Source |
 |---|---|---|
-| API routes under `/api/` | 158 | introspected from `app.main:app` |
+| API routes under `/api/` | 161 | introspected from `app.main:app` |
 | Browser views (`#/…`) | 20 | `static/js/app.js:200-208` |
 | Report catalogue entries | 25 | `app/services/reports.py` `CATALOG` |
 | Request schemas with a JSON body | 64 | `app/api/**` |
@@ -57,13 +57,49 @@ The SPA is a single page with hash routes. Visibility of a view is decided in th
 
 ## 2. Dashboard and module register
 
+**UI route:** `#/dash` (`renderDash`, `app.js:423-472`; insight cards, `app.js:887-996`). **Phase 2 metric definitions, sources, permissions and refresh rules:** `docs/DASHBOARD_FEATURES.md`.
+
 | UI element | API | Permission | Content |
 |---|---|---|---|
-| Overview cards | `GET /api/dashboard` | `require_login` | Null when the role lacks the underlying permission; each figure is gated by `stock:read`, `sales:read`, `accounts:read`, `approval:read`, etc. (`app/api/dashboard.py:104+`) |
+| Period 7D/30D/90D, all tiles and panels | `GET /api/dashboard?range=` | `require_login`, then per section | Payload as at §2.1; `range` outside 7/30/90 → 422. Sections the role cannot read are `null`, never `0`. |
+| Stock KPIs, expiry watch, warehouses, open POs | same payload | `stock:read` | `stock`, `purchase_orders`, `stock_by_warehouse`, `expiry_watch`, `open_pos`, stock KPI tiles |
+| Sales KPIs, top products, category panel | same payload | `sales:read` | `orders_ready`, `top_products`, `category_sales`; sales side of `sales_vs_purchases` is masked server-side without it |
+| Receivables ageing | same payload | `accounts:read` | `receivables_ageing`, from `ledger.ageing_rows` (same function as the report) |
+| Approvals tile and list | same payload | `approval:read` | `approvals`, `approvals_waiting`; HR requests are further limited to the caller's own |
+| Follow-ups tile | same payload | `lead:read` | `leads`, `followups_overdue` |
+| Active products tile | same payload | `product:read` | `active_products` |
+| Recent activity | same payload | `audit:read` | `recent_activity` (latest 8, exact total) |
+| Expiry filter and detail drawer | `GET /api/dashboard/expiry?bucket=&page=&page_size=` | `stock:read` | Paged batches in a disjoint bucket; row detail is rendered from the same fields |
+| Global search palette (Ctrl/⌘ K) | `GET /api/dashboard/search?q=` | signed in; groups gated | Products, customers, sales orders, invoices, purchase orders, suppliers, leads; max 5 rows per visible group |
+| Activity feed (palette/audit) | `GET /api/dashboard/activity?limit=` | `audit:read` | Audit rows |
 | Module register | `GET /api/modules` | `require_login` | Declared modules, groups and derived counts (`app/api/modules.py:17`) |
 | Health badge | `GET /api/health` | none | Liveness and schema revision |
 
-The dashboard is read-only. It composes no new figures: stock, receivables and payables come from the same services as the reports (section 13).
+### 2.1 Dashboard payload fields
+
+| Payload member | Shape / meaning | Gate |
+|---|---|---|
+| `as_of`, `range`, `from`, `to`, `generated_at` | Date, period length and UTC build time | always |
+| `kpis[]` | `{key,label,value,href,note,trend,trend_points,trend_note}` — 8 tiles; `trend` is null where no history is stored | per tile (see DASHBOARD_FEATURES §4) |
+| `attention[]` | `{key,label,count,units,amount,severity,available,gap,note,href}`; `available:false` marks a data gap | per rule |
+| `sales_vs_purchases` | `{series[{date,sales,purchases}],sales_total,purchases_total,sales_change,purchases_change,previous_from,previous_to,sales_visible,purchases_visible,note}`; hidden side is `null` | `sales:read` and/or `stock:read` |
+| `receivables_ageing` | `{buckets[{key,label,amount,count}],total,count,as_of,note}` | `accounts:read` |
+| `stock_by_warehouse[]` | `{id,name,batches,units,capacity:null,share:null,gap:"GAP-D03"}` | `stock:read` |
+| `expiry_watch` | `{expired,lt30,lt90,total,rows[],shown,shown_of,buckets[],note}`; rows carry `action`/`tone`/`value:null`/`value_gap` | `stock:read` |
+| `open_pos` | `{count,rows[{po_number,supplier,value,remaining_units,ordered_units,received_units,pct_received,receipt_count}],shown,note}` | `stock:read` |
+| `approvals` | `{count,rows[ApprovalOut],shown,note}` | `approval:read` |
+| `top_products` | `{rows[{product_id,sku,name,qty,revenue,previous_revenue,change}],previous_from,previous_to,note}` | `sales:read` |
+| `category_sales` | `{available:false,gap:"GAP-D01",note}` | `sales:read` |
+| `recent_activity` | `{rows[{id,at,actor,action,record,changes}],shown,total}` | `audit:read` |
+| `insights.pipeline` | `{sales:{rows[{status,label,count,value}],total,dispatch:{measured,average_days,note}},leads:{rows[{status,label,count}],total}}`; each side `null` without its permission | `sales:read` / `lead:read` |
+| `insights.customers` | `{from,to,top[{distributor_id,name,invoices,revenue}],outstanding[{distributor_id,name,outstanding,invoices}],outstanding_total,credit[{distributor_id,name,credit_limit,exposure,available,pct_used}],note}`; `outstanding` is `null` without `accounts:read` | `sales:read` and/or `accounts:read` |
+| `insights.purchasing` | `{as_of,open_count,no_receipt,partial,rows[{key,label,count,value}],note}` for PO age buckets | `stock:read` |
+| `insights.corrections` | `{from,to,credit_notes{label,count,value,shown,rows[]},debit_notes{…},post_billing{count,pending,shown,rows[]},note}` | `sales:read` |
+| `insights.hr` | `{date,headcount,marked,not_marked,attendance[{status,label,count}],leave_pending,od_pending,note}` | `hr:read` |
+| `health` | `{modules{working,counted,percent},schema{current,head,at_head},backup{status,gap,note},alerts{configured,note}}` | signed in |
+| legacy `stock`, `purchase_orders`, `active_products`, `orders_ready`, `approvals_waiting`, `leads`, `warehouse_count` | unchanged definitions for older callers | as before |
+
+The dashboard is read-only. It adds no write path and composes no new figures: stock, receivables and payables come from the same services as the reports (section 13), and approvals decisions still go through `POST /api/approvals/{id}/decide` (section 10). **Status: VERIFIED** for aggregates, periods, masking and reconciliation by `tests/test_dashboard.py` and `tests/test_dashboard_phase2.py`; the browser check is recorded in `docs/DASHBOARD_FEATURES.md` §9.
 
 ---
 
@@ -276,7 +312,7 @@ API: `PATCH /api/invoices/{id}/movement` (`require_admin("invoice:edit_post_bill
 
 ### 8.3 Non-Administrator request
 
-The UI offers `delivery_challan_number` and `vehicle_number` only, posts to `POST /api/approvals/post-billing/{invoice_id}` with `AmendRequestIn{reason, changes}`, and needs `invoice:write`. The server filters the requested keys through `AMENDABLE` and stores the request (`app/api/approvals.py:201+`). An Administrator decides it with `POST /api/approvals/{id}/decide`.
+The UI offers `delivery_challan_number` and `vehicle_number` only, posts to `POST /api/approvals/post-billing/{invoice_id}` with `AmendRequestIn{reason, changes}`, and needs `invoice:write`. The server filters the requested keys through `AMENDABLE` and stores the request (`app/api/approvals.py:254+`). An Administrator decides it with `POST /api/approvals/{id}/decide`.
 
 **Reports:** `invoices` (Sales Invoice Register), period, `sales:read` — source count and sum checks are real (section 13.2).
 
@@ -312,9 +348,9 @@ APIs: `POST /api/credit-notes` (`note:write`), `POST /api/debit-notes` (`note:wr
 | Approve / reject | `POST /api/approvals/{id}/decide` | `DecisionIn{decision, reason}` | `approval:read`, then: a sales order needs `approval:decide` or the Administrator, a credit-limit reason needs the Administrator, a post-billing edit needs the Administrator; nobody may decide their own request | `status`, `decided_by`, `decided_at`, `decision_reason` |
 | Decide supplier bank change | `POST /api/suppliers/bank-changes/{id}/decide` | `BankDecisionIn{decision, reason}` | `approval:decide` | `approval_requests`, `suppliers` bank fields |
 
-**Verified by tests:** `tests/test_approvals.py:1-102` proves the sales desk and inventory roles cannot decide a credit-limit request, the Administrator cannot decide one they raised, a request is decided once, and only permitted post-billing fields are applied (`grand_total` is dropped).
+**Verified by tests:** `tests/test_approvals.py:1-107` proves the sales desk and inventory roles cannot decide a credit-limit request, the Administrator cannot decide one they raised, a request is decided once, and only permitted post-billing fields are applied (`grand_total` is dropped).
 
-**Order of checks (VERIFIED, code):** the handler dispatches by `record_type`, then checks status = pending, then the role rule (Administrator for a credit-limit reason or post-billing; `approval:decide` or Administrator for a sales order), then the segregation rule (requester or order creator), then applies the effect and audits it (`app/api/approvals.py:148-224`).
+**Order of checks (VERIFIED, code):** the handler dispatches by `record_type`, then checks status = pending, then the role rule (Administrator for a credit-limit reason or post-billing; `approval:decide` or Administrator for a sales order), then the segregation rule (requester or order creator), then applies the effect and audits it (`app/api/approvals.py:177-253`).
 
 ---
 
