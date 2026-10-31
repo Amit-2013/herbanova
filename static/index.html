@@ -94,6 +94,7 @@
         <p class="nav-grp">People and admin</p>
         <a class="nav hide" href="#/hr" data-v="hr" id="navHr">HR Management</a>
         <a class="nav hide" href="#/settings" data-v="settings" id="navSettings">Settings &amp; Administration</a>
+        <a class="nav hide" href="#/scheduled" data-v="scheduled" id="navScheduled">Scheduled reports</a>
       </div>
     </nav>
     <div class="who">
@@ -853,6 +854,7 @@
           <a class="btn ghost" href="#/users">Users, roles and employees</a>
           <a class="btn ghost" href="#/tax">Tax, discounts and company profile</a>
           <a class="btn ghost" href="#/audit">Audit trail</a>
+          <a class="btn ghost" href="#/scheduled">Scheduled reports</a>
           <a class="btn ghost" href="#/hr">HR policies and offices</a>
         </div>
         <div class="note">Each area enforces its own permissions on the server. A link is hidden only as a convenience; the backend refuses an unauthorised request.</div>
@@ -941,6 +943,71 @@
         </table></div>
         <div class="empty hide" id="audempty"></div>
       </div>
+    </section>
+    <!-- Scheduled reports (Administrator only) -->
+    <section id="v-scheduled" class="view hide">
+      <div id="srBanner"></div>
+      <div class="panel">
+        <div class="panel-h"><h2>Scheduled reports</h2><span class="muted" id="srHeadNote"></span></div>
+        <div class="seg compact" role="tablist" aria-label="Scheduled reports sections" id="srTabs">
+          <button type="button" role="tab" data-sr-tab="schedules" aria-selected="true">Schedules</button>
+          <button type="button" role="tab" data-sr-tab="recipients" aria-selected="false">Recipients</button>
+          <button type="button" role="tab" data-sr-tab="log" aria-selected="false">Delivery log</button>
+        </div>
+        <div class="note">Nothing is sent until SMTP is configured, sending is enabled and the scheduler screen is approved. In test mode every message goes only to the Administrator. Every change and every send is written to the audit log.</div>
+      </div>
+
+      <section id="sr-schedules">
+        <div class="panel flush">
+          <div class="toolbar">
+            <span class="muted" id="srSchedNote"></span>
+            <button class="btn" data-act="sr-new" type="button">New schedule</button>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Schedule</th><th>Content</th><th>When</th><th>Next run</th><th>Last run</th><th>Status</th><th></th></tr></thead>
+            <tbody id="srSchedRows"></tbody>
+          </table></div>
+          <div class="empty hide" id="srSchedEmpty"></div>
+        </div>
+      </section>
+
+      <section id="sr-recipients" class="hide">
+        <div class="panel flush">
+          <div class="toolbar">
+            <span class="muted" id="srRecNote"></span>
+            <button class="btn" data-act="sr-recipient-new" type="button">Add recipient</button>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Email</th><th>Name</th><th>Group</th><th>Status</th><th>Used by</th><th></th></tr></thead>
+            <tbody id="srRecRows"></tbody>
+          </table></div>
+          <div class="empty hide" id="srRecEmpty"></div>
+        </div>
+      </section>
+
+      <section id="sr-log" class="hide">
+        <div class="panel flush">
+          <div class="toolbar">
+            <select id="srLogStatus" aria-label="Filter by delivery status">
+              <option value="">All statuses</option>
+              <option value="queued">Queued</option>
+              <option value="sending">Sending</option>
+              <option value="sent">Sent</option>
+              <option value="retry">Retry</option>
+              <option value="failed">Failed</option>
+              <option value="skipped">Skipped</option>
+            </select>
+            <select id="srLogPack" aria-label="Filter by report pack"><option value="">All packs</option></select>
+            <button class="btn ghost sm" data-act="sr-refresh-log" type="button">Refresh</button>
+            <span class="muted" id="srLogNote"></span>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Created</th><th>Pack</th><th>Trigger</th><th>Period</th><th class="n">Recipients</th><th>Status</th><th>Attachments</th><th>Error</th><th></th></tr></thead>
+            <tbody id="srLogRows"></tbody>
+          </table></div>
+          <div class="empty hide" id="srLogEmpty"></div>
+        </div>
+      </section>
     </section>
   </main>
 </div>

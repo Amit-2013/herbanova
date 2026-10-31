@@ -122,6 +122,48 @@ def test_accounts_block_and_gaps_appear_in_the_email(client, world):
     assert "No data yet" in rendered["html"]
 
 
+def _stray_table_blocks(html: str) -> list[str]:
+    """Elements a browser would hoist out of a table because they are not rows."""
+    from html.parser import HTMLParser
+
+    void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+            "meta", "param", "source", "track", "wbr"}
+    allowed = {"tr", "thead", "tbody", "tfoot", "caption", "colgroup", "col"}
+    stray: list[str] = []
+    stack: list[str] = []
+
+    class Strict(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if stack and stack[-1] == "table" and tag not in allowed | void:
+                stray.append(tag)
+            if tag not in void:
+                stack.append(tag)
+
+        def handle_startendtag(self, tag, attrs):
+            if stack and stack[-1] == "table" and tag not in allowed:
+                stray.append(tag)
+
+        def handle_endtag(self, tag):
+            if tag in void:
+                return
+            if tag in stack:
+                while stack and stack.pop() != tag:
+                    pass
+
+    Strict().feed(html)
+    return stray
+
+
+def test_every_email_block_sits_inside_a_table_row(world):
+    """A div or heading placed directly in a table is hoisted by the browser and
+    by some mail clients, which had moved the Accounts heading above the header."""
+    day = TODAY - timedelta(days=1)
+    with SessionLocal() as db:
+        data, attachments = _pack(db, day)
+    rendered = email_render.render(data, attachments, mode="preview")
+    assert _stray_table_blocks(rendered["html"]) == []
+
+
 # --- recipients and test mode ---------------------------------------------
 
 def test_test_mode_redirects_to_one_address_and_fails_closed(world, monkeypatch):
