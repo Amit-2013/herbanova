@@ -162,7 +162,7 @@ const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "sto
                       approvals: "approvals", leads: "leads", lost: "leads",
                       followups: "leads", accounts: "accounts", tax: "tax",
                       reports: "reports", compare: "reports", hr: "hr", audit: "audit",
-                      scheduled: "scheduled", users: "users"};
+                      scheduled: "scheduled", users: "users", roles: "users"};
 const featureOn = v => !VIEW_FEATURE[v] || !state.features || state.features.has(VIEW_FEATURE[v]);
 
 function enter(u) {
@@ -187,6 +187,7 @@ function enter(u) {
   show("#navBilling", can("sales:read"));
   show("#navAccounts", can("accounts:read") || can("accounts:reports"));
   show("#navHr", can("hr:read") || can("hr:attendance_self"));
+  show("#navRoles", can("user:manage"));
   show("#navSettings", can("user:manage") || can("tax:read") || can("audit:read") || can("hr:read"));
   // Every other module link follows the read permission its API requires, so a
   // role is never offered a screen that can only answer 403.
@@ -201,6 +202,7 @@ function enter(u) {
   showView("inventory", can("stock:read"));
   showView("distributors", can("sales:read"));
   showView("geo", can("sales:read"));
+  showView("roles", can("user:manage"));
   showView("scheduled", srAllowed());
   showView("reports", ["accounts:read", "hr:reports", "sales:read", "stock:read",
                        "supplier:read", "tax:read"].some(k => can(k)));
@@ -363,12 +365,13 @@ const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", 
                 approvals: "Approvals", distributors: "Distributors", customers: "Customers",
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
-                users: "Users and rights", audit: "Audit trail",
+                roles: "Roles & Permissions", users: "Logins and employees", audit: "Audit trail",
                 compare: "MoM & YoY dashboard", geo: "Geography",
                 scheduled: "Scheduled reports"};
 const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
                    geo: "sales:read",
-                   customers: "sales:read", users: "user:manage", audit: "audit:read",
+                   customers: "sales:read", users: "user:manage", roles: "user:manage",
+                   audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
                    products: "product:read", inventory: "stock:read", purchasing: "stock:read",
                    distributors: "sales:read", sales: "sales:read", billing: "sales:read",
@@ -498,7 +501,7 @@ function renderHead() {
             : "Employee records, attendance, leave, on-duty and payroll, integrated with Approvals and Reports.";
     if (can("hr:write")) act = `<button class="btn" data-act="hr-employees" type="button">Employee master</button>`;
   }
-  if (v === "settings") sub = "Users, roles, employees, tax configuration, HR policies and the audit trail.";
+  if (v === "settings") sub = "Roles, logins, employees, tax configuration, HR policies and the audit trail.";
   if (v === "scheduled") {
     const s = state.sr.status;
     sub = s
@@ -506,12 +509,18 @@ function renderHead() {
       : "Administrator only. Schedules, recipients and the delivery log, with every send audited.";
   }
   if (v === "reports") sub = "Every figure is checked against the records it comes from. Downloads are recorded in the audit log.";
+  if (v === "roles") {
+    const rights = PERM_ITEMS().filter(i => i.admin_only).length;
+    sub = `${plural(state.roles.length, "role")} and ${plural(PERM_ITEMS().length, "permission")}. ${state.featureFlags.length} module switch${state.featureFlags.length === 1 ? "" : "es"}; ${rights} right${rights === 1 ? " is" : "s are"} reserved for the Administrator.`;
+    const btn = [`<button class="btn ghost" data-act="new-role" type="button">New role</button>`];
+    if (can("user:manage")) btn.push(`<a class="btn ghost" href="#/users">Logins and employees</a>`);
+    act = btn.join(" ");
+  }
   if (v === "users") {
     const locked = state.users.filter(u => u.locked).length, pending = state.users.filter(u => u.must_change_password).length;
     sub = `${plural(state.users.length, "login")} and ${plural(state.employees.length, "employee")}. ${pending} awaiting a password change, ${locked} locked. Temporary passwords are shown once.`;
     const btn = [];
     if (can("employee:write")) btn.push(`<button class="btn ghost" data-act="new-employee" type="button">New employee</button>`);
-    btn.push(`<button class="btn ghost" data-act="new-role" type="button">New role</button>`);
     btn.push(`<button class="btn" data-act="new-user" type="button">New user</button>`);
     act = btn.join(" ");
   }
@@ -5465,8 +5474,10 @@ function renderUsers() {
       <td><span class="chip ${f.enabled ? "ok" : "off"}">${f.enabled ? "Available" : "Switched off"}</span></td>
       <td class="rowacts">${f.locked ? '<span class="muted">Always on</span>'
         : `<button class="btn ghost sm" type="button" data-act="toggle-feature" data-key="${esc(f.key)}" data-enabled="${f.enabled}">${f.enabled ? "Switch off" : "Switch on"}</button>`}</td></tr>`).join("");
-    empty($("#fempty"), !state.featureFlags.length, "Feature availability is managed by the Administrator.", "");
+    empty($("#fempty"), !state.featureFlags.length,
+      "Only the Administrator role can read or change module switches.", "");
   }
+  renderAccessRules();
 
   $("#erows").innerHTML = state.employees.map(e => `<tr>
     <td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
@@ -5475,6 +5486,22 @@ function renderUsers() {
     <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td>
     <td class="rowacts"><button class="btn ghost sm" type="button" data-act="edit-emp" data-id="${e.id}">Edit</button></td></tr>`).join("");
   empty($("#eempty"), !state.employees.length, "No employees yet.", can("employee:write") ? " Select “New employee” to add the first one." : "");
+}
+
+function renderAccessRules() {
+  const rows = $("#acrows");
+  if (!rows) return;
+  rows.innerHTML = state.permCatalog.map(g => {
+    const parents = g.items.filter(i => !i.parent);
+    const children = g.items.filter(i => i.parent);
+    const key = i => `<code>${esc(i.key)}</code>${i.admin_only ? ' <span class="chip warn">Admin only</span>' : ""}`;
+    const parentCell = parents.map(key).join("<br>") || "–";
+    const childCell = children.map(i => `${key(i)} <span class="muted">needs ${esc(i.parent)}</span>`).join("<br>") || "–";
+    const locked = g.items.filter(i => i.admin_only).map(i => `<code>${esc(i.key)}</code>`).join(" ") || "–";
+    return `<tr><td class="strong">${esc(g.module)}</td><td>${parentCell}</td><td>${childCell}</td><td>${locked}</td></tr>`;
+  }).join("");
+  empty($("#acempty"), !state.permCatalog.length,
+    "The permission catalogue is available to a role holding user:manage.", "");
 }
 
 function showSecret(title, sub, username, password) {

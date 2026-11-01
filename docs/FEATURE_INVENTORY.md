@@ -178,9 +178,13 @@ hand-typed number.
 | F-89 | DB-backed worker, retries, claims, delivery log | background worker | `email:manage` | `test_email_reports.py` | VERIFIED |
 | F-90 | Test-mode guardrails | status screen | `email:manage` | `test_email_api.py`, `test_email_reports.py` | VERIFIED |
 | F-91 | SMTP settings and test composer (encrypted password, To/CC, message types, dry run, outbox) | Settings → Email and SMTP; `/api/email-settings` | `email:manage` | `test_email_settings.py`; local sink run | VERIFIED |
-| F-91 | Live e-mail delivery | — | SMTP approval | none configured | NOT VERIFIED |
-| F-92 | Backup, restore and reconciliation | `backup_restore_test.py` | operator | executed 1 Nov 2026: 63 tables, 575 rows, 26 reports, 0 unreconciled | VERIFIED |
-| F-93 | Health endpoint | `/api/health` | none | `test_dashboard_phase2.py` | VERIFIED |
+| F-92 | Live e-mail delivery | — | SMTP approval | none configured | NOT VERIFIED |
+| F-93 | Backup, restore and reconciliation | `backup_restore_test.py` | operator | executed 1 Nov 2026: 63 tables, 575 rows, 26 reports, 0 unreconciled | VERIFIED |
+| F-94 | Health endpoint | `/api/health` | none | `test_dashboard_phase2.py` | VERIFIED |
+| F-95 | Roles & Permissions screen (roles, tree editor, access-control summary) | `#/roles`; `/api/roles` | `user:manage` | `test_permission_tree.py`; browser check | VERIFIED |
+| F-96 | Parent-child permission rules, browser and server | role tree editor; `effective_permissions` | `user:manage` | `test_permission_tree.py` (11 tests) | VERIFIED |
+| F-97 | Central module On/Off switches, Administrator only | `#/roles` → Feature availability; `/api/features` | Administrator role | `test_feature_switches.py` (10 tests) | VERIFIED |
+| F-98 | Logins and employee master (separate from roles) | `#/users` | `user:manage` / `employee:*` | `test_authz.py`; browser check | VERIFIED |
 
 ## 10. Features that are deliberately absent
 

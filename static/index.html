@@ -93,6 +93,7 @@
       <div class="nav-group">
         <p class="nav-grp">People and admin</p>
         <a class="nav hide" href="#/hr" data-v="hr" id="navHr">HR Management</a>
+        <a class="nav hide" href="#/roles" data-v="roles" id="navRoles">Roles &amp; Permissions</a>
         <a class="nav hide" href="#/settings" data-v="settings" id="navSettings">Settings &amp; Administration</a>
         <a class="nav hide" href="#/scheduled" data-v="scheduled" id="navScheduled">Scheduled reports</a>
       </div>
@@ -985,7 +986,8 @@
       <div class="panel">
         <div class="panel-h"><h2>Settings &amp; Administration</h2><span class="muted">Configuration and controlled records.</span></div>
         <div class="toolbar">
-          <a class="btn ghost" href="#/users">Users, roles and employees</a>
+          <a class="btn ghost" href="#/roles">Roles &amp; Permissions</a>
+          <a class="btn ghost" href="#/users">Logins and employees</a>
           <a class="btn ghost" href="#/tax">Tax, discounts and company profile</a>
           <a class="btn ghost" href="#/audit">Audit trail</a>
           <a class="btn ghost" href="#/scheduled">Scheduled reports</a>
@@ -1034,7 +1036,41 @@
       <div id="rpBody"></div>
     </section>
 
-    <!-- Users and rights (Module Phase 1) -->
+    <!-- Roles and permissions (Module Phase 1, consolidated) -->
+    <section id="v-roles" class="view hide">
+      <div class="panel">
+        <div class="panel-h"><h2>Roles and permissions</h2><span class="muted">Changes take effect on the next request.</span></div>
+        <div class="note">A parent permission is a module gate. Checking it makes its children selectable but grants none of them; only a ticked child is granted. Unchecking a parent removes its children. A child can never work without its parent, and the server enforces the same rules on every request.</div>
+      </div>
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Roles</h2><span class="muted">Built-in roles keep their names; custom roles are created here.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Role</th><th class="n">Permissions</th><th class="n">Users</th><th>Type</th><th></th></tr></thead>
+          <tbody id="rrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="rempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Feature availability</h2><span class="muted">One central switch per module. Switching a module off denies its permissions to every role and hides it everywhere.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Module</th><th>Permissions it controls</th><th>State</th><th></th></tr></thead>
+          <tbody id="frows"></tbody>
+        </table></div>
+        <div class="empty hide" id="fempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Access control</h2><span class="muted">Every permission in the catalogue, its parent and whether it is reserved for the Administrator. A child can depend on a parent listed under another module.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Module</th><th>Parent permission</th><th>Child permissions</th><th>Administrator only</th></tr></thead>
+          <tbody id="acrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="acempty"></div>
+      </div>
+    </section>
+
+    <!-- Logins and employees (Module Phase 1) -->
     <section id="v-users" class="view hide">
       <div class="panel flush">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Logins</h2><span class="muted" id="userNote"></span></div>
@@ -1045,22 +1081,9 @@
         <div class="empty hide" id="uempty"></div>
       </div>
 
-      <div class="panel flush">
-        <div class="panel-h" style="padding:14px 18px 0"><h2>Roles and permissions</h2><span class="muted">Changes take effect on the next request.</span></div>
-        <div class="tw"><table>
-          <thead><tr><th>Role</th><th class="n">Permissions</th><th class="n">Users</th><th>Type</th><th></th></tr></thead>
-          <tbody id="rrows"></tbody>
-        </table></div>
-        <div class="empty hide" id="rempty"></div>
-      </div>
-
-      <div class="panel flush">
-        <div class="panel-h" style="padding:14px 18px 0"><h2>Feature availability</h2><span class="muted">One central switch per module. Switching a module off removes it from every role and hides it everywhere.</span></div>
-        <div class="tw"><table>
-          <thead><tr><th>Module</th><th>Permissions it controls</th><th>State</th><th></th></tr></thead>
-          <tbody id="frows"></tbody>
-        </table></div>
-        <div class="empty hide" id="fempty"></div>
+      <div class="panel">
+        <div class="panel-h"><h2>Roles &amp; Permissions</h2><span class="muted">Role permissions and module switches live on their own screen.</span></div>
+        <div class="toolbar"><a class="btn ghost" href="#/roles">Open Roles &amp; Permissions</a></div>
       </div>
 
       <div class="panel flush">

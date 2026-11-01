@@ -172,6 +172,19 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | R-87 | Test e-mail composer with message type, To, CC, subject and body; dry run and one-session delivery, every attempt stored | BRIEF (new) | `POST /api/email-settings/test`; `email_test_messages` | `test_email_settings.py`; live sink run in `VERIFICATION_REPORT.md` | MET |
 | R-88 | Test e-mails can never reach a real inbox by accident: `[TEST]` subject, dry run default, live needs saved mode and `EMAIL_MODE=live`, password never read back | BRIEF (new) | `app/api/email_settings.py`; `email_config.effective()` | `test_email_settings.py` | MET |
 
+### 4.9 Roles, permissions and feature switches
+
+| ID | Requirement | Source | Implementation | Evidence | Status |
+|---|---|---|---|---|---|
+| R-89 | Every permission and access-control option is assignable from Roles & Permissions | BRIEF (new) | `#/roles`; `GET /api/roles/permissions`; role tree editor | `test_permission_tree.py`; browser check (44 inputs, 12 groups) | MET |
+| R-90 | Feature-level On/Off controls live only under Roles & Permissions; Overview is read-only status | BRIEF (new) | `#/roles` → Feature availability; `PATCH /api/features/{key}` | `test_feature_switches.py`; `docs/DECISIONS.md` D-29/D-30 | MET |
+| R-91 | Parent unchecked denies the module and removes its child assignments | BRIEF (new) | `syncPermissionTree`; `sanitized_permissions`; `effective_permissions` | `test_permission_tree.py` | MET |
+| R-92 | Parent checked makes children selectable but grants none of them | BRIEF (new) | Tree editor; `sanitized_permissions` never adds keys | `test_permission_tree.py` | MET |
+| R-93 | Only explicitly ticked children are granted; a child cannot work without its parent | BRIEF (new) | `permission_allowed`; `validate_permissions` | `test_permission_tree.py`; `test_authz.py` | MET |
+| R-94 | Navigation hides modules without parent access and the API enforces both | BRIEF (new) | `VIEW_PERM`/`showView`; `require` + effective set; feature gate | `test_permission_tree.py`; browser check: viewer sent to Overview | MET |
+| R-95 | Administrator-only permissions remain restricted to Administrators | BRIEF (new) | `ADMIN_ONLY_PERMISSIONS`; locked editor inputs; `validate_permissions`; admin keep-check | `test_permission_tree.py`; `test_roles_parity.py` | MET |
+| R-96 | The same rules extend to future modules | BRIEF (new) | Catalogue/parent-map completeness tests; feature registration test | `test_permission_tree.py`, `test_feature_switches.py` | MET |
+
 ## 5. Gaps, blockers and open items
 
 | ID | Item | Effect | Owner / next step |
@@ -195,7 +208,7 @@ payroll preparation is MET while payroll posting to the ledger is not built
 
 | Check | Command / source | Result |
 |---|---|---|
-| Route count | FastAPI `app.routes` | 232 API pairs; 92 HR + 4 legacy employee |
+| Route count | FastAPI `app.routes` | 238 API method entries; 92 HR + 4 legacy employee |
 | Test count | `python -m pytest -q` | 261 passed |
 | Schema | `alembic current` / `heads` | `0017_email_settings` |
 | Migration round-trip | upgrade → downgrade base → upgrade | pass (verification report §3) |

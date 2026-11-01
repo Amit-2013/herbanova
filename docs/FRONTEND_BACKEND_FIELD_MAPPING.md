@@ -621,9 +621,9 @@ API: `POST /api/discount-slabs` and `PATCH /api/discount-slabs/{id}` (`tax:write
 
 ---
 
-## 16. Users, roles and employees
+## 16. Roles & Permissions, logins and employees
 
-### 16.1 Users (`app.js:2441-2500`)
+### 16.1 Logins (`app.js:5450-5490`, screen `#/users`)
 
 | UI field | Request field | Schema (`CreateUserIn`) | Store (`users`) | Perm |
 |---|---|---|---|---|
@@ -635,19 +635,22 @@ API: `POST /api/discount-slabs` and `PATCH /api/discount-slabs/{id}` (`tax:write
 | Activate / deactivate | `is_active` | `UpdateUserIn.is_active` | `is_active` | `user:manage` |
 | Reset password | — | — | `password_hash`, `must_change_password`, `token_version` | `user:manage` |
 
-The temporary password is shown once in a modal (`showSecret()`, `app.js:2455-2461`) and is never stored in the browser. Two self-protection rules are enforced server-side: an administrator cannot change their own role, and the last active administrator cannot lose `user:manage`.
+The temporary password is shown once in a modal (`showSecret()`) and is never stored in the browser. Two self-protection rules are enforced server-side: an administrator cannot change their own role, and the last active administrator cannot lose `user:manage`.
 
-### 16.2 Roles (`app.js:2503-2528`)
+### 16.2 Roles, permissions and feature switches (`app.js:5491-5690`, screen `#/roles`)
 
 | UI field | Request field | Schema | Store | Perm |
 |---|---|---|---|---|
 | Role name (new) | `name` | `CreateRoleIn.name` | `roles.name` | `user:manage` |
 | Display name | `display_name` | `str \| None` | `display_name` | `user:manage` |
-| Permission checkboxes | `permissions[]` | `list[str]` | `role_permissions` | `user:manage` |
+| Permission checkboxes | `permissions[]` | `list[str]` | `role_permissions` (stored) and the effective set | `user:manage` |
+| Module switch | `enabled` | `FeatureToggle` | `feature_flags` | Administrator role only |
 
-The checkbox matrix is built from `GET /api/roles/permissions` (the server's 42-key catalogue), not from a hard-coded browser list. Permission changes take effect on the next request because the server re-reads the role set each time.
+The checkbox tree is built from `GET /api/roles/permissions` (the server's 44-key catalogue with `parent` and `admin_only`), not from a hard-coded browser list. A child input is disabled until its parent is ticked, and unticking the parent clears its children. The Access control panel (`renderAccessRules`) is generated from the same catalogue, so it cannot drift from the editor. Permission changes take effect on the next request because the server re-reads the role set each time.
 
-### 16.3 Employees (`app.js:2528-2560`)
+The Feature availability panel calls `GET /api/features` and `PATCH /api/features/{key}`. The Overview module list is read-only and has no switch. Switching a module off does not rewrite `roles.permissions`; the server removes its keys from the effective set and refuses its API prefixes (see `docs/permissions-matrix.md`).
+
+### 16.3 Employees (`app.js:5673-5760`)
 
 See 14.1. This screen uses the narrower `/api/employees` route, not `/api/hr/employees`.
 

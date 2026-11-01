@@ -227,6 +227,26 @@ There is no `md` role in the live database (see audit assumption A-01). "MD"
 access is therefore the Administrator, or a custom role the Administrator gives
 `hr:confidential`. No role was invented during verification.
 
+### 5.1 Roles & Permissions screen and the parent-child rules (browser)
+
+The new `#/roles` screen was driven in headless Chrome as the Administrator:
+
+| Check | Observed |
+|---|---|
+| Sidebar entry | **Roles & Permissions** present for the Administrator |
+| Header | "8 roles and 44 permissions. 13 module switches; 4 rights are reserved for the Administrator." |
+| Roles panel | 8 roles with stored permission counts; the Administrator shows 44 |
+| Feature availability | 13 modules; 12 with a Switch off button and Users and rights marked "Always on" |
+| Access control | Every catalogue key grouped by module, each child showing the parent it needs, 4 entries marked Admin only |
+| Tree editor (sales role) | 12 groups, 44 inputs, 4 admin-only inputs disabled, HR children disabled because `sales` lacks `hr:read`, `accounts:write` enabled because `sales` holds `accounts:read` |
+| Viewer opening `#/roles` | Redirected to Overview; the sidebar entry has `display:none`; no role rows rendered |
+
+A test-email and role edit earlier in the verification had left the seeded
+`sales` role missing `report:export` (audit row 404, 15:01). The permission was
+restored through `PATCH /api/roles` on 1 November 2026, so the live role matches
+the frozen baseline again (15 permissions); that restore added its own audit row.
+No other role row differs from the baseline.
+
 ---
 
 ## 6. Module-by-module result
@@ -402,6 +422,9 @@ and captured after the data had loaded.
 | HR `#/hr` as Administrator | captured, reviewed | captured, reviewed | captured, reviewed | — |
 | HR `#/hr` as viewer | captured, reviewed | — | — | — |
 | HR `#/hr` as HR manager | captured, reviewed | — | — | — |
+| Roles & Permissions `#/roles` | captured, reviewed | — | — | — |
+| Logins and employees `#/users` | captured, reviewed | — | — | — |
+| Settings → Email and SMTP | captured, reviewed | — | — | — |
 
 Findings from the visual review:
 

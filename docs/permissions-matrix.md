@@ -22,6 +22,32 @@ Two endpoints add their own administrator checks rather than relying on `require
 - `POST /api/approvals/{id}/decide` — a sales-order request whose reasons include `credit_limit` can only be decided by the Administrator (`app/api/approvals.py:200-202`); post-billing amendment requests can only be decided by an Administrator **other than the requester** (`approvals.py:228-232`); the requester or creator of a sales order can never decide it (`approvals.py:205-207`).
 - `GET /api/dashboard` — the payload is built per permission: stock sections need `stock:read`; orders, top products and category need `sales:read`; ageing needs `accounts:read`; approvals need `approval:read`; follow-ups need `lead:read`; active products need `product:read`; activity needs `audit:read`. The Phase 3 insight cards repeat the same gates: pipeline sales/top customers/credit/corrections need `sales:read`, pipeline leads needs `lead:read`, customer outstanding needs `accounts:read`, PO ageing needs `stock:read`, HR today needs `hr:read`. A section the caller cannot read is `null`, never zero, and the chart's unreadable side is masked in the payload (`app/api/dashboard.py:825-975`). `GET /api/dashboard/expiry` adds its own `stock:read` gate (`dashboard.py:582`). The section-by-section matrix is in `docs/DASHBOARD_FEATURES.md` §7.
 
+## Roles & Permissions screen
+
+`#/roles` (sidebar: **Roles & Permissions**, People and admin group) is the single screen for access control. It is offered only to a role holding `user:manage`; every API behind it repeats the check on the server.
+
+| Panel | What it does | API |
+|---|---|---|
+| Roles | Lists every role with its stored and effective permission count and user count; **Edit permissions** opens the tree editor | `GET /api/roles`, `PATCH /api/roles/{id}`, `POST /api/roles` |
+| Feature availability | One on/off switch per module. The Users and rights module is locked on, so the screen that switches the others back on can never be disabled | `GET /api/features`, `PATCH /api/features/{key}` |
+| Access control | The whole catalogue grouped by module: each top-level gate, each child with the parent it needs, and the keys reserved for the Administrator | `GET /api/roles/permissions` |
+
+The editor renders all 44 keys in 12 groups and applies these rules:
+
+| Rule | Browser | Server |
+|---|---|---|
+| Parent unchecked means no module access | Child inputs are disabled and unticked | A child stored without its parent is removed from the effective set (`rbac.role_permissions`) and dropped on save |
+| Parent checked makes children selectable | Child inputs become enabled | The parent must be present for any child to be usable |
+| Checking the parent grants no child | Children stay unticked | `sanitized_permissions` never adds a key the caller did not send |
+| Only explicit children are granted | Only ticked children are submitted | The submitted set is stored as sent, minus orphans |
+| Unchecking the parent removes children | The browser clears them and posts without them | `validate_permissions` drops them and the audit row lists `dropped_children` |
+| A child cannot work without its parent | Disabled control | `permission_allowed()` fails closed |
+| Navigation hides modules without the parent | `showView` follows the read permission and the feature switch | The API gate returns 403 regardless of the menu |
+| Administrator-only rights stay with the Administrator | Inputs are locked for every role except `admin` | `validate_permissions` refuses the key on any other role; the Administrator role cannot save without them |
+| Feature switches are central | Overview shows module status read-only; only Roles & Permissions has switches | `_feature_gate` refuses the module's API prefixes and removes its permissions from the effective set; only the Administrator role may call `/api/features` |
+
+`tests/test_permission_tree.py` (11 tests) locks the catalogue, parent map and admin-only set together with the server rules; `tests/test_feature_switches.py` (10 tests) covers the module switches and the API gate. The browser was also checked: a viewer opening `#/roles` is returned to Overview with the link hidden, and the editor for the `sales` role showed 44 inputs, 12 groups, 4 disabled admin-only rights and HR children disabled because `sales` lacks `hr:read` (`docs/VERIFICATION_REPORT.md` §5).
+
 ## Roles
 
 | Role | Live permissions | Origin | Intended use |
@@ -200,6 +226,8 @@ The catalogue has **44** keys. `accounts:reports` and `email:manage` are Adminis
 | `db:reset` requires the secondary password | VERIFIED (code) | `app/api/db_reset.py`; `app/api/admin.py` |
 | Frozen role parity with the seeded roles | **VERIFIED** | `tests/test_roles_parity.py` — catalogue coverage, admin completeness, baseline subset, seeded-role equality and unknown-key rejection |
 | Authentication, permission denial, the Administrator role gate, immediate DB-role edits, baseline fallback, deactivation and forced password change | **VERIFIED** | `tests/test_authz.py` (7 tests) |
+| Parent-child rules, admin-only locking and API enforcement | **VERIFIED** | `tests/test_permission_tree.py` (11 tests); browser check in `docs/VERIFICATION_REPORT.md` §5 |
+| Central module switches and the API gate | **VERIFIED** | `tests/test_feature_switches.py` (10 tests); `docs/VERIFICATION_REPORT.md` §5 |
 | Live role matrix for HR, payroll, accounts reporting and the audit/user surfaces | **VERIFIED** | `docs/VERIFICATION_REPORT.md` §5: admin/admin2 `200`, HR manager `200` on HR and `403` on payroll/bank/audit/users, business roles `403` on HR |
 | Every individual guarded route is exercised | **PARTIAL** | Decision paths are covered by `tests/test_approvals.py`, `tests/test_hr.py` and the Phase 3 live GET sweep (75 routes); the gate-type tests are not repeated for every endpoint |
 
