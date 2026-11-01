@@ -2471,12 +2471,14 @@ async function openHr() {
     renderHr();
     return;
   }
-  const [d, e] = await Promise.all([
+  const [d, e, f] = await Promise.all([
     api(`/api/hr/dashboard?from_date=${encodeURIComponent(state.hr.from)}&to_date=${encodeURIComponent(state.hr.to)}`),
-    api("/api/hr/employees?page_size=200&sort=name")]);
+    api("/api/hr/employees?page_size=200&sort=name"),
+    api("/api/hr/saved-filters?view=employees")]);
   state.hr.dashboard = d.ok ? d.body : null;
   state.hr.error = d.ok ? null : detail(d.body);
   state.hr.employees = e.ok ? e.body : [];
+  state.hr.saved = f.ok ? f.body : [];
   if (state.view === "hr") { renderHead(); renderHr(); }
 }
 function setHrRangePreset(key) {
@@ -2656,6 +2658,54 @@ function renderHrDirectory() {
   empty($("#hrempty"), !list.length, all.length ? "No employee matches these filters." : "No employees yet.",
     all.length ? "Clear the search, status or department filter." : "Add the first employee with “New employee”.");
 }
+function fillHrSaved() {
+  const sel = $("#hrSaved");
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = `<option value="">Saved filters</option>` +
+    (state.hr.saved || []).map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
+  sel.value = (state.hr.saved || []).some(f => String(f.id) === keep) ? keep : "";
+}
+function applyHrFilter() {
+  const id = Number($("#hrSaved").value);
+  const f = (state.hr.saved || []).find(x => x.id === id);
+  if (!f) { toast({ok: false, status: 422, body: {detail: "Choose a saved filter first."}}, "No filter"); return; }
+  const p = f.params || {};
+  $("#hrq").value = p.q || "";
+  $("#hrStatus").value = p.status || "";
+  $("#hrDept").value = p.department || "";
+  renderHrDirectory();
+}
+function hrFilterSaveForm() {
+  $("#hrSavedBox").innerHTML = `<form id="hrSavedForm" novalidate><h3>Save this view</h3>
+    <label>Name</label><input name="name" maxlength="60" autocomplete="off">
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="submit">Save filter</button>
+      <button class="btn ghost" type="button" data-act="hr-filter-cancel">Cancel</button></div></form>`;
+}
+async function saveHrFilter(form) {
+  const name = form.elements.name.value.trim(), err = $(".err", form);
+  err.textContent = "";
+  if (name.length < 2) { err.textContent = "Give the view a name."; return; }
+  const res = await api("/api/hr/saved-filters", {method: "POST", body: {name, view: "employees",
+    params: {q: $("#hrq").value.trim(), status: $("#hrStatus").value,
+             department: $("#hrDept").value}}});
+  toast(res, res.ok ? "Filter saved" : "Filter not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  $("#hrSavedBox").innerHTML = "";
+  state.hr.saved = [...(state.hr.saved || []), res.body].sort((a, b) => a.name.localeCompare(b.name));
+  fillHrSaved();
+  $("#hrSaved").value = String(res.body.id);
+}
+async function deleteHrFilter() {
+  const id = Number($("#hrSaved").value);
+  if (!id) { toast({ok: false, status: 422, body: {detail: "Choose a saved filter first."}}, "No filter"); return; }
+  const res = await api(`/api/hr/saved-filters/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Filter deleted" : "Filter not deleted");
+  if (!res.ok) return;
+  state.hr.saved = (state.hr.saved || []).filter(f => f.id !== id);
+  fillHrSaved();
+}
 function fillHrDepartments(d) {
   const sel = $("#hrDept"), keep = sel.value;
   const names = new Set((d.by_department || []).map(x => x.department));
@@ -2705,6 +2755,7 @@ function renderHr() {
   $("#hrTo").value = state.hr.to;
   $("#hrRangeNote").textContent = `${fmtDate(d.from_date)} – ${fmtDate(d.to_date)} · today ${fmtDate(d.date)}`;
   fillHrDepartments(d);
+  fillHrSaved();
   renderHrKpis(d);
   renderHrAttention(d);
   renderHrTrend(d);
@@ -6250,6 +6301,10 @@ document.addEventListener("click", e => {
     else if (act === "hr-employees") hrEmployees();
     else if (act === "hr-range-apply") applyHrRange();
     else if (act === "hr-refresh") openHr();
+    else if (act === "hr-filter-apply") applyHrFilter();
+    else if (act === "hr-filter-save") hrFilterSaveForm();
+    else if (act === "hr-filter-cancel") { $("#hrSavedBox").innerHTML = ""; }
+    else if (act === "hr-filter-delete") deleteHrFilter();
     else if (act === "hr-export") exportHr();
     else if (act === "hr-profile") hrProfile(a.dataset.id);
     else if (act === "hr-profile-tab") hrProfileDrawer(a.dataset.tab);
@@ -6451,6 +6506,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "hrNoticeForm") saveHrNotice(f);
   else if (f.id === "hrLockForm") saveHrLock(f);
   else if (f.id === "hrUnlockForm") saveHrUnlock(f);
+  else if (f.id === "hrSavedForm") saveHrFilter(f);
   else if (f.id === "srForm") saveSchedule(f);
   else if (f.id === "srRecipientForm") saveRecipient(f);
 });

@@ -934,6 +934,13 @@
           <select id="hrDept" aria-label="Filter by department"><option value="">All departments</option></select>
           <button class="btn ghost" type="button" data-act="hr-refresh">Refresh</button>
         </div>
+        <div class="toolbar hr-saved">
+          <select id="hrSaved" aria-label="Saved filters"><option value="">Saved filters</option></select>
+          <button class="btn ghost sm" type="button" data-act="hr-filter-apply">Apply</button>
+          <button class="btn ghost sm" type="button" data-act="hr-filter-save">Save current</button>
+          <button class="btn ghost sm" type="button" data-act="hr-filter-delete">Delete</button>
+        </div>
+        <div id="hrSavedBox"></div>
         <div class="tw"><table>
           <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Joined</th><th>Status</th><th></th></tr></thead>
           <tbody id="hrrows"></tbody>
