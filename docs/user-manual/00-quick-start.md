@@ -33,11 +33,11 @@ The message is **"Username or password is incorrect."** for every failed sign-in
 
 **VERIFIED (code):** `MAX_FAILED = 5` and `LOCK_MINUTES = 15` in `app/services/lockout.py:14-15`; the failure is recorded per user record, so changing the letter case of the username does not reset it; a successful sign-in clears the count (`lockout.py:29-48`). The rate limit is `20/minute` at `app/api/auth.py:30` and the 429 body is set in `app/main.py:27-30`.
 
-A lockout is written to the audit trail as `auth.lockout` (`app/api/auth.py:65`). An administrator can unlock the account from **Users, roles and employees** by resetting the password, which also ends every open session.
+A lockout is written to the audit trail as `auth.lockout` (`app/api/auth.py:65`). An administrator can unlock the account from **Logins and employees** by resetting the password, which also ends every open session.
 
 ## 1.3 Temporary passwords and the first sign-in
 
-An administrator creates a user or resets a password in **Users, roles and employees**. The server generates a temporary password that meets policy and shows it **once**; the administrator must pass it to you directly. The account is marked "Temporary" and the server requires a password change before anything else.
+An administrator creates a user or resets a password in **Logins and employees** (Settings & Administration → Logins and employees). The server generates a temporary password that meets policy and shows it **once**; the administrator must pass it to you directly. The account is marked "Temporary" and the server requires a password change before anything else.
 
 Signing in with a temporary password opens a blocking **Set a new password** screen instead of the main shell. The server allows only `/api/auth/me`, `/api/auth/logout` and `/api/auth/change-password` until the password is replaced (`app/core/rbac.py:27-29, 74-100`), so there is no way past this screen except changing the password or signing out.
 
@@ -51,7 +51,7 @@ The application checks that the two entries match, that the new password meets t
 
 If you ever see **403 You must change your password before using the application** without the screen, sign out and sign in again; the identity in the browser is out of date. Do not ask an administrator to read or share your password.
 
-**Password policy (enforced by the server and shown in the Users screen):** at least 12 characters and at most 128; at least three of lowercase, uppercase, digits and symbols; not the same as the username; the new password must differ from the current one. **VERIFIED (code):** `app/core/security.py:24-25, 53-73`; `app/api/auth.py:97-104`.
+**Password policy (enforced by the server and shown in the Logins screen):** at least 12 characters and at most 128; at least three of lowercase, uppercase, digits and symbols; not the same as the username; the new password must differ from the current one. **VERIFIED (code):** `app/core/security.py:24-25, 53-73`; `app/api/auth.py:97-104`.
 
 ## 1.4 Sessions
 
@@ -68,7 +68,7 @@ If you leave a shared machine, sign out. Closing the tab does not clear the cook
 
 ## 1.5 What you will see
 
-The sidebar has 17 entries. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
+The sidebar has 20 entries. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
 
 | Sidebar entry | Usually requires | What it is for |
 |---|---|---|
@@ -85,10 +85,13 @@ The sidebar has 17 entries. Most are filtered by your permissions when you sign 
 | Approvals | `approval:read` | Credit-limit, sales-order, post-billing and HR requests |
 | Accounting & Finance | `accounts:read` | Outstanding, party ledgers, GST register, trial balance |
 | Reports | Per-report permission; `report:export` to download | The single reports page |
+| Geography | `sales:read` | Sales, returns and GST by buyer state |
 | HR Management | `hr:read` or `hr:attendance_self` | Employees, attendance, leave, OD, payroll |
-| Settings & Administration | `user:manage`, `tax:read`, `audit:read` or `hr:read` | Company profile, tax, users, audit, HR policies |
+| **Roles & Permissions** | `user:manage` (Administrator role for module switches) | Role tree editor, permission catalogue, access-control rules and module On/Off switches |
+| Settings & Administration | `user:manage`, `tax:read`, `audit:read` or `hr:read` | Company profile, tax, logins/employees, email and audit |
+| Scheduled reports | `email:manage` | Report packs, recipients and the delivery log |
 
-**VERIFIED (code):** menu visibility at `static/js/app.js:86-103`; reports permissions at `app/api/reports.py:83-85`; the full permission-to-role table is in [`../permissions-matrix.md`](../permissions-matrix.md).
+**VERIFIED (code):** menu visibility at `static/js/app.js:86-110`; reports permissions at `app/api/reports.py:83-85`; the full permission-to-role table is in [`../permissions-matrix.md`](../permissions-matrix.md).
 
 An **employee** without `hr:read` sees the HR home page with their own attendance only; the directory, leave/OD registers and payroll buttons are hidden and refused by the server (`static/js/app.js:602-610`).
 
@@ -112,7 +115,21 @@ An **employee** without `hr:read` sees the HR home page with their own attendanc
 1. Check that you are using the address ending in `/ui/`.
 2. Check the username spelling; case does not matter.
 3. If the message is "locked", wait 15 minutes.
-4. If it still fails, ask an administrator to reset the password. The administrator can see whether the account is **Temporary** or **Locked** in the Users screen and can end every open session by resetting.
+4. If it still fails, ask an administrator to reset the password. The administrator can see whether the account is **Temporary** or **Locked** in the Logins screen and can end every open session by resetting.
 5. If the page loads but every panel is empty and the address bar is correct, the session may have expired; sign in again. If it persists, report your username, the time and the exact message — never your password.
+
+## 1.8 Roles and permissions (administrators)
+
+Open **Roles & Permissions** in the sidebar. The screen has three parts:
+
+| Part | What an administrator does |
+|---|---|
+| Roles | Review each role's permission and user count; **Edit permissions** opens the tree editor; **New role** creates a custom role |
+| Feature availability | Switch a module on or off for everyone. A switched-off module keeps its stored role assignments but grants nobody access until it is switched back on |
+| Access control | Read the whole catalogue: each module gate, each child permission with the parent it needs, and the rights reserved for the Administrator |
+
+The tree editor follows one rule: a **parent** permission is the module gate. Ticking it makes its children selectable but grants none of them. Tick each child you want; unticking the parent clears its children. A child without its parent is refused by the server. Four rights (`approval:credit_limit`, `invoice:edit_post_billing`, `email:manage`, `db:reset`) stay locked to the Administrator and cannot be given to another role.
+
+Module switches are Administrator-only even if a custom role holds `user:manage`. User accounts and temporary passwords are managed separately under **Settings & Administration → Logins and employees**. Every role change and every switch is written to the audit trail.
 
 **Next chapter (planned):** 2. Finding your way — navigation, roles and permissions in detail.
