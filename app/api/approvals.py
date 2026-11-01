@@ -108,6 +108,8 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
     users = {u.id: u.username for u in db.scalars(select(User).where(User.id.in_(uids))).all()}
     admin = is_admin(db, user)
     perms = role_permissions(db, user)
+    from ..services.hr import scoped_employee_ids
+    hr_scope = scoped_employee_ids(db, user)
 
     def deciders(a: ApprovalRequest) -> list[str]:
         """Who may decide, in words taken from the same rule `can_decide` uses.
@@ -140,7 +142,15 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
         if a.record_type == "invoice_post_billing":
             return admin
         need = HR_DECIDE_PERMISSION.get(a.record_type)
-        return bool(need) and (admin or need in perms)
+        if not (need and (admin or need in perms)):
+            return False
+        # A reporting manager decides only inside their own reporting chain;
+        # HR-wide roles have no scope restriction (hr_scope is None).
+        if hr_scope is not None and a.record_type != "hr_payroll":
+            emp_id = (a.detail or {}).get("employee_id")
+            if emp_id is None or int(emp_id) not in hr_scope:
+                return False
+        return True
 
     out = []
     for a in rows:
@@ -201,6 +211,23 @@ def list_approvals(response: Response, status: str | None = None,
             & perms) and not is_admin(db, user):
         rows = [a for a in rows if not a.record_type.startswith("hr_")
                 or a.requested_by == user.id]
+    # Payroll amounts are salary data. Only the payroll approver (and the
+    # person who submitted the request) may see a payroll approval at all.
+    if not is_admin(db, user) and "hr:payroll_approve" not in perms:
+        rows = [a for a in rows if a.record_type != "hr_payroll"
+                or a.requested_by == user.id]
+    # A reporting manager sees only their own chain's HR requests.
+    from ..services.hr import scoped_employee_ids
+    scope = scoped_employee_ids(db, user)
+    if scope is not None:
+        def _in_scope(a) -> bool:
+            if not a.record_type.startswith("hr_"):
+                return True
+            if a.requested_by == user.id:
+                return True
+            emp_id = (a.detail or {}).get("employee_id")
+            return emp_id is not None and int(emp_id) in scope
+        rows = [a for a in rows if _in_scope(a)]
     return _build(db, rows, user)
 
 

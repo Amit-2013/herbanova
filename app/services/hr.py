@@ -10,12 +10,19 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..core.rbac import is_admin, role_permissions
 from ..models.core import ApprovalRequest
 from ..models.hr import (Attendance, Holiday, LeaveApplication, LeaveBalance, LeaveType, Shift,
                          WorkLocation)
 from ..models.users import Employee
 
 ZERO = Decimal(0)
+
+# Bank, PAN, UAN and ESI are personal identifiers the brief restricts to the
+# Administrator, the MD-equivalent confidential right and the HR roles the
+# Administrator allows. Everyone else sees the last four characters only.
+CONFIDENTIAL_EMPLOYEE_FIELDS = ("bank_account_no", "bank_ifsc", "pan", "uan", "esi_no")
+FULL_HR_SCOPE_KEYS = ("hr:write", "hr:payroll_prepare", "hr:confidential")
 
 # Office timings are wall-clock times in the business's time zone. Attendance is
 # stored as a UTC instant, so late/early must be compared after converting to
@@ -65,6 +72,60 @@ def employee_for_user(db: Session, user) -> Employee | None:
     if not getattr(user, "employee_id", None):
         return None
     return db.get(Employee, user.employee_id)
+
+
+def team_employee_ids(db: Session, manager_id: int) -> set[int]:
+    """The manager and everyone below them in the reporting chain.
+
+    Depth is bounded by the set itself, so a bad manager_id cycle cannot loop.
+    """
+    ids = {manager_id}
+    frontier = [manager_id]
+    while frontier:
+        children = set(db.scalars(select(Employee.id).where(
+            Employee.manager_id.in_(frontier))).all())
+        frontier = list(children - ids)
+        ids |= children
+    return ids
+
+
+def scoped_employee_ids(db: Session, user) -> set[int] | None:
+    """Which employees the viewer may act on. None means the whole company.
+
+    HR administrators (hr:write / payroll / confidential) and the Administrator
+    see everyone; a reporting manager sees their reporting chain; everyone else
+    sees only themselves. An unlinked login sees nobody.
+    """
+    if is_admin(db, user):
+        return None
+    perms = role_permissions(db, user)
+    if any(k in perms for k in FULL_HR_SCOPE_KEYS):
+        return None
+    me = employee_for_user(db, user)
+    if not me:
+        return set()
+    if {"hr:attendance_manage", "hr:leave_approve"} & perms:
+        return team_employee_ids(db, me.id)
+    return {me.id}
+
+
+def may_view_confidential(db: Session, user, employee: Employee) -> bool:
+    """Full bank/ID values: Administrator, confidential HR rights, or the person."""
+    if is_admin(db, user):
+        return True
+    if role_permissions(db, user) & {"hr:confidential", "hr:payroll_prepare"}:
+        return True
+    me = employee_for_user(db, user)
+    return bool(me and me.id == employee.id)
+
+
+def mask_secret(value, keep: int = 4) -> str | None:
+    if value is None or value == "":
+        return value
+    text = str(value)
+    if len(text) <= keep:
+        return "*" * len(text)
+    return "•" * (len(text) - keep) + text[-keep:]
 
 
 def distance_m(lat1, lon1, lat2, lon2) -> float:

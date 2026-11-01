@@ -34,6 +34,34 @@ def _request(db: Session, approval_id: int) -> ApprovalRequest:
     return ar
 
 
+def _request_employee_id(db: Session, ar: ApprovalRequest) -> int | None:
+    kind = ar.record_type
+    if kind == "hr_leave":
+        app = db.get(LeaveApplication, ar.record_id)
+        return app.employee_id if app else None
+    if kind == "hr_od":
+        od = db.get(ODRequest, ar.record_id)
+        return od.employee_id if od else None
+    if kind == "hr_attendance_correction":
+        corr = db.get(AttendanceCorrection, ar.record_id)
+        return corr.employee_id if corr else None
+    if kind == "hr_geofence_exception":
+        att_id = (ar.detail or {}).get("attendance_id")
+        att = db.get(Attendance, int(att_id)) if att_id else None
+        return att.employee_id if att else None
+    return (ar.detail or {}).get("employee_id")
+
+
+def _assert_team_scope(db: Session, ar: ApprovalRequest, user) -> None:
+    """A reporting manager may only decide requests for their own team."""
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if scope is None:
+        return
+    emp_id = _request_employee_id(db, ar)
+    if emp_id is None or int(emp_id) not in scope:
+        raise HTTPException(403, "That request is outside your team")
+
+
 def decide_hr_request(db: Session, approval_id: int, body, user):
     ar = _request(db, approval_id)
     if ar.requested_by == user.id:
@@ -42,10 +70,12 @@ def decide_hr_request(db: Session, approval_id: int, body, user):
     if kind in ("hr_leave", "hr_od"):
         if not _perm(db, user, "hr:leave_approve"):
             raise HTTPException(403, "Your role cannot decide leave or on-duty requests")
+        _assert_team_scope(db, ar, user)
         handler = _leave if kind == "hr_leave" else _od
     elif kind in ("hr_attendance_correction", "hr_geofence_exception"):
         if not _perm(db, user, "hr:attendance_manage"):
             raise HTTPException(403, "Your role cannot decide attendance corrections")
+        _assert_team_scope(db, ar, user)
         handler = _correction if kind == "hr_attendance_correction" else _geofence
     elif kind == "hr_payroll":
         if not _perm(db, user, "hr:payroll_approve"):
