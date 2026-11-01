@@ -251,6 +251,110 @@ def working_days(db: Session, employee: Employee, year: int, month: int) -> list
     return out
 
 
+def monthly_attendance(db: Session, user, *, year: int, month: int,
+                       employee_id: int | None = None,
+                       department: str | None = None) -> dict:
+    """One month of statuses per employee, plus the counts the screen and the
+    printable sheet both use.
+
+    Days with no attendance row are returned with a null status and no numbers:
+    an unrecorded day is a gap, never an assumed absence.
+    """
+    from fastapi import HTTPException
+
+    if not 1 <= month <= 12:
+        raise HTTPException(422, "month must be between 1 and 12")
+    if not is_admin(db, user) and not role_permissions(db, user) & {
+            "hr:read", "hr:attendance_self"}:
+        raise HTTPException(403, "Your role cannot view attendance")
+    scope = scoped_employee_ids(db, user)
+    if employee_id:
+        if scope is not None and employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+        emp = db.get(Employee, employee_id)
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+        employees = [emp]
+    else:
+        stmt = select(Employee).where(Employee.status == "active")
+        if scope is not None:
+            stmt = stmt.where(Employee.id.in_(scope or {-1}))
+        if department:
+            stmt = stmt.where(Employee.department == department)
+        employees = list(db.scalars(stmt.order_by(Employee.code)).all())
+        if len(employees) > 400:
+            raise HTTPException(422, "More than 400 employees match; filter by department "
+                                     "or choose one employee")
+    first = date(year, month, 1)
+    last = date(year, month, monthrange(year, month)[1])
+    ids = [e.id for e in employees]
+    rows = db.scalars(select(Attendance).where(
+        Attendance.employee_id.in_(ids or [-1]),
+        Attendance.date >= first, Attendance.date <= last)).all()
+    by_emp: dict[int, dict[date, Attendance]] = {}
+    for row in rows:
+        by_emp.setdefault(row.employee_id, {})[row.date] = row
+    days = [date(year, month, d) for d in range(1, last.day + 1)]
+    totals = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
+              "late_days": 0, "half_days": 0, "overtime_minutes": 0, "worked_minutes": 0,
+              "missing_days": 0}
+    out = []
+    for emp in employees:
+        cal = by_emp.get(emp.id, {})
+        counts = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
+                  "late_days": 0, "half_days": 0, "weekly_off_days": 0, "holiday_days": 0,
+                  "correction_pending": 0, "missing_days": 0, "overtime_minutes": 0,
+                  "worked_minutes": 0}
+        calendar = []
+        for day in days:
+            row = cal.get(day)
+            if row is None:
+                counts["missing_days"] += 1
+                calendar.append({"date": day, "status": None})
+                continue
+            status = row.status
+            if status in ("present", "late", "early_departure"):
+                counts["present_days"] += 1
+            elif status == "half_day":
+                counts["present_days"] += 0.5
+                counts["half_days"] += 1
+            elif status in ("paid_leave", "unpaid_leave"):
+                if row.leave_portion in ("first_half", "second_half"):
+                    counts["leave_days"] += 0.5
+                    counts["present_days"] += 0.5
+                else:
+                    counts["leave_days"] += 1
+            elif status == "od":
+                counts["od_days"] += 1
+            elif status == "absent":
+                counts["absent_days"] += 1
+            elif status == "weekly_off":
+                counts["weekly_off_days"] += 1
+            elif status == "holiday":
+                counts["holiday_days"] += 1
+            elif status == "correction_pending":
+                counts["correction_pending"] += 1
+            if row.late_minutes:
+                counts["late_days"] += 1
+            counts["overtime_minutes"] += row.overtime_minutes or 0
+            counts["worked_minutes"] += row.worked_minutes or 0
+            calendar.append({"date": day, "status": status,
+                             "leave_portion": row.leave_portion,
+                             "check_in": row.check_in, "check_out": row.check_out,
+                             "worked_minutes": row.worked_minutes,
+                             "overtime_minutes": row.overtime_minutes,
+                             "late_minutes": row.late_minutes})
+        for key in totals:
+            totals[key] += counts[key]
+        out.append({"employee_id": emp.id, "code": emp.code, "name": emp.full_name,
+                    "department": emp.department, "designation": emp.designation,
+                    "summary": counts, "calendar": calendar})
+    totals["present_days"] = float(totals["present_days"])
+    totals["leave_days"] = float(totals["leave_days"])
+    return {"year": year, "month": month, "days": days, "weekdays": [d.weekday() for d in days],
+            "employees": out, "totals": totals}
+
+
 def active_period_lock(db: Session, scope: str, day: date) -> PeriodLock | None:
     """The active lock covering that day's month, if any."""
     return db.scalar(select(PeriodLock).where(

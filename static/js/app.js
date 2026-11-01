@@ -2726,8 +2726,8 @@ function renderHr() {
   // Payroll is a closed book: the API needs hr:payroll_prepare to even list a period.
   $$('#v-hr [data-act="hr-payroll"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:payroll_prepare"))));
-  // Shift, notices and locks are HR/administrator settings, not reader controls.
-  ["hr-shifts", "hr-notices", "hr-locks"].forEach(a =>
+  // Shift, notices, locks and letter templates are HR/administrator settings.
+  ["hr-shifts", "hr-notices", "hr-locks", "hr-letters"].forEach(a =>
     $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !(wholeTeam && can("hr:write")))));
   $$('#v-hr [data-act="hr-reports"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:reports"))));
@@ -2785,16 +2785,18 @@ function hrAttention(kind) {
 }
 /* ---------- employee profile ---------- */
 async function hrProfile(id) {
-  const [r, bal, br, off, sh] = await Promise.all([
+  const [r, bal, br, off, sh, lt] = await Promise.all([
     api(`/api/hr/employees/${id}/profile`),
     api(`/api/hr/leave/balances?employee_id=${id}`),
-    api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts")]);
+    api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts"),
+    api("/api/hr/letters/templates")]);
   if (!r.ok) { toast(r, "Employee not loaded"); return; }
   const names = rows => Object.fromEntries((rows && rows.ok ? rows.body : []).map(x => [x.id, x.name]));
   state.hr.profile = {...r.body,
     balances: bal.ok ? bal.body.balances : [],
     balanceYear: bal.ok ? bal.body.year : null,
-    branchNames: names(br), officeNames: names(off), shiftNames: names(sh)};
+    branchNames: names(br), officeNames: names(off), shiftNames: names(sh),
+    letterTemplates: lt.ok ? lt.body.templates.filter(t => t.active) : []};
   hrProfileDrawer("overview");
 }
 function hrProfileValue(value) {
@@ -2865,14 +2867,28 @@ function hrProfileHistory(p) {
       <td><code>${esc(JSON.stringify(x.changes || {}))}</code></td></tr>`).join("") || '<tr><td colspan="4" class="empty-row">No changes recorded yet.</td></tr>'}
     </tbody></table></div>`;
 }
+function hrProfileOutputs(p) {
+  const e = p.employee;
+  const letters = (p.letterTemplates || []).map(t =>
+    `<button class="btn ghost sm" type="button" data-act="hr-letter" data-code="${esc(t.code)}" data-emp="${e.id}">${esc(t.name)} (PDF)</button>`).join("");
+  return `<div class="actions hr-wrap" style="margin-top:0">
+      <button class="btn ghost" type="button" data-act="hr-card" data-emp="${e.id}">ID card (PDF)</button>
+      <button class="btn ghost" type="button" data-act="hr-statement" data-emp="${e.id}">Leave statement (PDF)</button>
+    </div>
+    <h3 class="hr-sub">Letters</h3>
+    <p class="note">Each letter is filled on the server from this record. A date the record does not hold stops the letter instead of printing a blank, and every download is audited.</p>
+    <div class="actions hr-wrap">${letters || '<span class="muted">No active letter template.</span>'}</div>`;
+}
 function hrProfileDrawer(tab) {
   const p = state.hr.profile;
   if (!p) return;
   const e = p.employee;
   const tabs = [["overview", "Overview"], ["documents", `Documents (${(p.documents || []).length})`],
-                ["assets", `Assets (${(p.assets || []).length})`], ["history", "History"]];
+                ["assets", `Assets (${(p.assets || []).length})`], ["outputs", "Letters & ID"],
+                ["history", "History"]];
   const body = tab === "documents" ? hrProfileDocuments(p)
     : tab === "assets" ? hrProfileAssets(p)
+    : tab === "outputs" ? hrProfileOutputs(p)
     : tab === "history" ? hrProfileHistory(p) : hrProfileOverview(p);
   openDrawer(`${e.full_name} · ${e.code}`,
     `${e.designation || "No designation"} · ${e.department || "No department"} · ${e.status}`, `
@@ -2966,6 +2982,70 @@ async function saveHrAssetReturn(form) {
   if (!res.ok) { err.textContent = detail(res.body); return; }
   await hrProfile(emp);
   hrProfileDrawer("assets");
+}
+/* ---------- letters and printable output ---------- */
+async function hrLetters() {
+  const r = await api("/api/hr/letters/templates");
+  if (!r.ok) { toast(r, "Templates not loaded"); return; }
+  state.hr.letterTemplates = r.body.templates;
+  const placeholders = (r.body.placeholders || []).map(x => `<code>{${esc(x)}}</code>`).join(" ");
+  openDrawer("Letter templates", "Edits change the wording of every future letter. Every generated letter is a draft until signed and sealed.", `
+    <p class="note">Placeholders are filled from the employee record: ${placeholders}. A word in braces that is not on this list is refused when you save.</p>
+    <div class="tw"><table><thead><tr><th>Template</th><th>Code</th><th>Status</th><th></th></tr></thead><tbody>
+      ${r.body.templates.map(t => `<tr><td class="strong">${esc(t.name)}</td><td>${esc(t.code)}</td>
+        <td><span class="chip ${t.active ? "ok" : "off"}">${t.active ? "active" : "retired"}</span></td>
+        <td class="rowacts"><button class="btn ghost sm" type="button" data-act="hr-letter-edit" data-id="${t.id}">Edit</button></td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="note">Open an employee's profile and choose “Letters &amp; ID” to download a filled letter, an ID card or a leave statement.</p>`, true);
+}
+function hrLetterForm(id) {
+  const t = (state.hr.letterTemplates || []).find(x => x.id === Number(id));
+  if (!t) return;
+  openDrawer(`Edit ${t.name}`, "The body is plain text. Blank lines separate paragraphs.", `
+    <form id="hrLetForm" data-id="${t.id}" novalidate>
+      <label>Template name</label><input name="name" value="${esc(t.name)}" maxlength="120" autocomplete="off">
+      <label>Body</label><textarea name="body" rows="16" spellcheck="false">${esc(t.body)}</textarea>
+      <label class="check"><input type="checkbox" name="active"${t.active ? " checked" : ""}> Active — a retired template cannot generate letters</label>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save template</button><button class="btn ghost" type="button" data-act="hr-letters">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrLetterTemplate(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  if (f.name.value.trim().length < 3 || f.body.value.trim().length < 20) {
+    err.textContent = "Give the template a name and a body of at least 20 characters."; return;
+  }
+  const res = await api(`/api/hr/letters/templates/${form.dataset.id}`, {method: "PATCH", body: {
+    name: f.name.value.trim(), body: f.body.value.trim(), active: f.active.checked}});
+  toast(res, res.ok ? "Template saved" : "Template not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrLetters();
+}
+async function downloadOutput(url) {
+  const res = await fetch(url, {credentials: "same-origin"});
+  if (!res.ok) {
+    let message = `Download failed (${res.status})`;
+    try { message = detail(await res.json()) || message; } catch (err) { /* not JSON */ }
+    toast({ok: false, body: {detail: message}}, "Not downloaded");
+    return;
+  }
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const found = /filename="?([^";]+)"?/.exec(disposition);
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(await res.blob());
+  link.download = found ? found[1] : "hr-output.pdf";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+}
+function downloadAttendanceSheet() {
+  const [y, m] = (state.hr.mxMonth || "").split("-").map(Number);
+  if (!y || !m) { toast({ok: false, body: {detail: "Choose a month first."}}, "No month"); return; }
+  const q = new URLSearchParams({year: y, month: m});
+  if (state.hr.mxDept) q.set("department", state.hr.mxDept);
+  downloadOutput(`/api/hr/outputs/attendance-sheet?${q}`);
 }
 async function hrEmployees() {
   const [e, b, o, s] = await Promise.all([api("/api/hr/employees"), api("/api/hr/branches"),
@@ -3218,6 +3298,7 @@ async function hrMonthly() {
       <label class="hr-field">Department <select id="hrMxDept"><option value="">All departments</option>
         ${depts.map(d => `<option value="${esc(d)}"${d === state.hr.mxDept ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
       <button class="btn ghost" type="button" data-act="hr-monthly-refresh">Refresh</button>
+      <button class="btn ghost" type="button" data-act="hr-sheet">Sheet (PDF)</button>
     </div>
     <div class="hr-legend"><span class="hr-lg ok">P</span> present
       <span class="hr-lg warn">L</span> late <span class="hr-lg warn">H</span> half day
@@ -6315,6 +6396,12 @@ document.addEventListener("click", e => {
     else if (act === "hr-attention") hrAttention(a.dataset.kind);
     else if (act === "hr-monthly") hrMonthly();
     else if (act === "hr-monthly-refresh") loadHrMx();
+    else if (act === "hr-sheet") downloadAttendanceSheet();
+    else if (act === "hr-letters") hrLetters();
+    else if (act === "hr-letter-edit") hrLetterForm(a.dataset.id);
+    else if (act === "hr-card") downloadOutput("/api/hr/outputs/id-card" + (a.dataset.emp ? `?employee_id=${a.dataset.emp}` : ""));
+    else if (act === "hr-statement") downloadOutput("/api/hr/outputs/leave-statement" + (a.dataset.emp ? `?employee_id=${a.dataset.emp}` : ""));
+    else if (act === "hr-letter") downloadOutput(`/api/hr/outputs/letter/${encodeURIComponent(a.dataset.code)}` + (a.dataset.emp ? `?employee_id=${a.dataset.emp}` : ""));
     else if (act === "hr-calendar") hrCalendar();
     else if (act === "hr-calendar-refresh") loadHrCal();
     else if (act === "hr-reports") hrReports();
@@ -6507,6 +6594,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "hrLockForm") saveHrLock(f);
   else if (f.id === "hrUnlockForm") saveHrUnlock(f);
   else if (f.id === "hrSavedForm") saveHrFilter(f);
+  else if (f.id === "hrLetForm") saveHrLetterTemplate(f);
   else if (f.id === "srForm") saveSchedule(f);
   else if (f.id === "srRecipientForm") saveRecipient(f);
 });

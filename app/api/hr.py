@@ -10,13 +10,13 @@ Permissions are enforced on every endpoint. An employee may act for themselves
 with `hr:attendance_self`; team-wide actions need the corresponding manager/HR
 right. Decisions go through the central Approvals module (`hr_approvals.py`).
 """
-from collections import defaultdict
 from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import csv
 import io
 from pathlib import Path
+import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
@@ -31,11 +31,12 @@ from ..core.rbac import current_user, is_admin, require, role_permissions
 from ..models.core import ApprovalRequest, AuditLog, User
 from ..models.hr import (Announcement, Attendance, AttendanceCorrection, Branch, Department,
                          EmployeeAsset, EmployeeDocument, Holiday, HRNotification, ImportBatch,
-                         LeaveApplication, LeaveBalance, LeaveType, ODRequest, PayrollEntry,
-                         PayrollPeriod, PeriodLock, SalaryComponent, SalaryStructure,
+                         LeaveApplication, LeaveBalance, LeaveType, LetterTemplate, ODRequest,
+                         PayrollEntry, PayrollPeriod, PeriodLock, SalaryComponent, SalaryStructure,
                          SalaryStructureLine, SavedFilter, Shift, WorkLocation)
 from ..models.users import Employee
 from ..services import hr as hr_svc
+from ..services import hr_documents
 from ..services import hr_notify
 from ..services import hr_reports
 from ..services import payroll as payroll_svc
@@ -1596,98 +1597,8 @@ def monthly_attendance(year: int, month: int, employee_id: int | None = None,
     Days with no attendance row are returned with a null status and no numbers:
     an unrecorded day is a gap, never an assumed absence.
     """
-    if not 1 <= month <= 12:
-        raise HTTPException(422, "month must be between 1 and 12")
-    perms = _perms(db, user)
-    if not is_admin(db, user) and "hr:read" not in perms \
-            and "hr:attendance_self" not in perms:
-        raise HTTPException(403, "Your role cannot view attendance")
-    scope = hr_svc.scoped_employee_ids(db, user)
-    if employee_id:
-        if scope is not None and employee_id not in scope:
-            raise HTTPException(403, "That employee is outside your team")
-        emp = db.get(Employee, employee_id)
-        if not emp:
-            raise HTTPException(404, "Employee not found")
-        employees = [emp]
-    else:
-        stmt = select(Employee).where(Employee.status == "active")
-        if scope is not None:
-            stmt = stmt.where(Employee.id.in_(scope or {-1}))
-        if department:
-            stmt = stmt.where(Employee.department == department)
-        employees = list(db.scalars(stmt.order_by(Employee.code)).all())
-        if len(employees) > 400:
-            raise HTTPException(422, "More than 400 employees match; filter by department "
-                                     "or choose one employee")
-    first = date(year, month, 1)
-    last = date(year, month, monthrange(year, month)[1])
-    ids = [e.id for e in employees]
-    rows = db.scalars(select(Attendance).where(
-        Attendance.employee_id.in_(ids or [-1]),
-        Attendance.date >= first, Attendance.date <= last)).all()
-    by_emp: dict[int, dict[date, Attendance]] = defaultdict(dict)
-    for row in rows:
-        by_emp[row.employee_id][row.date] = row
-    days = [date(year, month, d) for d in range(1, last.day + 1)]
-    totals = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
-              "late_days": 0, "half_days": 0, "overtime_minutes": 0, "worked_minutes": 0,
-              "missing_days": 0}
-    out = []
-    for emp in employees:
-        cal = by_emp.get(emp.id, {})
-        counts = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
-                  "late_days": 0, "half_days": 0, "weekly_off_days": 0, "holiday_days": 0,
-                  "correction_pending": 0, "missing_days": 0, "overtime_minutes": 0,
-                  "worked_minutes": 0}
-        calendar = []
-        for day in days:
-            row = cal.get(day)
-            if row is None:
-                counts["missing_days"] += 1
-                calendar.append({"date": day, "status": None})
-                continue
-            status = row.status
-            if status in ("present", "late", "early_departure"):
-                counts["present_days"] += 1
-            elif status == "half_day":
-                counts["present_days"] += 0.5
-                counts["half_days"] += 1
-            elif status in ("paid_leave", "unpaid_leave"):
-                if row.leave_portion in ("first_half", "second_half"):
-                    counts["leave_days"] += 0.5
-                    counts["present_days"] += 0.5
-                else:
-                    counts["leave_days"] += 1
-            elif status == "od":
-                counts["od_days"] += 1
-            elif status == "absent":
-                counts["absent_days"] += 1
-            elif status == "weekly_off":
-                counts["weekly_off_days"] += 1
-            elif status == "holiday":
-                counts["holiday_days"] += 1
-            elif status == "correction_pending":
-                counts["correction_pending"] += 1
-            if row.late_minutes:
-                counts["late_days"] += 1
-            counts["overtime_minutes"] += row.overtime_minutes or 0
-            counts["worked_minutes"] += row.worked_minutes or 0
-            calendar.append({"date": day, "status": status,
-                             "leave_portion": row.leave_portion,
-                             "check_in": row.check_in, "check_out": row.check_out,
-                             "worked_minutes": row.worked_minutes,
-                             "overtime_minutes": row.overtime_minutes,
-                             "late_minutes": row.late_minutes})
-        for key in totals:
-            totals[key] += counts[key]
-        out.append({"employee_id": emp.id, "code": emp.code, "name": emp.full_name,
-                    "department": emp.department, "designation": emp.designation,
-                    "summary": counts, "calendar": calendar})
-    totals["present_days"] = float(totals["present_days"])
-    totals["leave_days"] = float(totals["leave_days"])
-    return {"year": year, "month": month, "days": days, "weekdays": [d.weekday() for d in days],
-            "employees": out, "totals": totals}
+    return hr_svc.monthly_attendance(db, user, year=year, month=month,
+                                     employee_id=employee_id, department=department)
 
 
 @router.post("/attendance/bulk")
@@ -3155,3 +3066,175 @@ def hr_report(report: str, from_date: date | None = None, to_date: date | None =
     return Response(content=body, media_type=media_type, headers={
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Cache-Control": "no-store"})
+
+
+# ------------------------------------------------------- letters and printouts
+def _letter_row(template: LetterTemplate) -> dict:
+    return {"id": template.id, "code": template.code, "name": template.name,
+            "kind": template.kind, "body": template.body, "active": template.active,
+            "updated_at": template.updated_at}
+
+
+def _unknown_placeholders(body: str) -> list[str]:
+    used = set(re.findall(r"\{([a-z_]+)\}", body))
+    return sorted(token for token in used if token not in hr_documents.PLACEHOLDERS)
+
+
+def _pdf_response(body: bytes, filename: str) -> Response:
+    return Response(content=body, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store"})
+
+
+@router.get("/letters/templates")
+def list_letter_templates(db: Session = Depends(get_db), user=Depends(current_user)):
+    """The editable letter bodies, with the placeholder names they may use."""
+    _require_hr_view(db, user)
+    rows = db.scalars(select(LetterTemplate).order_by(LetterTemplate.id)).all()
+    return {"placeholders": list(hr_documents.PLACEHOLDERS),
+            "templates": [_letter_row(t) for t in rows]}
+
+
+class LetterTemplatePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=3, max_length=120)
+    body: str | None = Field(default=None, min_length=20, max_length=8000)
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def one_change(self):
+        if self.name is None and self.body is None and self.active is None:
+            raise ValueError("Supply at least one of name, body or active")
+        return self
+
+
+@router.patch("/letters/templates/{template_id}")
+def patch_letter_template(template_id: int, body: LetterTemplatePatch,
+                          db: Session = Depends(get_db),
+                          actor=Depends(require("hr:write"))):
+    """Edit the wording. Unknown placeholders are refused rather than printed raw."""
+    template = db.get(LetterTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Letter template not found")
+    if body.body is not None:
+        unknown = _unknown_placeholders(body.body)
+        if unknown:
+            raise HTTPException(422, "Unknown placeholder(s): " + ", ".join(
+                "{" + token + "}" for token in unknown))
+    if body.name is not None:
+        template.name = body.name.strip()
+    if body.body is not None:
+        template.body = body.body.strip()
+    if body.active is not None:
+        template.active = body.active
+    template.updated_by = actor.id
+    db.flush()
+    audit(db, actor.id, "hr.letter_template.update", f"letter_template:{template.id}",
+          {"code": template.code, "name": template.name, "active": template.active,
+           "body_changed": body.body is not None})
+    db.commit()
+    return {**_letter_row(template), "placeholders": list(hr_documents.PLACEHOLDERS)}
+
+
+@router.get("/outputs/letter/{code}")
+def employee_letter(code: str, employee_id: int | None = None,
+                    exit_date: date | None = None, db: Session = Depends(get_db),
+                    user=Depends(current_user)):
+    """Fill one active template for an employee the caller may see.
+
+    The letter is a draft: it is audited and marked unsigned. A date the body
+    needs but the employee record does not hold is reported, not left blank.
+    """
+    _require_hr_view(db, user)
+    emp = _employee_or_403(db, user, employee_id)
+    template = db.scalar(select(LetterTemplate).where(
+        LetterTemplate.code == code.upper(), LetterTemplate.active.is_(True)))
+    if not template:
+        raise HTTPException(404, "Letter template not found or retired")
+    company = hr_documents.company_details(db)
+    try:
+        pdf = hr_documents.render_letter(template, emp, company, exit_date=exit_date)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    audit(db, user.id, "hr.output.letter", f"employee:{emp.id}",
+          {"template": template.code, "exit_date": str(exit_date) if exit_date else None})
+    db.commit()
+    return _pdf_response(pdf, f"{template.code.lower()}-letter-{emp.code}.pdf")
+
+
+@router.get("/outputs/id-card")
+def employee_id_card(employee_id: int | None = None, db: Session = Depends(get_db),
+                     user=Depends(current_user)):
+    _require_hr_view(db, user)
+    emp = _employee_or_403(db, user, employee_id)
+    branch = db.get(Branch, emp.branch_id) if emp.branch_id else None
+    office = db.get(WorkLocation, emp.office_id) if emp.office_id else None
+    photo = None
+    if emp.photo_path:
+        candidate = PHOTO_DIR / Path(emp.photo_path).name
+        photo = candidate if candidate.exists() else None
+    pdf = hr_documents.build_id_card(
+        emp, hr_documents.company_details(db),
+        branch=branch.name if branch else "", office=office.name if office else "",
+        photo_file=photo)
+    audit(db, user.id, "hr.output.id_card", f"employee:{emp.id}", {"has_photo": bool(photo)})
+    db.commit()
+    return _pdf_response(pdf, f"id-card-{emp.code}.pdf")
+
+
+@router.get("/outputs/attendance-sheet")
+def attendance_sheet(year: int, month: int, employee_id: int | None = None,
+                     department: str | None = None, db: Session = Depends(get_db),
+                     user=Depends(current_user)):
+    """The monthly grid as a printable sheet. Scope is the same as the screen."""
+    data = hr_svc.monthly_attendance(db, user, year=year, month=month,
+                                     employee_id=employee_id, department=department)
+    pdf = hr_documents.build_attendance_sheet(
+        data, hr_documents.company_details(db), department=department)
+    audit(db, user.id, "hr.output.attendance_sheet", "attendance:monthly",
+          {"year": year, "month": month, "employee_id": employee_id,
+           "department": department, "employees": len(data["employees"]),
+           "missing_days": data["totals"]["missing_days"]})
+    db.commit()
+    return _pdf_response(pdf, f"attendance-sheet-{year}-{month:02d}.pdf")
+
+
+@router.get("/outputs/leave-statement")
+def leave_statement(employee_id: int | None = None, year: int | None = None,
+                    db: Session = Depends(get_db), user=Depends(current_user)):
+    """One employee's stored balances and applications for a year."""
+    _require_hr_view(db, user)
+    emp = _employee_or_403(db, user, employee_id)
+    year = year or date.today().year
+    if not 2000 <= year <= 2100:
+        raise HTTPException(422, "year must be between 2000 and 2100")
+    types = {t.id: t for t in db.scalars(select(LeaveType)).all()}
+    stored = db.scalars(select(LeaveBalance).where(
+        LeaveBalance.employee_id == emp.id, LeaveBalance.year == year)).all()
+    balances = [{
+        "name": types[b.leave_type_id].name if b.leave_type_id in types
+        else "Retired leave type",
+        "entitled": str(Decimal(b.entitled).normalize()),
+        "carried": str(Decimal(b.carried).normalize()),
+        "used": str(Decimal(b.used).normalize()),
+        "pending": str(Decimal(b.pending).normalize()),
+        "available": str(Decimal(b.entitled + b.carried - b.used
+                                 - b.pending).normalize())} for b in stored]
+    gaps = [f"No balance has been set for {t.name}."
+            for t in sorted(types.values(), key=lambda x: x.name)
+            if t.active and t.id not in {b.leave_type_id for b in stored}]
+    applications = db.scalars(select(LeaveApplication).where(
+        LeaveApplication.employee_id == emp.id,
+        LeaveApplication.date_from >= date(year, 1, 1),
+        LeaveApplication.date_from <= date(year, 12, 31))
+        .order_by(LeaveApplication.date_from, LeaveApplication.id)).all()
+    app_rows = [{"date_from": a.date_from.isoformat(), "date_to": a.date_to.isoformat(),
+                 "leave_type": types[a.leave_type_id].name if a.leave_type_id in types
+                 else "Retired leave type",
+                 "days": str(Decimal(a.days).normalize()), "portion": a.portion,
+                 "status": a.status} for a in applications]
+    pdf = hr_documents.build_leave_statement(emp, year, balances, app_rows,
+                                            hr_documents.company_details(db), gaps=gaps)
+    audit(db, user.id, "hr.output.leave_statement", f"employee:{emp.id}",
+          {"year": year, "applications": len(app_rows)})
+    db.commit()
+    return _pdf_response(pdf, f"leave-statement-{emp.code}-{year}.pdf")
