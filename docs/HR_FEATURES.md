@@ -23,6 +23,7 @@ is not listed as a feature; the server is the control.
 | Payroll | HR dashboard → **Payroll** | periods, register, payslips, statutory summary, bank file, reconciliation |
 | HR reports | HR dashboard → **Reports** | seven HR reports, each as JSON, CSV or PDF |
 | Locks | HR dashboard → **Period locks** | attendance and payroll month locks |
+| Branches, offices and attendance policy | HR dashboard → **Branches, offices & attendance policy** (`hr:write`) | branch and office masters with geofence, the HR responsible person, and the attendance-rule table with New/Edit/Delete |
 
 The HR menu is shown to anyone holding `hr:read` or `hr:attendance_self`
 (`static/js/app.js:172`). A staff member without `hr:read` sees the self-service
@@ -77,6 +78,10 @@ batch. Bank/ID columns need `hr:confidential` or `hr:payroll_prepare`.
 - A manager must exist and cannot be the employee themself.
 - New employees without an explicit shift receive the general office shift,
   which is what late/early calculations need.
+- An employee may be assigned a **branch** and an **office / work location**; an
+  office belongs to one branch, the branch is inferred from the office, and a
+  mismatched pair is refused (422). The New employee form offers only the
+  offices of the chosen branch.
 - Bank and ID values are masked unless the viewer is the person, the
   Administrator, or holds `hr:confidential`/`hr:payroll_prepare`.
 - The CSV export is masked per viewer. It requires `hr:read` (not
@@ -129,10 +134,28 @@ masked for a manager without the confidential right.
 - **Locks**: attendance and payroll months lock independently. Any write to a
   locked month is refused unless the caller is the Administrator and gives a
   written override reason.
+- **Attendance rules** (`hr:write`): a rule may target any mix of branch, office,
+  designation and employee, with optional effective dates, priority, shift and
+  attendance-mode override. The most specific active rule wins — employee 1000,
+  office 100, designation 10, branch 1 — then the lower priority, then the newest;
+  with no matching rule attendance is required (D-32). The resolved requirement
+  and its source are shown on the employee form, the profile and the attendance
+  drawer.
+- **Only when required**: check-in, check-out, a correction request, a manual
+  entry and a bulk row are refused with **409** and the rule's source for an
+  exempt employee. The monthly register marks an exempt day `not_required`
+  instead of a gap, the totals carry `not_required_days`, and payroll does not
+  infer an absence there.
+- **Location scope**: branches and offices (geofence centre/radius, mode) are
+  maintained in the browser; attendance, the monthly register, the dashboard and
+  every HR report accept `branch_id` and `office_id`, and a report header repeats
+  the filter applied.
 
 **Tests.** `tests/test_hr.py` (check-in, shift late/early), `test_hr_attendance.py`
 (6: bulk, validation, scope, monthly gaps, lock override, payroll lock),
-`test_hr_security.py` (team scope).
+`test_hr_security.py` (team scope), `test_hr_sites.py` (7: site CRUD and employee
+assignment, rule validation and precedence, exempt gating, self-service under a
+rule, location filters, monthly not-required days, payroll exemption).
 
 ## 6. Leave and on-duty
 
@@ -286,9 +309,9 @@ test-mode mailer until SMTP and recipients are approved.
 
 | ID | Gap | Effect |
 |---|---|---|
-| M-06 | Payroll skips employees without a salary structure, silently | Payroll can understate the run; the screen does not list who was skipped |
+| M-06 | Payroll skips employees without a salary structure, silently; departments, holidays, leave types and the salary masters still have no screen | Payroll can understate the run; those masters can only be loaded through the API. Branches, offices and attendance rules do have a screen |
 | M-09 | Manual attendance from the screen is status-only; punch times and office are API fields | A correction cannot set a punch time from the browser |
-| — | No UI for some server features (saved filters, period locks, letter templates) | API-only paths; see `FRONTEND_BACKEND_FIELD_MAPPING.md` |
+| — | No screen for attendance corrections, bulk attendance, leave-balance adjustment/carry-forward, the employee photo, or the department, holiday, leave-type and salary masters | API-only paths; see `FRONTEND_BACKEND_FIELD_MAPPING.md` and chapters 19–20 of the user manual |
 | — | `hr:attendance_self` users can read leave types, own balances, applications and OD | Deliberate (D-23); every read is scoped |
 | — | Bank file download event is audited, not the file contents | The preview masks account numbers; full numbers leave only in the downloaded file |
 | — | HR manager sees bank/ID but not salary structures | Deliberate (D-15); grant `hr:payroll_prepare` if the answer changes |
@@ -311,8 +334,9 @@ test-mode mailer until SMTP and recipients are approved.
 | Profile, documents, assets, photo | `tests/test_hr_profile.py` | 4 |
 | HR reports | `tests/test_hr_reports.py` | 5 |
 | Confidentiality and scope | `tests/test_hr_security.py` | 7 |
-| **HR total** | | **69** |
+| Branches, offices and attendance rules | `tests/test_hr_sites.py` | 7 |
+| **HR total** | | **76** |
 
-The whole-project suite is 230 tests; the HR files are the 69 above. Central
+The whole-project suite is 268 tests; the HR files are the 76 above. Central
 report tests (`test_reports.py`), role parity (`test_roles_parity.py`) and the
 dashboard tests also exercise HR paths.

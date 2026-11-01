@@ -32,6 +32,9 @@ class Branch(Base):
     code: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(120))
     address: Mapped[str | None] = mapped_column(String(300))
+    # The person responsible for HR at this branch. Assignment only: approvals
+    # stay role-based, so changing this never reroutes a pending request.
+    hr_admin_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
     status: Mapped[str] = mapped_column(String(20), default="active")
 
 
@@ -59,6 +62,7 @@ class WorkLocation(Base):
     longitude: Mapped[Decimal | None] = mapped_column(LAT)
     geofence_radius_m: Mapped[int | None] = mapped_column(Integer, default=200)
     attendance_mode: Mapped[str] = mapped_column(String(10), default="office")
+    hr_admin_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
     status: Mapped[str] = mapped_column(String(20), default="active")
 
 
@@ -83,6 +87,46 @@ class Holiday(Base):
     name: Mapped[str] = mapped_column(String(120))
     branch_id: Mapped[int | None] = mapped_column(ForeignKey("hr_branches.id"))
     location_id: Mapped[int | None] = mapped_column(ForeignKey("hr_work_locations.id"))
+
+
+class AttendanceRule(Base):
+    """Who must mark attendance, and under which shift or attendance mode.
+
+    A rule may target any combination of branch, office, designation and
+    employee (or nothing, which makes it the company default). Every non-null
+    target must match the employee; the most specific match wins:
+    employee 1000, office 100, designation 10, branch 1. Ties fall back to the
+    lower `priority`, then the newest rule. Dates are inclusive and optional,
+    so a rule can start or end partway through a month.
+    """
+    __tablename__ = "hr_attendance_rules"
+    __table_args__ = (
+        CheckConstraint("attendance_mode IS NULL OR attendance_mode IN ('office','gps','both')",
+                        name="ck_hr_attendance_rule_mode"),
+        CheckConstraint("effective_to IS NULL OR effective_from IS NULL "
+                        "OR effective_to >= effective_from",
+                        name="ck_hr_attendance_rule_dates"),
+        Index("ix_hr_attendance_rules_branch", "branch_id"),
+        Index("ix_hr_attendance_rules_office", "office_id"),
+        Index("ix_hr_attendance_rules_employee", "employee_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("hr_branches.id"))
+    office_id: Mapped[int | None] = mapped_column(ForeignKey("hr_work_locations.id"))
+    designation: Mapped[str | None] = mapped_column(String(80))
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Off = a manager records the day; the employee cannot punch for themselves.
+    self_service: Mapped[bool] = mapped_column(Boolean, default=True)
+    shift_id: Mapped[int | None] = mapped_column(ForeignKey("hr_shifts.id"))
+    attendance_mode: Mapped[str | None] = mapped_column(String(10))
+    effective_from: Mapped[date | None] = mapped_column(Date)
+    effective_to: Mapped[date | None] = mapped_column(Date)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str | None] = mapped_column(String(200))
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Department(Base):

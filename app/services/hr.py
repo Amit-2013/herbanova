@@ -5,16 +5,18 @@ Rules live here so the API and the approval handlers cannot drift apart.
 """
 import math
 from calendar import monthrange
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.rbac import is_admin, role_permissions
 from ..models.core import ApprovalRequest
-from ..models.hr import (Attendance, Holiday, LeaveApplication, LeaveBalance, LeaveType, PeriodLock,
-                         Shift, WorkLocation)
+from ..models.hr import (Attendance, AttendanceRule, Holiday, LeaveApplication, LeaveBalance,
+                         LeaveType, PeriodLock, Shift, WorkLocation)
 from ..models.users import Employee
 
 ZERO = Decimal(0)
@@ -67,6 +69,117 @@ def shift_early_minutes(shift: Shift | None, check_out: datetime | None) -> int:
 def default_shift(db: Session) -> Shift | None:
     """The general office shift employees are placed on unless another is chosen."""
     return db.scalar(select(Shift).where(Shift.name == "General", Shift.status == "active"))
+
+
+# ------------------------------------------------------- attendance requirements
+@dataclass(frozen=True)
+class AttendanceRequirement:
+    """The policy that applies to one employee on one day."""
+    required: bool
+    self_service: bool
+    shift_id: int | None
+    attendance_mode: str | None
+    rule_id: int | None
+    source: str
+
+    def as_dict(self) -> dict:
+        return {"required": self.required, "self_service": self.self_service,
+                "shift_id": self.shift_id, "attendance_mode": self.attendance_mode,
+                "rule_id": self.rule_id, "source": self.source}
+
+
+def _rule_matches(rule: AttendanceRule, employee: Employee, day: date) -> bool:
+    if not rule.active:
+        return False
+    if rule.effective_from and day < rule.effective_from:
+        return False
+    if rule.effective_to and day > rule.effective_to:
+        return False
+    if rule.employee_id and rule.employee_id != employee.id:
+        return False
+    if rule.office_id and rule.office_id != employee.office_id:
+        return False
+    if rule.branch_id and rule.branch_id != employee.branch_id:
+        return False
+    if rule.designation and (rule.designation.strip().casefold()
+                             != (employee.designation or "").strip().casefold()):
+        return False
+    return True
+
+
+def _rule_score(rule: AttendanceRule) -> int:
+    """Any added target makes a rule more specific; employee beats everything."""
+    return ((1000 if rule.employee_id else 0) + (100 if rule.office_id else 0)
+            + (10 if rule.designation else 0) + (1 if rule.branch_id else 0))
+
+
+def rule_label(rule: AttendanceRule) -> str:
+    parts = []
+    if rule.branch_id:
+        parts.append("Branch")
+    if rule.office_id:
+        parts.append("Office")
+    if rule.designation:
+        parts.append("Designation")
+    if rule.employee_id:
+        parts.append("Employee")
+    return f"{' + '.join(parts) or 'Company'} rule #{rule.id}"
+
+
+def resolve_attendance_requirement(db: Session, employee: Employee, day: date,
+                                   rules: list[AttendanceRule] | None = None,
+                                   offices: dict[int, WorkLocation] | None = None
+                                   ) -> AttendanceRequirement:
+    """Which attendance policy applies to this employee on this day.
+
+    Most specific match wins; with no rule at all attendance is required and the
+    employee's own shift and office mode apply, which is the behaviour every
+    existing employee already has.
+    """
+    if rules is None:
+        rules = list(db.scalars(select(AttendanceRule)
+                                .where(AttendanceRule.active.is_(True))).all())
+    matches = [r for r in rules if _rule_matches(r, employee, day)]
+    matches.sort(key=lambda r: (-_rule_score(r), r.priority, -r.id))
+    if offices is not None:
+        office = offices.get(employee.office_id) if employee.office_id else None
+    else:
+        office = db.get(WorkLocation, employee.office_id) if employee.office_id else None
+    if matches:
+        rule = matches[0]
+        return AttendanceRequirement(
+            required=bool(rule.required), self_service=bool(rule.self_service),
+            shift_id=rule.shift_id or employee.shift_id,
+            attendance_mode=rule.attendance_mode or (office.attendance_mode if office else None),
+            rule_id=rule.id, source=rule_label(rule))
+    return AttendanceRequirement(
+        required=True, self_service=True, shift_id=employee.shift_id,
+        attendance_mode=office.attendance_mode if office else None, rule_id=None,
+        source=f"Office default ({office.name})" if office else "Company default")
+
+
+def require_attendance(db: Session, employee: Employee, day: date,
+                       rules: list[AttendanceRule] | None = None) -> AttendanceRequirement:
+    """Refuse to write attendance for someone the policy exempts."""
+    req = resolve_attendance_requirement(db, employee, day, rules)
+    if not req.required:
+        raise HTTPException(409, f"{employee.full_name} ({employee.code}) is not required "
+                                 f"to mark attendance ({req.source}). No attendance was "
+                                 "recorded.")
+    return req
+
+
+def require_self_service(db: Session, employee: Employee, day: date) -> AttendanceRequirement:
+    """Check-in and check-out belong to the employee unless a rule says HR records it."""
+    req = require_attendance(db, employee, day)
+    if not req.self_service:
+        raise HTTPException(409, f"Self check-in is switched off for {employee.full_name} "
+                                 f"({req.source}). HR records this attendance.")
+    return req
+
+
+def requirement_shift(db: Session, req: AttendanceRequirement) -> Shift | None:
+    return db.get(Shift, req.shift_id) if req.shift_id else None
 
 
 def employee_for_user(db: Session, user) -> Employee | None:
@@ -253,15 +366,17 @@ def working_days(db: Session, employee: Employee, year: int, month: int) -> list
 
 def monthly_attendance(db: Session, user, *, year: int, month: int,
                        employee_id: int | None = None,
-                       department: str | None = None) -> dict:
+                       department: str | None = None,
+                       branch_id: int | None = None,
+                       office_id: int | None = None) -> dict:
     """One month of statuses per employee, plus the counts the screen and the
     printable sheet both use.
 
     Days with no attendance row are returned with a null status and no numbers:
-    an unrecorded day is a gap, never an assumed absence.
+    an unrecorded day is a gap, never an assumed absence. An employee the policy
+    exempts is marked as not required on those days and adds nothing to the
+    missing count.
     """
-    from fastapi import HTTPException
-
     if not 1 <= month <= 12:
         raise HTTPException(422, "month must be between 1 and 12")
     if not is_admin(db, user) and not role_permissions(db, user) & {
@@ -281,10 +396,14 @@ def monthly_attendance(db: Session, user, *, year: int, month: int,
             stmt = stmt.where(Employee.id.in_(scope or {-1}))
         if department:
             stmt = stmt.where(Employee.department == department)
+        if branch_id:
+            stmt = stmt.where(Employee.branch_id == branch_id)
+        if office_id:
+            stmt = stmt.where(Employee.office_id == office_id)
         employees = list(db.scalars(stmt.order_by(Employee.code)).all())
         if len(employees) > 400:
-            raise HTTPException(422, "More than 400 employees match; filter by department "
-                                     "or choose one employee")
+            raise HTTPException(422, "More than 400 employees match; filter by department, "
+                                     "branch or office, or choose one employee")
     first = date(year, month, 1)
     last = date(year, month, monthrange(year, month)[1])
     ids = [e.id for e in employees]
@@ -294,21 +413,30 @@ def monthly_attendance(db: Session, user, *, year: int, month: int,
     by_emp: dict[int, dict[date, Attendance]] = {}
     for row in rows:
         by_emp.setdefault(row.employee_id, {})[row.date] = row
+    rules = list(db.scalars(select(AttendanceRule)
+                            .where(AttendanceRule.active.is_(True))).all())
+    offices = {o.id: o for o in db.scalars(select(WorkLocation)).all()}
     days = [date(year, month, d) for d in range(1, last.day + 1)]
     totals = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
               "late_days": 0, "half_days": 0, "overtime_minutes": 0, "worked_minutes": 0,
-              "missing_days": 0}
+              "missing_days": 0, "not_required_days": 0}
     out = []
     for emp in employees:
         cal = by_emp.get(emp.id, {})
         counts = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
                   "late_days": 0, "half_days": 0, "weekly_off_days": 0, "holiday_days": 0,
-                  "correction_pending": 0, "missing_days": 0, "overtime_minutes": 0,
-                  "worked_minutes": 0}
+                  "correction_pending": 0, "missing_days": 0, "not_required_days": 0,
+                  "overtime_minutes": 0, "worked_minutes": 0}
+        month_end = resolve_attendance_requirement(db, emp, last, rules, offices)
         calendar = []
         for day in days:
             row = cal.get(day)
             if row is None:
+                day_req = resolve_attendance_requirement(db, emp, day, rules, offices)
+                if not day_req.required:
+                    counts["not_required_days"] += 1
+                    calendar.append({"date": day, "status": None, "not_required": True})
+                    continue
                 counts["missing_days"] += 1
                 calendar.append({"date": day, "status": None})
                 continue
@@ -348,6 +476,9 @@ def monthly_attendance(db: Session, user, *, year: int, month: int,
             totals[key] += counts[key]
         out.append({"employee_id": emp.id, "code": emp.code, "name": emp.full_name,
                     "department": emp.department, "designation": emp.designation,
+                    "branch_id": emp.branch_id, "office_id": emp.office_id,
+                    "attendance_required": month_end.required,
+                    "attendance_rule": month_end.source,
                     "summary": counts, "calendar": calendar})
     totals["present_days"] = float(totals["present_days"])
     totals["leave_days"] = float(totals["leave_days"])

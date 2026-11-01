@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from ..core.rbac import is_admin, role_permissions
 from ..models.hr import (Attendance, Branch, Department, EmployeeDocument,
-                         LeaveBalance, LeaveType, PayrollEntry, PayrollPeriod)
+                         LeaveBalance, LeaveType, PayrollEntry, PayrollPeriod, WorkLocation)
 from ..models.users import Employee
 from . import hr as hr_svc
 
@@ -100,10 +100,13 @@ def _range(first: date, last: date) -> tuple[date, date]:
     return first, last
 
 
-def _scoped_employees(db: Session, user) -> list[Employee]:
+def _scoped_employees(db: Session, user, branch_id: int | None = None,
+                      office_id: int | None = None) -> list[Employee]:
     scope = hr_svc.scoped_employee_ids(db, user) if user is not None else None
     rows = db.scalars(select(Employee).order_by(Employee.code)).all()
-    return [e for e in rows if scope is None or e.id in scope]
+    return [e for e in rows if (scope is None or e.id in scope)
+            and (branch_id is None or e.branch_id == branch_id)
+            and (office_id is None or e.office_id == office_id)]
 
 
 def _departments(db: Session) -> dict[int, str]:
@@ -114,9 +117,9 @@ def _department(emp: Employee, names: dict[int, str]) -> str:
     return names.get(emp.department_id) or emp.department or "Unassigned"
 
 
-def _headcount(db, user, *, from_date, to_date, year, month, days):
+def _headcount(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     as_of = to_date or hr_svc.business_today()
-    emps = _scoped_employees(db, user)
+    emps = _scoped_employees(db, user, branch_id, office_id)
     roster = [e for e in emps
               if (e.joining_date is None or e.joining_date <= as_of)
               and (e.date_of_exit is None or e.date_of_exit >= as_of)]
@@ -144,11 +147,11 @@ def _headcount(db, user, *, from_date, to_date, year, month, days):
     return "Headcount", filters, HEADCOUNT_COLUMNS, rows, summary, gaps
 
 
-def _joiners_leavers(db, user, *, from_date, to_date, year, month, days):
+def _joiners_leavers(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     last = to_date or hr_svc.business_today()
     first = from_date or date(last.year, 1, 1)
     first, last = _range(first, last)
-    emps = _scoped_employees(db, user)
+    emps = _scoped_employees(db, user, branch_id, office_id)
     names = _departments(db)
     joiners = [e for e in emps if e.joining_date and first <= e.joining_date <= last]
     leavers = [e for e in emps if e.date_of_exit and first <= e.date_of_exit <= last]
@@ -181,11 +184,11 @@ def _attendance_rows(db, emps, first: date, last: date) -> list[Attendance]:
         Attendance.date >= first, Attendance.date <= last)).all()
 
 
-def _attendance_summary(db, user, *, from_date, to_date, year, month, days):
+def _attendance_summary(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     last = to_date or hr_svc.business_today()
     first = from_date or last.replace(day=1)
     first, last = _range(first, last)
-    emps = _scoped_employees(db, user)
+    emps = _scoped_employees(db, user, branch_id, office_id)
     names = _departments(db)
     rows_by_emp = {e.id: e for e in emps}
     buckets: dict[int, dict] = {}
@@ -230,11 +233,11 @@ def _attendance_summary(db, user, *, from_date, to_date, year, month, days):
     return ("Attendance summary", filters, ATTENDANCE_COLUMNS, rows, summary, gaps)
 
 
-def _late_absentee(db, user, *, from_date, to_date, year, month, days):
+def _late_absentee(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     last = to_date or hr_svc.business_today()
     first = from_date or last.replace(day=1)
     first, last = _range(first, last)
-    emps = _scoped_employees(db, user)
+    emps = _scoped_employees(db, user, branch_id, office_id)
     names = _departments(db)
     by_emp = {e.id: e for e in emps}
     buckets: dict[int, dict] = {}
@@ -265,9 +268,9 @@ def _late_absentee(db, user, *, from_date, to_date, year, month, days):
     return ("Late and absentee", filters, LATE_COLUMNS, rows, summary, gaps)
 
 
-def _leave_balance(db, user, *, from_date, to_date, year, month, days):
+def _leave_balance(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     roll = year or hr_svc.business_today().year
-    emps = _scoped_employees(db, user)
+    emps = _scoped_employees(db, user, branch_id, office_id)
     by_emp = {e.id: e for e in emps}
     names = _departments(db)
     types = {t.id: t for t in db.scalars(select(LeaveType)).all()}
@@ -302,7 +305,7 @@ def _leave_balance(db, user, *, from_date, to_date, year, month, days):
     return ("Leave balances", filters, BALANCE_COLUMNS, rows, summary, gaps)
 
 
-def _department_cost(db, user, *, from_date, to_date, year, month, days):
+def _department_cost(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     if user is not None and not (is_admin(db, user) or
                                  role_permissions(db, user) & {"hr:confidential",
                                                                "hr:payroll_prepare"}):
@@ -325,7 +328,7 @@ def _department_cost(db, user, *, from_date, to_date, year, month, days):
                 {"year": year, "month": month, "gross": "0.00", "deductions": "0.00",
                  "net": "0.00", "employees": 0},
                 [f"No payroll period exists for {year}-{month:02d}."])
-    emps = {e.id: e for e in _scoped_employees(db, user)}
+    emps = {e.id: e for e in _scoped_employees(db, user, branch_id, office_id)}
     names = _departments(db)
     entries = [e for e in db.scalars(select(PayrollEntry).where(
         PayrollEntry.period_id == period.id)).all() if e.employee_id in emps]
@@ -359,11 +362,11 @@ def _department_cost(db, user, *, from_date, to_date, year, month, days):
     return ("Department cost", filters, COST_COLUMNS, rows, summary, gaps)
 
 
-def _document_expiry(db, user, *, from_date, to_date, year, month, days):
+def _document_expiry(db, user, *, from_date, to_date, year, month, days, branch_id=None, office_id=None):
     window = max(1, min(days or 60, 365))
     today = hr_svc.business_today()
     last = today + timedelta(days=window)
-    emps = {e.id: e for e in _scoped_employees(db, user)}
+    emps = {e.id: e for e in _scoped_employees(db, user, branch_id, office_id)}
     documents = db.scalars(select(EmployeeDocument).where(
         EmployeeDocument.status == "active",
         EmployeeDocument.expires_on.is_not(None),
@@ -397,14 +400,26 @@ BUILDERS = {
 
 def build_report(db: Session, key: str, user=None, *, from_date: date | None = None,
                  to_date: date | None = None, year: int | None = None,
-                 month: int | None = None, days: int | None = 60) -> dict:
+                 month: int | None = None, days: int | None = 60,
+                 branch_id: int | None = None, office_id: int | None = None) -> dict:
     builder = BUILDERS.get(key)
     if builder is None:
         raise HTTPException(404, f"Unknown HR report: {key}")
+    site = {}
+    if branch_id is not None:
+        branch = db.get(Branch, branch_id)
+        if not branch:
+            raise HTTPException(404, "Branch not found")
+        site["branch"] = branch.name
+    if office_id is not None:
+        office = db.get(WorkLocation, office_id)
+        if not office:
+            raise HTTPException(404, "Office not found")
+        site["office"] = office.name
     title, filters, columns, rows, summary, gaps = builder(
         db, user, from_date=from_date, to_date=to_date, year=year, month=month,
-        days=days)
-    return {"key": key, "title": title, "filters": filters,
+        days=days, branch_id=branch_id, office_id=office_id)
+    return {"key": key, "title": title, "filters": {**site, **filters},
             "columns": [{"key": k, "label": v} for k, v in columns],
             "rows": rows, "summary": summary, "gaps": gaps,
             "no_data": not rows}

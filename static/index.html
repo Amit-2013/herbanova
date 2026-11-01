@@ -888,6 +888,7 @@
         <div>
           <div class="dash-greet">HR workspace</div>
           <div class="dash-date" id="hrRangeNote">This month to today</div>
+          <div class="muted" id="hrSiteNote"></div>
         </div>
         <div class="dash-tools">
           <div class="dash-dates" id="hrDateTools">
@@ -898,6 +899,10 @@
               <button type="button" data-hrr="month" aria-pressed="true">This month</button>
               <button type="button" data-hrr="30" aria-pressed="false">Last 30 days</button>
             </div>
+          </div>
+          <div class="dash-dates" id="hrSiteTools">
+            <label for="hrBranchFilter">Branch <select id="hrBranchFilter"><option value="">All branches</option></select></label>
+            <label for="hrOfficeFilter">Office <select id="hrOfficeFilter"><option value="">All offices</option></select></label>
           </div>
           <button class="btn ghost hide" id="hrExport" type="button" data-act="hr-export">Export CSV</button>
           <button class="btn ghost hide" id="hrImport" type="button" data-act="hr-import">Import</button>
@@ -943,7 +948,7 @@
         </div>
         <div id="hrSavedBox"></div>
         <div class="tw"><table>
-          <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Joined</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Location</th><th>Joined</th><th>Status</th><th></th></tr></thead>
           <tbody id="hrrows"></tbody>
         </table></div>
         <div class="empty hide" id="hrempty"></div>
@@ -958,6 +963,7 @@
           <button class="btn ghost" type="button" data-act="hr-od">On duty</button>
           <button class="btn ghost hide" type="button" data-act="hr-payroll">Payroll</button>
           <button class="btn ghost hide" type="button" data-act="hr-shifts">Shift settings</button>
+          <button class="btn ghost hide" type="button" data-act="hr-sites">Branches, offices &amp; attendance policy</button>
           <button class="btn ghost hide" type="button" data-act="hr-reports">HR reports</button>
           <button class="btn ghost hide" type="button" data-act="hr-notices">Announcements</button>
           <button class="btn ghost hide" type="button" data-act="hr-locks">Period locks</button>

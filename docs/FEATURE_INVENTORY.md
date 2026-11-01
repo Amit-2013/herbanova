@@ -1,7 +1,7 @@
 # Feature Inventory
 
 Date: 1 November 2026
-Branch: `feature/scheduled-reports`
+Branch: `feature/hr-upgrade`
 Purpose: the single list of what the application does, where it does it, who may
 use it, and what proves it works. It complements the module register served at
 `GET /api/modules` (`app/core/module_register.py`) and the evidence in
@@ -18,8 +18,8 @@ use it, and what proves it works. It complements the module register served at
 | **NOT VERIFIED** | Not run, with the reason stated. |
 | **NOT BUILT** | Planned or conditional; nothing to exercise. |
 
-Route counts are from the running app: **232 API path/method pairs**, of which
-92 are HR and 4 are the legacy employee endpoints.
+Route counts are from the running app: **245 API path/method pairs**, of which
+99 are HR and 4 are the legacy employee endpoints.
 
 ## 1. Module register
 
@@ -185,6 +185,13 @@ hand-typed number.
 | F-96 | Parent-child permission rules, browser and server | role tree editor; `effective_permissions` | `user:manage` | `test_permission_tree.py` (11 tests) | VERIFIED |
 | F-97 | Central module On/Off switches, Administrator only | `#/roles` → Feature availability; `/api/features` | Administrator role | `test_feature_switches.py` (10 tests) | VERIFIED |
 | F-98 | Logins and employee master (separate from roles) | `#/users` | `user:manage` / `employee:*` | `test_authz.py`; browser check | VERIFIED |
+| F-99 | Branch and office masters: code, name, address, HR responsible, status, geofence centre/radius and attendance mode | HR → Branches, offices & attendance policy; `/api/hr/branches`, `/api/hr/offices` | `hr:read` to view, `hr:write` to change | `test_hr_sites.py`; browser check 1 Nov 2026 (2 branches, 2 offices, forms and cascade render) | VERIFIED |
+| F-100 | Employee branch/office assignment with one office belonging to one branch, branch inferred from office, mismatch refused | New employee / employee profile; `POST/PATCH /api/hr/employees` | `hr:write` | `test_hr_sites.py::test_sites_crud_and_employee_assignment`; browser check (branch filter offers Head Office/South Office; editing Admin shows Head Office - Delhi) | VERIFIED |
+| F-101 | Attendance rules per branch, office, designation and employee, with effective dates, priority, shift and mode overrides | HR → policy drawer; `/api/hr/attendance-rules` | `hr:write` | `test_hr_sites.py::test_rule_validation_precedence_and_effective_dates`; browser check (rule form exposes 13 fields and the branch→office cascade) | VERIFIED |
+| F-102 | Server-side gating of manual, bulk, correction and self check-in for employees the policy exempts, naming the source | attendance endpoints | `hr:attendance_manage` / `hr:attendance_self` | `test_hr_sites.py` tests 3 and 4 | VERIFIED |
+| F-103 | Exempt working days marked "not required" in the monthly register (not gaps) and no absence inferred in payroll | HR → Monthly attendance; payroll prepare | `hr:read` / `hr:payroll_prepare` | `test_hr_sites.py` tests 6 and 7; browser check of the legend and "Not required" column | VERIFIED |
+| F-104 | Branch and office filters across attendance, monthly register, People, dashboard and HR reports | HR toolbar; `/api/hr/*` filters | `hr:read` | `test_hr_sites.py::test_site_filters_reach_attendance_employees_dashboard_and_reports`; browser check (South Office: 2 of 7 employees, dashboard 2 on the rolls) | VERIFIED |
+| F-105 | Resolved attendance policy shown on the employee form and profile with its source | New employee; profile overview; `GET /api/hr/attendance-rules/resolve` | `hr:read`, self allowed | browser check 1 Nov 2026: "Office default (South Office - Bengaluru)" on Sales | VERIFIED |
 
 ## 10. Features that are deliberately absent
 
