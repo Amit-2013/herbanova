@@ -10,6 +10,8 @@ Permissions are enforced on every endpoint. An employee may act for themselves
 with `hr:attendance_self`; team-wide actions need the corresponding manager/HR
 right. Decisions go through the central Approvals module (`hr_approvals.py`).
 """
+from collections import defaultdict
+from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import csv
@@ -30,8 +32,8 @@ from ..models.core import ApprovalRequest, AuditLog, User
 from ..models.hr import (Attendance, AttendanceCorrection, Branch, Department,
                          EmployeeAsset, EmployeeDocument, Holiday, ImportBatch,
                          LeaveApplication, LeaveBalance, LeaveType, ODRequest, PayrollEntry,
-                         PayrollPeriod, SalaryComponent, SalaryStructure, SalaryStructureLine,
-                         SavedFilter, Shift, WorkLocation)
+                         PayrollPeriod, PeriodLock, SalaryComponent, SalaryStructure,
+                         SalaryStructureLine, SavedFilter, Shift, WorkLocation)
 from ..models.users import Employee
 from ..services import hr as hr_svc
 from ..services import payroll as payroll_svc
@@ -99,6 +101,49 @@ def _refuse_confidential_write(db: Session, user, data: dict) -> None:
             and not _can(db, user, "hr:confidential", "hr:payroll_prepare"):
         raise HTTPException(403, "Confidential HR rights are required to change bank or ID "
                                  "details")
+
+
+def _assert_period_open(db: Session, scope: str, day: date, user,
+                        override_reason: str | None = None,
+                        action: str = "") -> None:
+    """Refuse a change inside a locked month.
+
+    The lock is the accounting cut-off: after payroll has been settled the month
+    is closed. Only the Administrator may reopen a single entry, and only with a
+    recorded reason; that override is written to the audit trail.
+    """
+    lock = hr_svc.active_period_lock(db, scope, day)
+    if lock is None:
+        if override_reason:
+            raise HTTPException(422, f"The {scope} period {day:%B %Y} is not locked; "
+                                     "remove the override reason")
+        return
+    if override_reason:
+        if not is_admin(db, user):
+            raise HTTPException(403, "Only the Administrator may override a locked period")
+        audit(db, user.id, f"hr.{scope}.lock_override", f"period_lock:{lock.id}",
+              {"day": str(day), "action": action, "reason": override_reason})
+        return
+    raise HTTPException(423, f"The {scope} period {day:%B %Y} is locked: {lock.reason}")
+
+
+def _assert_range_open(db: Session, scope: str, first: date, last: date, user,
+                       override_reason: str | None = None, action: str = "") -> None:
+    lock = hr_svc.active_lock_for_range(db, scope, first, last)
+    if lock is None:
+        if override_reason:
+            raise HTTPException(422, f"The {scope} period is not locked; "
+                                     "remove the override reason")
+        return
+    if override_reason:
+        if not is_admin(db, user):
+            raise HTTPException(403, "Only the Administrator may override a locked period")
+        audit(db, user.id, f"hr.{scope}.lock_override", f"period_lock:{lock.id}",
+              {"from": str(first), "to": str(last), "action": action,
+               "reason": override_reason})
+        return
+    raise HTTPException(423, f"The {scope} period {lock.year}-{lock.month:02d} is locked: "
+                             f"{lock.reason}")
 
 
 # --------------------------------------------------------------- schemas
@@ -1361,7 +1406,9 @@ class ManualAttendanceIn(BaseModel):
     check_in: datetime | None = None
     check_out: datetime | None = None
     office_id: int | None = None
+    overtime_minutes: int = Field(default=0, ge=0, le=1440)
     remarks: str = Field(min_length=3, max_length=300)
+    override_reason: str | None = Field(default=None, min_length=5, max_length=300)
 
 
 class CorrectionIn(BaseModel):
@@ -1369,6 +1416,127 @@ class CorrectionIn(BaseModel):
     new_check_in: datetime | None = None
     new_check_out: datetime | None = None
     reason: str = Field(min_length=3, max_length=300)
+
+
+ATTENDANCE_STATUSES = ("present", "absent", "half_day", "weekly_off", "holiday",
+                       "paid_leave", "unpaid_leave", "od", "late", "early_departure")
+
+
+class BulkAttendanceIn(BaseModel):
+    employee_ids: list[int] = Field(min_length=1, max_length=500)
+    date_from: date
+    date_to: date
+    status: Literal[*ATTENDANCE_STATUSES]
+    remarks: str = Field(min_length=3, max_length=300)
+    overtime_minutes: int = Field(default=0, ge=0, le=1440)
+    skip_non_working: bool = True
+    override_reason: str | None = Field(default=None, min_length=5, max_length=300)
+
+    @model_validator(mode="after")
+    def check_range(self):
+        if self.date_to < self.date_from:
+            raise ValueError("date_to cannot be before date_from")
+        days = (self.date_to - self.date_from).days + 1
+        if days > 62:
+            raise ValueError("Mark at most 62 days in one operation")
+        if len(set(self.employee_ids)) * days > 5000:
+            raise ValueError("At most 5000 employee-days per operation; narrow the range")
+        if len(set(self.employee_ids)) != len(self.employee_ids):
+            raise ValueError("employee_ids contains duplicates")
+        return self
+
+
+class PeriodLockIn(BaseModel):
+    scope: Literal["attendance", "payroll"]
+    year: int = Field(ge=2000, le=2100)
+    month: int = Field(ge=1, le=12)
+    reason: str = Field(min_length=5, max_length=300)
+
+
+class PeriodUnlockIn(BaseModel):
+    reason: str = Field(min_length=5, max_length=300)
+
+
+def _period_lock_dict(lock: PeriodLock, users: dict[int, User]) -> dict:
+    def who(user_id):
+        u = users.get(user_id) if user_id else None
+        return u.username if u else (str(user_id) if user_id else None)
+
+    return {"id": lock.id, "scope": lock.scope, "year": lock.year, "month": lock.month,
+            "active": lock.active, "reason": lock.reason,
+            "locked_by": who(lock.locked_by), "locked_at": lock.locked_at,
+            "unlocked_by": who(lock.unlocked_by), "unlocked_at": lock.unlocked_at,
+            "unlock_reason": lock.unlock_reason}
+
+
+@router.get("/period-locks")
+def list_period_locks(scope: str | None = None, year: int | None = None,
+                      db: Session = Depends(get_db), user=Depends(require("hr:read"))):
+    stmt = select(PeriodLock)
+    if scope:
+        stmt = stmt.where(PeriodLock.scope == scope)
+    if year:
+        stmt = stmt.where(PeriodLock.year == year)
+    locks = db.scalars(stmt.order_by(PeriodLock.year.desc(), PeriodLock.month.desc())).all()
+    # Payroll lock metadata is part of the payroll record, so it follows the
+    # payroll rights rather than general HR read access.
+    if not _can(db, user, "hr:payroll_prepare", "hr:payroll_approve", "hr:confidential"):
+        locks = [l for l in locks if l.scope != "payroll"]
+    users = {u.id: u for u in db.scalars(select(User)).all()}
+    return [_period_lock_dict(l, users) for l in locks]
+
+
+@router.post("/period-locks", status_code=201)
+def lock_period(body: PeriodLockIn, db: Session = Depends(get_db),
+                user=Depends(current_user)):
+    perm = "hr:write" if body.scope == "attendance" else "hr:payroll_prepare"
+    if not _can(db, user, perm):
+        raise HTTPException(403, f"Your role cannot lock a {body.scope} period")
+    lock = db.scalar(select(PeriodLock).where(
+        PeriodLock.scope == body.scope, PeriodLock.year == body.year,
+        PeriodLock.month == body.month).with_for_update())
+    if lock and lock.active:
+        raise HTTPException(409, f"That {body.scope} month is already locked")
+    reason = body.reason.strip()
+    if lock:
+        lock.active = True
+        lock.locked_by = user.id
+        lock.locked_at = datetime.now(timezone.utc)
+        lock.reason = reason
+        lock.unlocked_by = lock.unlocked_at = lock.unlock_reason = None
+    else:
+        lock = PeriodLock(scope=body.scope, year=body.year, month=body.month,
+                          active=True, locked_by=user.id, reason=reason)
+        db.add(lock)
+    db.flush()
+    audit(db, user.id, "hr.period_lock.lock", f"period_lock:{lock.id}",
+          {"scope": lock.scope, "year": lock.year, "month": lock.month, "reason": reason})
+    db.commit()
+    users = {u.id: u for u in db.scalars(select(User)).all()}
+    return _period_lock_dict(lock, users)
+
+
+@router.post("/period-locks/{lock_id}/unlock")
+def unlock_period(lock_id: int, body: PeriodUnlockIn, db: Session = Depends(get_db),
+                  user=Depends(current_user)):
+    if not is_admin(db, user):
+        raise HTTPException(403, "Only the Administrator may unlock a period")
+    lock = db.scalars(select(PeriodLock).where(PeriodLock.id == lock_id)
+                      .with_for_update()).first()
+    if not lock:
+        raise HTTPException(404, "Period lock not found")
+    if not lock.active:
+        raise HTTPException(409, "That period is not locked")
+    lock.active = False
+    lock.unlocked_by = user.id
+    lock.unlocked_at = datetime.now(timezone.utc)
+    lock.unlock_reason = body.reason.strip()
+    audit(db, user.id, "hr.period_lock.unlock", f"period_lock:{lock.id}",
+          {"scope": lock.scope, "year": lock.year, "month": lock.month,
+           "reason": lock.unlock_reason})
+    db.commit()
+    users = {u.id: u for u in db.scalars(select(User)).all()}
+    return _period_lock_dict(lock, users)
 
 
 @router.get("/attendance")
@@ -1407,7 +1575,162 @@ def list_attendance(from_date: date | None = None, to_date: date | None = None,
              "date": r.date, "status": r.status, "check_in": r.check_in, "check_out": r.check_out,
              "office_id": r.office_id, "source": r.source, "geofence_result": r.geofence_result,
              "late_minutes": r.late_minutes, "early_minutes": r.early_minutes,
-             "worked_minutes": r.worked_minutes, "remarks": r.remarks} for r in rows]
+             "worked_minutes": r.worked_minutes, "overtime_minutes": r.overtime_minutes,
+             "remarks": r.remarks} for r in rows]
+
+
+@router.get("/attendance/monthly")
+def monthly_attendance(year: int, month: int, employee_id: int | None = None,
+                       department: str | None = None, db: Session = Depends(get_db),
+                       user=Depends(current_user)):
+    """One month of statuses per employee, plus the counts the calendar needs.
+
+    Days with no attendance row are returned with a null status and no numbers:
+    an unrecorded day is a gap, never an assumed absence.
+    """
+    if not 1 <= month <= 12:
+        raise HTTPException(422, "month must be between 1 and 12")
+    perms = _perms(db, user)
+    if not is_admin(db, user) and "hr:read" not in perms \
+            and "hr:attendance_self" not in perms:
+        raise HTTPException(403, "Your role cannot view attendance")
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if employee_id:
+        if scope is not None and employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+        emp = db.get(Employee, employee_id)
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+        employees = [emp]
+    else:
+        stmt = select(Employee).where(Employee.status == "active")
+        if scope is not None:
+            stmt = stmt.where(Employee.id.in_(scope or {-1}))
+        if department:
+            stmt = stmt.where(Employee.department == department)
+        employees = list(db.scalars(stmt.order_by(Employee.code)).all())
+        if len(employees) > 400:
+            raise HTTPException(422, "More than 400 employees match; filter by department "
+                                     "or choose one employee")
+    first = date(year, month, 1)
+    last = date(year, month, monthrange(year, month)[1])
+    ids = [e.id for e in employees]
+    rows = db.scalars(select(Attendance).where(
+        Attendance.employee_id.in_(ids or [-1]),
+        Attendance.date >= first, Attendance.date <= last)).all()
+    by_emp: dict[int, dict[date, Attendance]] = defaultdict(dict)
+    for row in rows:
+        by_emp[row.employee_id][row.date] = row
+    days = [date(year, month, d) for d in range(1, last.day + 1)]
+    totals = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
+              "late_days": 0, "half_days": 0, "overtime_minutes": 0, "worked_minutes": 0,
+              "missing_days": 0}
+    out = []
+    for emp in employees:
+        cal = by_emp.get(emp.id, {})
+        counts = {"present_days": 0.0, "absent_days": 0, "leave_days": 0.0, "od_days": 0,
+                  "late_days": 0, "half_days": 0, "weekly_off_days": 0, "holiday_days": 0,
+                  "correction_pending": 0, "missing_days": 0, "overtime_minutes": 0,
+                  "worked_minutes": 0}
+        calendar = []
+        for day in days:
+            row = cal.get(day)
+            if row is None:
+                counts["missing_days"] += 1
+                calendar.append({"date": day, "status": None})
+                continue
+            status = row.status
+            if status in ("present", "late", "early_departure"):
+                counts["present_days"] += 1
+            elif status == "half_day":
+                counts["present_days"] += 0.5
+                counts["half_days"] += 1
+            elif status in ("paid_leave", "unpaid_leave"):
+                counts["leave_days"] += 1
+            elif status == "od":
+                counts["od_days"] += 1
+            elif status == "absent":
+                counts["absent_days"] += 1
+            elif status == "weekly_off":
+                counts["weekly_off_days"] += 1
+            elif status == "holiday":
+                counts["holiday_days"] += 1
+            elif status == "correction_pending":
+                counts["correction_pending"] += 1
+            if row.late_minutes:
+                counts["late_days"] += 1
+            counts["overtime_minutes"] += row.overtime_minutes or 0
+            counts["worked_minutes"] += row.worked_minutes or 0
+            calendar.append({"date": day, "status": status,
+                             "check_in": row.check_in, "check_out": row.check_out,
+                             "worked_minutes": row.worked_minutes,
+                             "overtime_minutes": row.overtime_minutes,
+                             "late_minutes": row.late_minutes})
+        for key in totals:
+            totals[key] += counts[key]
+        out.append({"employee_id": emp.id, "code": emp.code, "name": emp.full_name,
+                    "department": emp.department, "designation": emp.designation,
+                    "summary": counts, "calendar": calendar})
+    totals["present_days"] = float(totals["present_days"])
+    totals["leave_days"] = float(totals["leave_days"])
+    return {"year": year, "month": month, "days": days, "weekdays": [d.weekday() for d in days],
+            "employees": out, "totals": totals}
+
+
+@router.post("/attendance/bulk")
+def bulk_attendance(body: BulkAttendanceIn, db: Session = Depends(get_db),
+                    user=Depends(require("hr:attendance_manage"))):
+    """Mark one status across employees and days in a single audited action."""
+    scope = hr_svc.scoped_employee_ids(db, user)
+    ids = set(body.employee_ids)
+    if scope is not None:
+        outside = ids - scope
+        if outside:
+            raise HTTPException(403, f"{len(outside)} selected employee(s) are outside "
+                                     "your team")
+    employees = db.scalars(select(Employee).where(Employee.id.in_(ids))).all()
+    if len(employees) != len(ids):
+        missing = sorted(ids - {e.id for e in employees})
+        raise HTTPException(404, f"Employee(s) not found: {missing}")
+    _assert_range_open(db, "attendance", body.date_from, body.date_to, user,
+                       body.override_reason, action="bulk attendance")
+    existing = {(r.employee_id, r.date): r for r in db.scalars(select(Attendance).where(
+        Attendance.employee_id.in_(ids), Attendance.date >= body.date_from,
+        Attendance.date <= body.date_to)).all()}
+    created = updated = skipped = 0
+    for emp in employees:
+        offs = hr_svc.weekly_off_days(db, emp)
+        holidays = hr_svc.holidays_for(db, emp, body.date_from, body.date_to)
+        day = body.date_from
+        while day <= body.date_to:
+            if body.skip_non_working and not hr_svc.is_working_day(emp, offs, holidays, day):
+                skipped += 1
+                day += timedelta(days=1)
+                continue
+            row = existing.get((emp.id, day))
+            if row is None:
+                row = Attendance(employee_id=emp.id, date=day)
+                db.add(row)
+                created += 1
+            else:
+                updated += 1
+            row.status = body.status
+            row.source = "manual"
+            row.geofence_result = "manual"
+            row.remarks = body.remarks
+            row.overtime_minutes = body.overtime_minutes
+            row.approved_by = user.id
+            day += timedelta(days=1)
+    db.flush()
+    audit(db, user.id, "hr.attendance.bulk", "attendance:bulk",
+          {"employees": len(employees), "from": str(body.date_from),
+           "to": str(body.date_to), "status": body.status, "created": created,
+           "updated": updated, "skipped": skipped,
+           "overtime_minutes": body.overtime_minutes,
+           "override_reason": body.override_reason})
+    db.commit()
+    return {"employees": len(employees), "status": body.status, "created": created,
+            "updated": updated, "skipped": skipped}
 
 
 @router.post("/attendance/check-in", status_code=201)
@@ -1415,6 +1738,7 @@ def check_in(body: CheckInIn, db: Session = Depends(get_db),
              user=Depends(require("hr:attendance_self"))):
     emp = _self_employee(db, user)
     today = hr_svc.business_today()
+    _assert_period_open(db, "attendance", today, user, action="check-in")
     existing = db.scalar(select(Attendance).where(Attendance.employee_id == emp.id,
                                                   Attendance.date == today))
     if existing:
@@ -1456,6 +1780,7 @@ def check_out(body: CheckOutIn, db: Session = Depends(get_db),
               user=Depends(require("hr:attendance_self"))):
     emp = _self_employee(db, user)
     today = hr_svc.business_today()
+    _assert_period_open(db, "attendance", today, user, action="check-out")
     row = db.scalar(select(Attendance).where(Attendance.employee_id == emp.id,
                                              Attendance.date == today).with_for_update())
     if not row or not row.check_in:
@@ -1477,9 +1802,11 @@ def check_out(body: CheckOutIn, db: Session = Depends(get_db),
 @router.post("/attendance/manual", status_code=201)
 def manual_attendance(body: ManualAttendanceIn, db: Session = Depends(get_db),
                       user=Depends(require("hr:attendance_manage"))):
-    emp = db.get(Employee, body.employee_id)
-    if not emp:
-        raise HTTPException(404, "Employee not found")
+    emp = _scoped_employee(db, user, body.employee_id)
+    if body.check_in and body.check_out and body.check_out <= body.check_in:
+        raise HTTPException(422, "Check-out must be later than check-in")
+    _assert_period_open(db, "attendance", body.date, user, body.override_reason,
+                        action="manual attendance")
     row = db.scalar(select(Attendance).where(Attendance.employee_id == emp.id,
                                              Attendance.date == body.date).with_for_update())
     old = None
@@ -1488,7 +1815,8 @@ def manual_attendance(body: ManualAttendanceIn, db: Session = Depends(get_db),
         db.add(row)
     else:
         old = {"status": row.status, "check_in": str(row.check_in) if row.check_in else None,
-               "check_out": str(row.check_out) if row.check_out else None}
+               "check_out": str(row.check_out) if row.check_out else None,
+               "overtime_minutes": row.overtime_minutes}
     row.status = body.status
     row.check_in = body.check_in
     row.check_out = body.check_out
@@ -1496,15 +1824,25 @@ def manual_attendance(body: ManualAttendanceIn, db: Session = Depends(get_db),
     row.source = "manual"
     row.geofence_result = "manual"
     row.remarks = body.remarks
+    row.overtime_minutes = body.overtime_minutes
     row.approved_by = user.id
+    row.worked_minutes = 0
+    row.late_minutes = row.early_minutes = 0
     if body.check_in and body.check_out:
         row.worked_minutes = int((body.check_out - body.check_in).total_seconds() // 60)
+        shift = db.get(Shift, emp.shift_id) if emp.shift_id else None
+        row.late_minutes = hr_svc.shift_late_minutes(shift, body.check_in)
+        row.early_minutes = hr_svc.shift_early_minutes(shift, body.check_out)
     db.flush()
     audit(db, user.id, "hr.attendance.manual", f"attendance:{row.id}",
           {"employee": emp.code, "date": str(body.date), "old": old,
-           "new": {"status": body.status, "remarks": body.remarks}})
+           "new": {"status": body.status, "check_in": str(body.check_in) if body.check_in else None,
+                   "check_out": str(body.check_out) if body.check_out else None,
+                   "overtime_minutes": body.overtime_minutes, "remarks": body.remarks},
+           "override_reason": body.override_reason})
     db.commit()
-    return {"id": row.id, "date": row.date, "status": row.status}
+    return {"id": row.id, "date": row.date, "status": row.status,
+            "worked_minutes": row.worked_minutes, "overtime_minutes": row.overtime_minutes}
 
 
 @router.post("/attendance/{attendance_id}/correction", status_code=201)
@@ -1514,8 +1852,13 @@ def request_correction(attendance_id: int, body: CorrectionIn, db: Session = Dep
     if not row:
         raise HTTPException(404, "Attendance record not found")
     me = hr_svc.employee_for_user(db, user)
-    if not _can(db, user, "hr:attendance_manage") and (not me or me.id != row.employee_id):
+    if _can(db, user, "hr:attendance_manage"):
+        scope = hr_svc.scoped_employee_ids(db, user)
+        if scope is not None and row.employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+    elif not me or me.id != row.employee_id:
         raise HTTPException(403, "You can only request a correction for your own attendance")
+    _assert_period_open(db, "attendance", row.date, user, action="correction request")
     corr = AttendanceCorrection(
         attendance_id=row.id, employee_id=row.employee_id, requested_by=user.id,
         old_status=row.status, new_status=body.new_status, old_check_in=row.check_in,
@@ -1949,6 +2292,7 @@ def prepare_payroll(period_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Payroll period not found")
     if p.status not in ("draft", "under_review"):
         raise HTTPException(409, f"Payroll is {p.status}; it cannot be recalculated")
+    _assert_period_open(db, "payroll", date(p.year, p.month, 1), actor, action="prepare")
     for old in list(p.entries):
         db.delete(old)
     db.flush()
@@ -1972,6 +2316,7 @@ def submit_payroll(period_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Payroll period not found")
     if p.status != "under_review":
         raise HTTPException(409, "Only a reviewed payroll can be submitted for approval")
+    _assert_period_open(db, "payroll", date(p.year, p.month, 1), actor, action="submit")
     existing = db.scalar(select(ApprovalRequest).where(
         ApprovalRequest.record_type == "hr_payroll", ApprovalRequest.record_id == p.id,
         ApprovalRequest.status == "pending"))
@@ -2000,6 +2345,7 @@ def process_payroll(period_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Payroll period not found")
     if p.status != "approved":
         raise HTTPException(409, "Only an approved payroll can be processed")
+    _assert_period_open(db, "payroll", date(p.year, p.month, 1), actor, action="process")
     p.status = "processed"
     p.processed_at = datetime.now(timezone.utc)
     for e in p.entries:
@@ -2019,6 +2365,7 @@ def pay_payroll(period_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Payroll period not found")
     if p.status != "processed":
         raise HTTPException(409, "Only a processed payroll can be marked paid")
+    _assert_period_open(db, "payroll", date(p.year, p.month, 1), actor, action="pay")
     p.status = "paid"
     p.paid_at = datetime.now(timezone.utc)
     for e in p.entries:
@@ -2067,6 +2414,8 @@ def request_payroll_correction(period_id: int, body: CorrectionIn2, db: Session 
         raise HTTPException(404, "Payroll period not found")
     if p.status in ("draft", "under_review"):
         raise HTTPException(409, "Correct the draft before it is approved")
+    _assert_period_open(db, "payroll", date(p.year, p.month, 1), actor,
+                        action="correction request")
     audit(db, actor.id, "hr.payroll.correction_request", f"payroll:{p.id}",
           {"employee_id": body.employee_id, "reason": body.reason.strip()})
     db.commit()

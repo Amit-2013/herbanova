@@ -4,7 +4,7 @@ Each handler applies the underlying change and the request decision in one
 transaction. The central Approvals API only routes to this module; the
 permissions and segregation-of-duties rules are enforced here.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -62,6 +62,15 @@ def _assert_team_scope(db: Session, ar: ApprovalRequest, user) -> None:
         raise HTTPException(403, "That request is outside your team")
 
 
+def _assert_open(db: Session, scope: str, first: date, last: date | None = None) -> None:
+    """A decision may not rewrite a closed month."""
+    lock = (hr_svc.active_period_lock(db, scope, first) if last is None
+            else hr_svc.active_lock_for_range(db, scope, first, last))
+    if lock:
+        raise HTTPException(423, f"The {scope} period {lock.year}-{lock.month:02d} is "
+                                 f"locked: {lock.reason}")
+
+
 def decide_hr_request(db: Session, approval_id: int, body, user):
     ar = _request(db, approval_id)
     if ar.requested_by == user.id:
@@ -103,6 +112,7 @@ def _leave(db: Session, ar: ApprovalRequest, body, user):
     lt = db.get(LeaveType, app.leave_type_id)
     bal = hr_svc.leave_balance(db, app.employee_id, app.leave_type_id, app.date_from.year)
     if body.decision == "approve":
+        _assert_open(db, "attendance", app.date_from, app.date_to)
         if bal.pending >= app.days:
             bal.pending -= app.days
         bal.used += app.days
@@ -121,6 +131,7 @@ def _od(db: Session, ar: ApprovalRequest, body, user):
     if not od or od.status != "pending":
         raise HTTPException(409, "OD request is not pending")
     if body.decision == "approve":
+        _assert_open(db, "attendance", od.date, od.end_date or od.date)
         od.status = "approved"
         hr_svc.apply_attendance_for_od(db, od)
     else:
@@ -139,6 +150,7 @@ def _correction(db: Session, ar: ApprovalRequest, body, user):
                          .with_for_update()).first()
         if not att:
             raise HTTPException(404, "Attendance record not found")
+        _assert_open(db, "attendance", att.date)
         if corr.new_status:
             att.status = corr.new_status
         if corr.new_check_in:
@@ -160,6 +172,7 @@ def _geofence(db: Session, ar: ApprovalRequest, body, user):
     if not att:
         raise HTTPException(404, "Attendance record not found")
     if body.decision == "approve":
+        _assert_open(db, "attendance", att.date)
         att.geofence_result = "manual"
         att.approved_by = user.id
         att.remarks = f"Location exception approved: {body.reason.strip()}"
@@ -173,6 +186,7 @@ def _payroll(db: Session, ar: ApprovalRequest, body, user):
     if period.prepared_by == user.id:
         raise HTTPException(403, "The person who prepared payroll cannot approve it")
     if body.decision == "approve":
+        _assert_open(db, "payroll", date(period.year, period.month, 1))
         period.status = "approved"
         period.approved_by = user.id
         period.approved_at = datetime.now(timezone.utc)

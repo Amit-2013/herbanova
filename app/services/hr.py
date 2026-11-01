@@ -4,6 +4,7 @@ working-day calendar and approval request creation.
 Rules live here so the API and the approval handlers cannot drift apart.
 """
 import math
+from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -12,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from ..core.rbac import is_admin, role_permissions
 from ..models.core import ApprovalRequest
-from ..models.hr import (Attendance, Holiday, LeaveApplication, LeaveBalance, LeaveType, Shift,
-                         WorkLocation)
+from ..models.hr import (Attendance, Holiday, LeaveApplication, LeaveBalance, LeaveType, PeriodLock,
+                         Shift, WorkLocation)
 from ..models.users import Employee
 
 ZERO = Decimal(0)
@@ -194,21 +195,60 @@ def leave_balance(db: Session, employee_id: int, leave_type_id: int, year: int) 
     return bal
 
 
-def working_days(db: Session, employee: Employee, year: int, month: int) -> list[date]:
+def weekly_off_days(db: Session, employee: Employee) -> set[int]:
+    """Weekday numbers the employee's shift treats as the weekly off."""
     shift = db.get(Shift, employee.shift_id) if employee.shift_id else None
-    offs = set(shift.weekly_offs if shift else [5, 6])
+    return set(shift.weekly_offs if shift else [5, 6])
+
+
+def holidays_for(db: Session, employee: Employee, first: date, last: date) -> set[date]:
+    """Holidays that apply to this employee's branch and office.
+
+    A holiday row with neither branch nor location applies company-wide.
+    """
+    rows = db.scalars(select(Holiday).where(
+        Holiday.date >= first, Holiday.date <= last)).all()
+    return {h.date for h in rows
+            if (h.location_id is None or h.location_id == employee.office_id)
+            and (h.branch_id is None or h.branch_id == employee.branch_id)}
+
+
+def is_working_day(employee: Employee, offs: set[int], holidays: set[date],
+                   day: date) -> bool:
+    return day.weekday() not in offs and day not in holidays
+
+
+def working_days(db: Session, employee: Employee, year: int, month: int) -> list[date]:
+    offs = weekly_off_days(db, employee)
     first = date(year, month, 1)
     last = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
-    holidays = {h.date for h in db.scalars(select(Holiday).where(
-        Holiday.date >= first, Holiday.date <= last)).all()
-        if (h.location_id is None or h.location_id == employee.office_id)
-        and (h.branch_id is None or h.branch_id == employee.branch_id)}
+    holidays = holidays_for(db, employee, first, last)
     out, day = [], first
     while day <= last:
-        if day.weekday() not in offs and day not in holidays:
+        if is_working_day(employee, offs, holidays, day):
             out.append(day)
         day += timedelta(days=1)
     return out
+
+
+def active_period_lock(db: Session, scope: str, day: date) -> PeriodLock | None:
+    """The active lock covering that day's month, if any."""
+    return db.scalar(select(PeriodLock).where(
+        PeriodLock.scope == scope, PeriodLock.year == day.year,
+        PeriodLock.month == day.month, PeriodLock.active.is_(True)))
+
+
+def active_lock_for_range(db: Session, scope: str, first: date,
+                          last: date) -> PeriodLock | None:
+    """The first active lock whose month overlaps the range, if any."""
+    for lock in db.scalars(select(PeriodLock).where(
+            PeriodLock.scope == scope, PeriodLock.active.is_(True))
+            .order_by(PeriodLock.year, PeriodLock.month)).all():
+        lock_first = date(lock.year, lock.month, 1)
+        lock_last = date(lock.year, lock.month, monthrange(lock.year, lock.month)[1])
+        if lock_first <= last and lock_last >= first:
+            return lock
+    return None
 
 
 def request_approval(db: Session, *, record_type: str, record_id: int, requested_by: int,
