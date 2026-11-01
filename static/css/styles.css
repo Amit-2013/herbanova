@@ -788,3 +788,4 @@ html[data-theme="dark"] .hr-mx-c.od{background:#1c2f45;color:#9dc3ea}
   .hr-sums{gap:6px}
 }
 #drawer.hr-wide{width:min(1180px,100%)}
+.hr-wrap{flex-wrap:wrap}
