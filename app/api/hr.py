@@ -29,11 +29,11 @@ from sqlalchemy.orm import Session
 from ..core.db import get_db
 from ..core.rbac import current_user, is_admin, require, role_permissions
 from ..models.core import ApprovalRequest, AuditLog, User
-from ..models.hr import (Announcement, Attendance, AttendanceCorrection, Branch, Department,
-                         EmployeeAsset, EmployeeDocument, Holiday, HRNotification, ImportBatch,
-                         LeaveApplication, LeaveBalance, LeaveType, LetterTemplate, ODRequest,
-                         PayrollEntry, PayrollPeriod, PeriodLock, SalaryComponent, SalaryStructure,
-                         SalaryStructureLine, SavedFilter, Shift, WorkLocation)
+from ..models.hr import (Announcement, Attendance, AttendanceCorrection, AttendanceRule, Branch,
+                         Department, EmployeeAsset, EmployeeDocument, Holiday, HRNotification,
+                         ImportBatch, LeaveApplication, LeaveBalance, LeaveType, LetterTemplate,
+                         ODRequest, PayrollEntry, PayrollPeriod, PeriodLock, SalaryComponent,
+                         SalaryStructure, SalaryStructureLine, SavedFilter, Shift, WorkLocation)
 from ..models.users import Employee
 from ..services import hr as hr_svc
 from ..services import hr_documents
@@ -273,6 +273,57 @@ def _employee_dict(db: Session, e: Employee, viewer=None) -> dict:
     return d
 
 
+def _normalise_employee_location(db: Session, data: dict,
+                                 current: Employee | None = None) -> None:
+    """Keep branch and office consistent: an office decides its own branch.
+
+    A PATCH that touches neither field is left alone, so editing a phone number
+    never re-validates historic location data.
+    """
+    if "branch_id" not in data and "office_id" not in data:
+        return
+    branch_id = data["branch_id"] if "branch_id" in data else (
+        current.branch_id if current else None)
+    office_id = data["office_id"] if "office_id" in data else (
+        current.office_id if current else None)
+    if branch_id is not None:
+        branch = db.get(Branch, branch_id)
+        if not branch:
+            raise HTTPException(404, "Branch not found")
+        if (current is None or current.branch_id != branch_id) and branch.status != "active":
+            raise HTTPException(422, "That branch is inactive; choose an active branch")
+    if office_id is not None:
+        office = db.get(WorkLocation, office_id)
+        if not office:
+            raise HTTPException(404, "Office not found")
+        if (current is None or current.office_id != office_id) and office.status != "active":
+            raise HTTPException(422, "That office is inactive; choose an active office")
+        if office.branch_id is not None:
+            if branch_id is not None and branch_id != office.branch_id:
+                raise HTTPException(422, "That office belongs to a different branch")
+            data["branch_id"] = office.branch_id
+
+
+def _employee_rows(db: Session, emps: list[Employee], viewer=None) -> list[dict]:
+    """Directory rows plus the names and attendance policy the People screen shows."""
+    branches = {b.id: b for b in db.scalars(select(Branch)).all()}
+    offices = {o.id: o for o in db.scalars(select(WorkLocation)).all()}
+    rules = list(db.scalars(select(AttendanceRule)
+                            .where(AttendanceRule.active.is_(True))).all())
+    today = hr_svc.business_today()
+    out = []
+    for e in emps:
+        d = _employee_dict(db, e, viewer)
+        d["branch_name"] = branches[e.branch_id].name if e.branch_id in branches else None
+        d["office_name"] = offices[e.office_id].name if e.office_id in offices else None
+        req = hr_svc.resolve_attendance_requirement(db, e, today, rules, offices)
+        d["attendance_required"] = req.required
+        d["attendance_self_service"] = req.self_service
+        d["attendance_rule"] = req.source
+        out.append(d)
+    return out
+
+
 def _next_occurrence(d: date, today: date) -> date:
     """The next time this month/day comes round, on or after today."""
     try:
@@ -289,7 +340,8 @@ def _next_occurrence(d: date, today: date) -> date:
 
 @router.get("/dashboard")
 def dashboard(day: date | None = None, from_date: date | None = None,
-              to_date: date | None = None, db: Session = Depends(get_db),
+              to_date: date | None = None, branch_id: int | None = None,
+              office_id: int | None = None, db: Session = Depends(get_db),
               user=Depends(require("hr:read"))):
     """One screen for the HR home page, scoped to the viewer's team.
 
@@ -310,9 +362,19 @@ def dashboard(day: date | None = None, from_date: date | None = None,
     all_emps = db.scalars(select(Employee)).all()
     if scope is not None:
         all_emps = [e for e in all_emps if e.id in scope]
+    if branch_id:
+        all_emps = [e for e in all_emps if e.branch_id == branch_id]
+    if office_id:
+        all_emps = [e for e in all_emps if e.office_id == office_id]
     emp_ids = {e.id for e in all_emps}
     active = [e for e in all_emps if e.status == "active"]
     active_ids = {e.id for e in active}
+    rules = list(db.scalars(select(AttendanceRule)
+                            .where(AttendanceRule.active.is_(True))).all())
+    offices = {o.id: o for o in db.scalars(select(WorkLocation)).all()}
+    required_today = {e.id for e in active
+                      if hr_svc.resolve_attendance_requirement(db, e, day, rules,
+                                                               offices).required}
 
     day_rows = db.scalars(select(Attendance).where(
         Attendance.date == day, Attendance.employee_id.in_(emp_ids or {-1}))).all()
@@ -462,6 +524,10 @@ def dashboard(day: date | None = None, from_date: date | None = None,
     branch_rows = db.execute(
         select(Branch.name, func.count()).join(Employee, Employee.branch_id == Branch.id)
         .where(Employee.id.in_(active_ids or {-1})).group_by(Branch.name)).all()
+    office_rows = db.execute(
+        select(WorkLocation.name, func.count())
+        .join(Employee, Employee.office_id == WorkLocation.id)
+        .where(Employee.id.in_(active_ids or {-1})).group_by(WorkLocation.name)).all()
 
     period = db.scalar(select(PayrollPeriod).where(
         PayrollPeriod.year == day.year, PayrollPeriod.month == day.month))
@@ -496,10 +562,14 @@ def dashboard(day: date | None = None, from_date: date | None = None,
         "payroll_visible": payroll_visible,
         "payroll_status": period.status if (period and payroll_visible) else None,
         "salary_payable": _m(payable) if payroll_visible else None,
+        "filters": {"branch_id": branch_id, "office_id": office_id},
+        "attendance_required_today": len(required_today),
+        "attendance_exempt_today": len(active) - len(required_today),
         "attendance_trend": attendance_trend,
         "by_department": [{"department": d or "Unassigned", "employees": n}
                           for d, n in dept_rows],
         "by_branch": [{"branch": b, "employees": n} for b, n in branch_rows],
+        "by_office": [{"office": o, "employees": n} for o, n in office_rows],
         "leave_by_type": [{"code": v["code"], "name": v["name"],
                            "days": str(v["days"]), "applications": v["applications"]}
                           for v in leave_by_type.values()],
@@ -604,7 +674,7 @@ def list_employees(response: Response, q: str | None = None, department: str | N
     stmt = stmt.order_by(column.desc() if order == "desc" else column.asc(), Employee.code)
     if page:
         stmt = stmt.limit(page_size).offset((page - 1) * page_size)
-    return [_employee_dict(db, e, user) for e in db.scalars(stmt).all()]
+    return _employee_rows(db, list(db.scalars(stmt).all()), user)
 
 
 @router.get("/employees/export.csv")
@@ -629,18 +699,18 @@ def export_employees(response: Response, q: str | None = None, department: str |
     out = io.StringIO()
     writer = csv.writer(out)
     columns = ["code", "full_name", "department", "designation", "status", "joining_date",
-               "date_of_exit", "manager", "phone", "email", "employment_type", "office",
-               "bank_account_no", "bank_ifsc", "pan", "uan", "esi_no"]
+               "date_of_exit", "manager", "phone", "email", "employment_type", "branch",
+               "office", "attendance_required", "bank_account_no", "bank_ifsc", "pan", "uan",
+               "esi_no"]
     writer.writerow(columns)
-    offices = {o.id: o.name for o in db.scalars(select(WorkLocation)).all()}
-    for e in emps:
-        d = _employee_dict(db, e, user)
+    for d in _employee_rows(db, list(emps), user):
         writer.writerow([
             d["code"], d["full_name"], d["department"] or "", d["designation"] or "",
             d["status"], d["joining_date"] or "", d["date_of_exit"] or "",
-            managers.get(e.manager_id, ""),
+            managers.get(d["manager_id"], ""),
             d["phone"] or "", d["email"] or "", d["employment_type"] or "",
-            offices.get(e.office_id, ""),
+            d["branch_name"] or "", d["office_name"] or "",
+            "yes" if d["attendance_required"] else "no",
             d["bank_account_no"] or "", d["bank_ifsc"] or "", d["pan"] or "",
             d["uan"] or "", d["esi_no"] or ""])
     audit(db, user.id, "hr.employee.export", "employee:export", {"rows": len(emps)})
@@ -857,6 +927,7 @@ def create_employee(body: EmployeeIn, db: Session = Depends(get_db),
     if body.manager_id and not db.get(Employee, body.manager_id):
         raise HTTPException(404, "Manager not found")
     data = body.model_dump()
+    _normalise_employee_location(db, data)
     _refuse_confidential_write(db, actor, data)
     if data.get("shift_id") is None:
         # New staff go on the general office shift, which is what the late /
@@ -884,6 +955,7 @@ def update_employee(employee_id: int, body: EmployeePatch, db: Session = Depends
     if not e:
         raise HTTPException(404, "Employee not found")
     data = body.model_dump(exclude_unset=True)
+    _normalise_employee_location(db, data, e)
     _refuse_confidential_write(db, actor, data)
     if data.get("status") not in (None, "active", "inactive"):
         raise HTTPException(422, "status must be active or inactive")
@@ -1157,6 +1229,8 @@ def employee_profile(employee_id: int, db: Session = Depends(get_db),
                      "changes": log.changes or {}} for log, actor in history],
         "can_edit": _can(db, user, "hr:write"),
         "can_edit_confidential": full,
+        "attendance_requirement": hr_svc.resolve_attendance_requirement(
+            db, e, hr_svc.business_today()).as_dict(),
     }
 
 
@@ -1177,6 +1251,14 @@ class BranchIn(BaseModel):
     code: str = Field(min_length=2, max_length=20)
     name: str = Field(min_length=2, max_length=120)
     address: str | None = None
+    hr_admin_id: int | None = None
+
+
+class BranchPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    address: str | None = None
+    hr_admin_id: int | None = None
+    status: Literal["active", "inactive"] | None = None
 
 
 class OfficeIn(BaseModel):
@@ -1188,6 +1270,75 @@ class OfficeIn(BaseModel):
     longitude: Decimal | None = Field(default=None, ge=-180, le=180)
     geofence_radius_m: int | None = Field(default=200, gt=0, le=100000)
     attendance_mode: Literal["office", "gps", "both"] = "both"
+    hr_admin_id: int | None = None
+
+    @model_validator(mode="after")
+    def both_coordinates(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Give both the latitude and the longitude, or neither")
+        return self
+
+
+class OfficePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    branch_id: int | None = None
+    address: str | None = None
+    latitude: Decimal | None = Field(default=None, ge=-90, le=90)
+    longitude: Decimal | None = Field(default=None, ge=-180, le=180)
+    geofence_radius_m: int | None = Field(default=None, gt=0, le=100000)
+    attendance_mode: Literal["office", "gps", "both"] | None = None
+    hr_admin_id: int | None = None
+    status: Literal["active", "inactive"] | None = None
+
+
+class AttendanceRuleIn(BaseModel):
+    """Attendance requirements can target any mix of branch, office, role and person."""
+    branch_id: int | None = None
+    office_id: int | None = None
+    designation: str | None = Field(default=None, max_length=80)
+    employee_id: int | None = None
+    required: bool = True
+    self_service: bool = True
+    shift_id: int | None = None
+    attendance_mode: Literal["office", "gps", "both"] | None = None
+    effective_from: date | None = None
+    effective_to: date | None = None
+    priority: int = Field(default=100, ge=1, le=1000)
+    active: bool = True
+    note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("designation")
+    @classmethod
+    def clean_designation(cls, value):
+        return value.strip() or None if value else None
+
+    @model_validator(mode="after")
+    def ordered_dates(self):
+        if self.effective_from and self.effective_to \
+                and self.effective_to < self.effective_from:
+            raise ValueError("The end date cannot be before the start date")
+        return self
+
+
+class AttendanceRulePatch(BaseModel):
+    branch_id: int | None = None
+    office_id: int | None = None
+    designation: str | None = Field(default=None, max_length=80)
+    employee_id: int | None = None
+    required: bool | None = None
+    self_service: bool | None = None
+    shift_id: int | None = None
+    attendance_mode: Literal["office", "gps", "both"] | None = None
+    effective_from: date | None = None
+    effective_to: date | None = None
+    priority: int | None = Field(default=None, ge=1, le=1000)
+    active: bool | None = None
+    note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("designation")
+    @classmethod
+    def clean_designation(cls, value):
+        return value.strip() or None if value else None
 
 
 def _normalise_weekly_offs(value):
@@ -1196,6 +1347,343 @@ def _normalise_weekly_offs(value):
     if any(day < 0 or day > 6 for day in value):
         raise ValueError("weekly_offs must be weekday numbers 0 (Monday) to 6 (Sunday)")
     return sorted(set(value))
+
+
+def _site_counts(db: Session) -> tuple[dict[int, int], dict[int, int]]:
+    """Active employees per branch and per office, in two queries."""
+    branch_counts = dict(db.execute(
+        select(Employee.branch_id, func.count()).where(
+            Employee.status == "active", Employee.branch_id.is_not(None))
+        .group_by(Employee.branch_id)).all())
+    office_counts = dict(db.execute(
+        select(Employee.office_id, func.count()).where(
+            Employee.status == "active", Employee.office_id.is_not(None))
+        .group_by(Employee.office_id)).all())
+    return branch_counts, office_counts
+
+
+def _employee_names(db: Session) -> dict[int, str]:
+    return {e.id: e.full_name for e in db.scalars(select(Employee)).all()}
+
+
+def _branch_dict(b: Branch, counts: dict[int, int], names: dict[int, str]) -> dict:
+    return {"id": b.id, "code": b.code, "name": b.name, "address": b.address,
+            "hr_admin_id": b.hr_admin_id, "hr_admin": names.get(b.hr_admin_id),
+            "active_employees": counts.get(b.id, 0), "status": b.status}
+
+
+def _office_dict(o: WorkLocation, branches: dict[int, Branch], counts: dict[int, int],
+                 names: dict[int, str]) -> dict:
+    return {"id": o.id, "code": o.code, "name": o.name, "branch_id": o.branch_id,
+            "branch": branches[o.branch_id].name if o.branch_id in branches else None,
+            "address": o.address, "latitude": o.latitude, "longitude": o.longitude,
+            "geofence_radius_m": o.geofence_radius_m, "attendance_mode": o.attendance_mode,
+            "hr_admin_id": o.hr_admin_id, "hr_admin": names.get(o.hr_admin_id),
+            "active_employees": counts.get(o.id, 0), "status": o.status}
+
+
+def _require_site_admin(db: Session, hr_admin_id: int | None) -> None:
+    if hr_admin_id is not None and not db.get(Employee, hr_admin_id):
+        raise HTTPException(404, "The responsible employee was not found")
+
+
+@router.get("/branches")
+def list_branches(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
+    branch_counts, _ = _site_counts(db)
+    names = _employee_names(db)
+    return [_branch_dict(b, branch_counts, names) for b in
+            db.scalars(select(Branch).order_by(Branch.code)).all()]
+
+
+@router.post("/branches", status_code=201)
+def create_branch(body: BranchIn, db: Session = Depends(get_db),
+                  actor=Depends(require("hr:write"))):
+    _require_site_admin(db, body.hr_admin_id)
+    b = Branch(**body.model_dump())
+    db.add(b)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback(); raise HTTPException(409, "Branch code exists")
+    audit(db, actor.id, "hr.branch.create", f"branch:{b.id}",
+          {"code": b.code, "hr_admin_id": b.hr_admin_id})
+    db.commit()
+    branch_counts, _ = _site_counts(db)
+    return _branch_dict(b, branch_counts, _employee_names(db))
+
+
+@router.patch("/branches/{branch_id}")
+def update_branch(branch_id: int, body: BranchPatch, db: Session = Depends(get_db),
+                  actor=Depends(require("hr:write"))):
+    """Edit a branch, including the person responsible for HR there.
+
+    A branch with active staff cannot be switched off until those people are
+    reassigned; deactivating it would otherwise hide live attendance policy.
+    """
+    b = db.get(Branch, branch_id)
+    if not b:
+        raise HTTPException(404, "Branch not found")
+    data = body.model_dump(exclude_unset=True)
+    _require_site_admin(db, data.get("hr_admin_id"))
+    if data.get("status") == "inactive":
+        used = db.scalar(select(func.count()).select_from(Employee).where(
+            Employee.branch_id == b.id, Employee.status == "active")) or 0
+        if used:
+            raise HTTPException(409, f"{used} active employee(s) are assigned to this branch. "
+                                     "Reassign them before deactivating it.")
+    changed = {}
+    for key, value in data.items():
+        old = getattr(b, key)
+        if old != value:
+            changed[key] = {"old": str(old) if old is not None else None,
+                            "new": str(value) if value is not None else None}
+            setattr(b, key, value)
+    if changed:
+        audit(db, actor.id, "hr.branch.update", f"branch:{b.id}", {"code": b.code, **changed})
+        db.commit()
+    branch_counts, _ = _site_counts(db)
+    return _branch_dict(b, branch_counts, _employee_names(db))
+
+
+@router.get("/offices")
+def list_offices(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
+    _, office_counts = _site_counts(db)
+    branches = {b.id: b for b in db.scalars(select(Branch)).all()}
+    names = _employee_names(db)
+    return [_office_dict(o, branches, office_counts, names) for o in
+            db.scalars(select(WorkLocation).order_by(WorkLocation.code)).all()]
+
+
+@router.post("/offices", status_code=201)
+def create_office(body: OfficeIn, db: Session = Depends(get_db),
+                  actor=Depends(require("hr:write"))):
+    if body.branch_id is not None and not db.get(Branch, body.branch_id):
+        raise HTTPException(404, "Branch not found")
+    _require_site_admin(db, body.hr_admin_id)
+    o = WorkLocation(**body.model_dump())
+    db.add(o)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback(); raise HTTPException(409, "Office code exists")
+    audit(db, actor.id, "hr.office.create", f"office:{o.id}",
+          {"code": o.code, "branch_id": o.branch_id, "latitude": str(o.latitude),
+           "longitude": str(o.longitude), "radius": o.geofence_radius_m,
+           "mode": o.attendance_mode, "hr_admin_id": o.hr_admin_id})
+    db.commit()
+    branches = {b.id: b for b in db.scalars(select(Branch)).all()}
+    _, office_counts = _site_counts(db)
+    return _office_dict(o, branches, office_counts, _employee_names(db))
+
+
+@router.patch("/offices/{office_id}")
+def update_office(office_id: int, body: OfficePatch, db: Session = Depends(get_db),
+                  actor=Depends(require("hr:write"))):
+    """Edit an office, its geofence and its attendance mode.
+
+    Changing the branch, or switching the office off, is refused while active
+    employees still point at it: those people must be reassigned first.
+    """
+    o = db.get(WorkLocation, office_id)
+    if not o:
+        raise HTTPException(404, "Office not found")
+    data = body.model_dump(exclude_unset=True)
+    if "branch_id" in data and data["branch_id"] is not None \
+            and not db.get(Branch, data["branch_id"]):
+        raise HTTPException(404, "Branch not found")
+    _require_site_admin(db, data.get("hr_admin_id"))
+    lat = data.get("latitude", o.latitude)
+    lon = data.get("longitude", o.longitude)
+    if (lat is None) != (lon is None):
+        raise HTTPException(422, "Give both the latitude and the longitude, or neither")
+    used = db.scalar(select(func.count()).select_from(Employee).where(
+        Employee.office_id == o.id, Employee.status == "active")) or 0
+    if "branch_id" in data and data["branch_id"] != o.branch_id and used:
+        raise HTTPException(409, f"{used} active employee(s) work at this office. Reassign "
+                                 "them before moving it to another branch.")
+    if data.get("status") == "inactive" and used:
+        raise HTTPException(409, f"{used} active employee(s) work at this office. Reassign "
+                                 "them before deactivating it.")
+    changed = {}
+    for key, value in data.items():
+        old = getattr(o, key)
+        if old != value:
+            def shown(v):
+                return str(v) if v is not None else None
+            changed[key] = {"old": shown(old), "new": shown(value)}
+            setattr(o, key, value)
+    if changed:
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback(); raise HTTPException(409, "Office code exists")
+        audit(db, actor.id, "hr.office.update", f"office:{o.id}", {"code": o.code, **changed})
+        db.commit()
+    branches = {b.id: b for b in db.scalars(select(Branch)).all()}
+    _, office_counts = _site_counts(db)
+    return _office_dict(o, branches, office_counts, _employee_names(db))
+
+
+# ----------------------------------------------------- attendance requirements
+RULE_TARGET_FIELDS = ("branch_id", "office_id", "designation", "employee_id")
+
+
+def _rule_value(data: dict, current: AttendanceRule | None, key: str):
+    return data[key] if key in data else getattr(current, key, None)
+
+
+def _validate_rule_targets(db: Session, data: dict, current: AttendanceRule | None = None) -> None:
+    """Refuse a rule that points at a site or person it could never match."""
+    def value(key):
+        return _rule_value(data, current, key)
+
+    branch_id, office_id = value("branch_id"), value("office_id")
+    employee_id = value("employee_id")
+    branch = db.get(Branch, branch_id) if branch_id else None
+    if branch_id and not branch:
+        raise HTTPException(404, "Branch not found")
+    office = db.get(WorkLocation, office_id) if office_id else None
+    if office_id and not office:
+        raise HTTPException(404, "Office not found")
+    if branch and office and office.branch_id and office.branch_id != branch.id:
+        raise HTTPException(422, "That office belongs to a different branch")
+    employee = db.get(Employee, employee_id) if employee_id else None
+    if employee_id and not employee:
+        raise HTTPException(404, "Employee not found")
+    shift_id = value("shift_id")
+    if shift_id and not db.get(Shift, shift_id):
+        raise HTTPException(404, "Shift not found")
+    if employee and office_id and employee.office_id and employee.office_id != office_id:
+        raise HTTPException(422, "That employee is not assigned to this office, so the rule "
+                                 "would never match")
+    if employee and branch_id and employee.branch_id and employee.branch_id != branch_id:
+        raise HTTPException(422, "That employee is not assigned to this branch, so the rule "
+                                 "would never match")
+    first, last = value("effective_from"), value("effective_to")
+    if first and last and last < first:
+        raise HTTPException(422, "The end date cannot be before the start date")
+    if value("active"):
+        for other in db.scalars(select(AttendanceRule)
+                                .where(AttendanceRule.active.is_(True))).all():
+            if current is not None and other.id == current.id:
+                continue
+            same_targets = all(
+                (getattr(other, key) or None) == (value(key) or None)
+                for key in RULE_TARGET_FIELDS)
+            if same_targets:
+                if not any(value(key) for key in RULE_TARGET_FIELDS):
+                    raise HTTPException(409, "An active company-wide rule already exists; "
+                                             "edit that rule instead")
+                raise HTTPException(409, f"Rule #{other.id} already targets exactly these "
+                                         "employees; edit it instead")
+
+
+def _rule_dict(rule: AttendanceRule, branches: dict | None = None,
+               offices: dict | None = None, shifts: dict | None = None,
+               employees: dict | None = None) -> dict:
+    branches = branches or {}
+    offices = offices or {}
+    shifts = shifts or {}
+    employees = employees or {}
+    return {"id": rule.id, "branch_id": rule.branch_id,
+            "branch": branches[rule.branch_id].name if rule.branch_id in branches else None,
+            "office_id": rule.office_id,
+            "office": offices[rule.office_id].name if rule.office_id in offices else None,
+            "designation": rule.designation, "employee_id": rule.employee_id,
+            "employee": employees.get(rule.employee_id), "required": rule.required,
+            "self_service": rule.self_service, "shift_id": rule.shift_id,
+            "shift": shifts[rule.shift_id].name if rule.shift_id in shifts else None,
+            "attendance_mode": rule.attendance_mode,
+            "effective_from": rule.effective_from, "effective_to": rule.effective_to,
+            "priority": rule.priority, "active": rule.active, "note": rule.note,
+            "source": hr_svc.rule_label(rule)}
+
+
+def _rule_dicts(db: Session, rules: list[AttendanceRule]) -> list[dict]:
+    branches = {b.id: b for b in db.scalars(select(Branch)).all()}
+    offices = {o.id: o for o in db.scalars(select(WorkLocation)).all()}
+    shifts = {s.id: s for s in db.scalars(select(Shift)).all()}
+    employees = _employee_names(db)
+    return [_rule_dict(r, branches, offices, shifts, employees) for r in rules]
+
+
+@router.get("/attendance-rules")
+def list_attendance_rules(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
+    rules = db.scalars(select(AttendanceRule)
+                       .order_by(AttendanceRule.priority, AttendanceRule.id)).all()
+    return _rule_dicts(db, list(rules))
+
+
+@router.get("/attendance-rules/resolve")
+def resolve_attendance_rule(employee_id: int | None = None, day: date | None = None,
+                            db: Session = Depends(get_db), user=Depends(current_user)):
+    """The policy that applies to an employee today, and where it came from."""
+    _require_hr_view(db, user)
+    if employee_id:
+        employee = _scoped_employee(db, user, employee_id)
+    else:
+        employee = hr_svc.employee_for_user(db, user)
+        if not employee:
+            raise HTTPException(404, "No employee record is linked to this login")
+    when = day or hr_svc.business_today()
+    req = hr_svc.resolve_attendance_requirement(db, employee, when)
+    office = db.get(WorkLocation, employee.office_id) if employee.office_id else None
+    shift = db.get(Shift, req.shift_id) if req.shift_id else None
+    return {"employee_id": employee.id, "employee": employee.full_name, "date": when,
+            "office_id": employee.office_id, "office": office.name if office else None,
+            "branch_id": employee.branch_id, "shift": shift.name if shift else None,
+            **req.as_dict()}
+
+
+@router.post("/attendance-rules", status_code=201)
+def create_attendance_rule(body: AttendanceRuleIn, db: Session = Depends(get_db),
+                           actor=Depends(require("hr:write"))):
+    data = body.model_dump()
+    _validate_rule_targets(db, data)
+    rule = AttendanceRule(**data, created_by=actor.id)
+    db.add(rule)
+    db.flush()
+    audit(db, actor.id, "hr.attendance_rule.create", f"attendance_rule:{rule.id}",
+          {"targets": {k: data.get(k) for k in RULE_TARGET_FIELDS},
+           "required": rule.required, "self_service": rule.self_service})
+    db.commit()
+    return _rule_dicts(db, [rule])[0]
+
+
+@router.patch("/attendance-rules/{rule_id}")
+def update_attendance_rule(rule_id: int, body: AttendanceRulePatch,
+                           db: Session = Depends(get_db),
+                           actor=Depends(require("hr:write"))):
+    rule = db.get(AttendanceRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "Attendance rule not found")
+    data = body.model_dump(exclude_unset=True)
+    _validate_rule_targets(db, data, rule)
+    changed = {}
+    for key, value in data.items():
+        old = getattr(rule, key)
+        if old != value:
+            changed[key] = {"old": str(old) if old is not None else None,
+                            "new": str(value) if value is not None else None}
+            setattr(rule, key, value)
+    if changed:
+        audit(db, actor.id, "hr.attendance_rule.update", f"attendance_rule:{rule.id}", changed)
+        db.commit()
+    return _rule_dicts(db, [rule])[0]
+
+
+@router.delete("/attendance-rules/{rule_id}", status_code=204)
+def delete_attendance_rule(rule_id: int, db: Session = Depends(get_db),
+                           actor=Depends(require("hr:write"))):
+    rule = db.get(AttendanceRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "Attendance rule not found")
+    audit(db, actor.id, "hr.attendance_rule.delete", f"attendance_rule:{rule.id}",
+          {"targets": {k: getattr(rule, k) for k in RULE_TARGET_FIELDS},
+           "note": rule.note})
+    db.delete(rule)
+    db.commit()
+    return Response(status_code=204)
 
 
 class ShiftIn(BaseModel):
@@ -1242,50 +1730,6 @@ class HolidayIn(BaseModel):
     name: str
     branch_id: int | None = None
     location_id: int | None = None
-
-
-@router.get("/branches")
-def list_branches(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
-    return [{"id": b.id, "code": b.code, "name": b.name, "address": b.address,
-             "status": b.status} for b in db.scalars(select(Branch).order_by(Branch.code)).all()]
-
-
-@router.post("/branches", status_code=201)
-def create_branch(body: BranchIn, db: Session = Depends(get_db),
-                  actor=Depends(require("hr:write"))):
-    b = Branch(**body.model_dump())
-    db.add(b)
-    try:
-        db.flush()
-    except IntegrityError:
-        db.rollback(); raise HTTPException(409, "Branch code exists")
-    audit(db, actor.id, "hr.branch.create", f"branch:{b.id}", {"code": b.code})
-    db.commit()
-    return {"id": b.id, "code": b.code, "name": b.name, "address": b.address, "status": b.status}
-
-
-@router.get("/offices")
-def list_offices(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
-    return [{"id": o.id, "code": o.code, "name": o.name, "branch_id": o.branch_id,
-             "address": o.address, "latitude": o.latitude, "longitude": o.longitude,
-             "geofence_radius_m": o.geofence_radius_m, "attendance_mode": o.attendance_mode,
-             "status": o.status} for o in db.scalars(select(WorkLocation).order_by(WorkLocation.code)).all()]
-
-
-@router.post("/offices", status_code=201)
-def create_office(body: OfficeIn, db: Session = Depends(get_db),
-                  actor=Depends(require("hr:write"))):
-    o = WorkLocation(**body.model_dump())
-    db.add(o)
-    try:
-        db.flush()
-    except IntegrityError:
-        db.rollback(); raise HTTPException(409, "Office code exists")
-    audit(db, actor.id, "hr.office.create", f"office:{o.id}",
-          {"code": o.code, "latitude": str(o.latitude), "longitude": str(o.longitude),
-           "radius": o.geofence_radius_m})
-    db.commit()
-    return {"id": o.id, "code": o.code, "name": o.name, "attendance_mode": o.attendance_mode}
 
 
 def _shift_dict(s: Shift) -> dict:
@@ -1551,7 +1995,8 @@ def unlock_period(lock_id: int, body: PeriodUnlockIn, db: Session = Depends(get_
 @router.get("/attendance")
 def list_attendance(from_date: date | None = None, to_date: date | None = None,
                     employee_id: int | None = None, status: str | None = None,
-                    department: str | None = None, db: Session = Depends(get_db),
+                    department: str | None = None, branch_id: int | None = None,
+                    office_id: int | None = None, db: Session = Depends(get_db),
                     user=Depends(current_user)):
     # Team attendance needs a manager/HR right; a staff member sees only their
     # own days, and a manager only their reporting chain.
@@ -1578,9 +2023,18 @@ def list_attendance(from_date: date | None = None, to_date: date | None = None,
     if department:
         rows = [r for r in rows if emps.get(r.employee_id) and
                 emps[r.employee_id].department == department]
+    if branch_id:
+        rows = [r for r in rows if emps.get(r.employee_id) and
+                emps[r.employee_id].branch_id == branch_id]
+    if office_id:
+        rows = [r for r in rows if emps.get(r.employee_id) and
+                emps[r.employee_id].office_id == office_id]
     return [{"id": r.id, "employee_id": r.employee_id,
              "employee": emps[r.employee_id].full_name if r.employee_id in emps else "?",
              "employee_code": emps[r.employee_id].code if r.employee_id in emps else "",
+             "branch_id": emps[r.employee_id].branch_id if r.employee_id in emps else None,
+             "employee_office_id": emps[r.employee_id].office_id
+             if r.employee_id in emps else None,
              "date": r.date, "status": r.status, "check_in": r.check_in, "check_out": r.check_out,
              "office_id": r.office_id, "source": r.source, "geofence_result": r.geofence_result,
              "late_minutes": r.late_minutes, "early_minutes": r.early_minutes,
@@ -1590,15 +2044,18 @@ def list_attendance(from_date: date | None = None, to_date: date | None = None,
 
 @router.get("/attendance/monthly")
 def monthly_attendance(year: int, month: int, employee_id: int | None = None,
-                       department: str | None = None, db: Session = Depends(get_db),
+                       department: str | None = None, branch_id: int | None = None,
+                       office_id: int | None = None, db: Session = Depends(get_db),
                        user=Depends(current_user)):
     """One month of statuses per employee, plus the counts the calendar needs.
 
     Days with no attendance row are returned with a null status and no numbers:
-    an unrecorded day is a gap, never an assumed absence.
+    an unrecorded day is a gap, never an assumed absence. A day the policy
+    exempts is marked as not required instead.
     """
     return hr_svc.monthly_attendance(db, user, year=year, month=month,
-                                     employee_id=employee_id, department=department)
+                                     employee_id=employee_id, department=department,
+                                     branch_id=branch_id, office_id=office_id)
 
 
 @router.post("/attendance/bulk")
@@ -1616,6 +2073,15 @@ def bulk_attendance(body: BulkAttendanceIn, db: Session = Depends(get_db),
     if len(employees) != len(ids):
         missing = sorted(ids - {e.id for e in employees})
         raise HTTPException(404, f"Employee(s) not found: {missing}")
+    rules = list(db.scalars(select(AttendanceRule)
+                            .where(AttendanceRule.active.is_(True))).all())
+    exempt = [e for e in employees
+              if not hr_svc.resolve_attendance_requirement(db, e, body.date_from,
+                                                           rules).required]
+    if exempt:
+        shown = ", ".join(f"{e.code} {e.full_name}" for e in exempt[:5])
+        raise HTTPException(409, f"Attendance is not required for {len(exempt)} selected "
+                                 f"employee(s): {shown}. Remove them from this action.")
     _assert_range_open(db, "attendance", body.date_from, body.date_to, user,
                        body.override_reason, action="bulk attendance")
     existing = {(r.employee_id, r.date): r for r in db.scalars(select(Attendance).where(
@@ -1662,11 +2128,15 @@ def check_in(body: CheckInIn, db: Session = Depends(get_db),
              user=Depends(require("hr:attendance_self"))):
     emp = _self_employee(db, user)
     today = hr_svc.business_today()
+    req = hr_svc.require_self_service(db, emp, today)
     _assert_period_open(db, "attendance", today, user, action="check-in")
     existing = db.scalar(select(Attendance).where(Attendance.employee_id == emp.id,
                                                   Attendance.date == today))
     if existing:
         raise HTTPException(409, "Attendance for today has already been recorded")
+    if (req.attendance_mode or "office") == "gps" \
+            and (body.latitude is None or body.longitude is None):
+        raise HTTPException(422, "This work location requires GPS coordinates for check-in.")
     office = db.get(WorkLocation, body.office_id or emp.office_id) if (body.office_id or emp.office_id) else None
     if office and office.status != "active":
         raise HTTPException(409, "That office is not active")
@@ -1675,7 +2145,7 @@ def check_in(body: CheckInIn, db: Session = Depends(get_db),
         raise HTTPException(409, "You are outside the permitted geofence. Give a reason for the "
                                  "exception; it will need approval.")
     now = datetime.now(timezone.utc)
-    shift = db.get(Shift, emp.shift_id) if emp.shift_id else None
+    shift = hr_svc.requirement_shift(db, req)
     late = hr_svc.shift_late_minutes(shift, now)
     row = Attendance(employee_id=emp.id, date=today, status="present", check_in=now,
                      office_id=office.id if office else None, source=body.source,
@@ -1704,6 +2174,7 @@ def check_out(body: CheckOutIn, db: Session = Depends(get_db),
               user=Depends(require("hr:attendance_self"))):
     emp = _self_employee(db, user)
     today = hr_svc.business_today()
+    req = hr_svc.require_self_service(db, emp, today)
     _assert_period_open(db, "attendance", today, user, action="check-out")
     row = db.scalar(select(Attendance).where(Attendance.employee_id == emp.id,
                                              Attendance.date == today).with_for_update())
@@ -1714,7 +2185,7 @@ def check_out(body: CheckOutIn, db: Session = Depends(get_db),
     now = datetime.now(timezone.utc)
     row.check_out = now
     row.worked_minutes = int((now - row.check_in).total_seconds() // 60)
-    shift = db.get(Shift, emp.shift_id) if emp.shift_id else None
+    shift = hr_svc.requirement_shift(db, req)
     row.early_minutes = hr_svc.shift_early_minutes(shift, now)
     audit(db, user.id, "hr.attendance.check_out", f"attendance:{row.id}",
           {"employee": emp.code, "worked_minutes": row.worked_minutes})
@@ -1727,6 +2198,7 @@ def check_out(body: CheckOutIn, db: Session = Depends(get_db),
 def manual_attendance(body: ManualAttendanceIn, db: Session = Depends(get_db),
                       user=Depends(require("hr:attendance_manage"))):
     emp = _scoped_employee(db, user, body.employee_id)
+    req = hr_svc.require_attendance(db, emp, body.date)
     if body.check_in and body.check_out and body.check_out <= body.check_in:
         raise HTTPException(422, "Check-out must be later than check-in")
     _assert_period_open(db, "attendance", body.date, user, body.override_reason,
@@ -1754,7 +2226,7 @@ def manual_attendance(body: ManualAttendanceIn, db: Session = Depends(get_db),
     row.late_minutes = row.early_minutes = 0
     if body.check_in and body.check_out:
         row.worked_minutes = int((body.check_out - body.check_in).total_seconds() // 60)
-        shift = db.get(Shift, emp.shift_id) if emp.shift_id else None
+        shift = hr_svc.requirement_shift(db, req)
         row.late_minutes = hr_svc.shift_late_minutes(shift, body.check_in)
         row.early_minutes = hr_svc.shift_early_minutes(shift, body.check_out)
     db.flush()
@@ -1782,6 +2254,9 @@ def request_correction(attendance_id: int, body: CorrectionIn, db: Session = Dep
             raise HTTPException(403, "That employee is outside your team")
     elif not me or me.id != row.employee_id:
         raise HTTPException(403, "You can only request a correction for your own attendance")
+    row_employee = db.get(Employee, row.employee_id)
+    if row_employee:
+        hr_svc.require_attendance(db, row_employee, row.date)
     _assert_period_open(db, "attendance", row.date, user, action="correction request")
     corr = AttendanceCorrection(
         attendance_id=row.id, employee_id=row.employee_id, requested_by=user.id,
@@ -3046,11 +3521,13 @@ def hr_report_catalog(db: Session = Depends(get_db), user=Depends(require("hr:re
 def hr_report(report: str, from_date: date | None = None, to_date: date | None = None,
               year: int | None = None, month: int | None = None,
               days: int = Query(60, ge=1, le=365),
+              branch_id: int | None = None, office_id: int | None = None,
               fmt: Literal["json", "csv", "pdf"] = Query("json", alias="format"),
               db: Session = Depends(get_db), user=Depends(require("hr:reports"))):
     """One HR report as JSON, CSV or PDF. Gaps are returned, never filled with zeroes."""
     built = hr_reports.build_report(db, report, user, from_date=from_date,
-                                    to_date=to_date, year=year, month=month, days=days)
+                                    to_date=to_date, year=year, month=month, days=days,
+                                    branch_id=branch_id, office_id=office_id)
     if fmt == "json":
         return built
     if fmt == "csv":

@@ -87,7 +87,7 @@ server. "MD" is the D-02 custom role.
 | See a payroll approval and its net total | `hr:payroll_approve` (and the requester) | Y | – | – | – | – | – | – |
 | HR reports | `hr:reports` | Y | Y | Y | Y | – | – | – |
 | Department salary-cost report | `hr:reports` **+** (`hr:confidential` or `hr:payroll_prepare`) | Y | Y | Y | Y | – | – | – |
-| Configure branches, offices, shifts, holidays, departments, leave types, letters | `hr:write` | Y | – | Y | – | – | – | – |
+| Configure branches, offices, attendance rules, shifts, holidays, departments, leave types, letters | `hr:write` | Y | – | Y | – | – | – | – |
 | Lock attendance / payroll months | `hr:write` / `hr:payroll_prepare` | Y | – | Y (attendance) | Y (payroll) | – | – | – |
 | Unlock a month | `is_admin` + written reason | Y | – | – | – | – | – | – |
 | Publish announcements | `hr:write` | Y | – | Y | – | – | – | – |
@@ -154,8 +154,13 @@ scope; a staff member cannot raise one for a colleague.
 | `/api/hr/saved-filters` | GET | `hr:read` | own saved rows |
 | `/api/hr/saved-filters` | POST | `hr:read` | own saved rows |
 | `/api/hr/saved-filters/{filter_id}` | DELETE | `hr:read` | own saved rows |
-| `/api/hr/branches` | GET / POST | `hr:read` / `hr:write` | all |
-| `/api/hr/offices` | GET / POST | `hr:read` / `hr:write` | all |
+| `/api/hr/branches` | GET / POST | `hr:read` / `hr:write` | all; carries the HR responsible person |
+| `/api/hr/branches/{id}` | PATCH | `hr:write` | all; refuses deactivation while active staff remain |
+| `/api/hr/offices` | GET / POST | `hr:read` / `hr:write` | all; geofence centre/radius and attendance mode |
+| `/api/hr/offices/{id}` | PATCH | `hr:write` | all; refuses a branch move or deactivation while active staff remain |
+| `/api/hr/attendance-rules` | GET / POST | `hr:read` / `hr:write` | all; any mix of branch, office, designation and employee |
+| `/api/hr/attendance-rules/{id}` | PATCH / DELETE | `hr:write` | all |
+| `/api/hr/attendance-rules/resolve` | GET | logged in + `_require_hr_view` | own record, or any employee inside the caller's scope |
 | `/api/hr/shifts` | GET / POST | `hr:read` / `hr:write` | all |
 | `/api/hr/shifts/{id}` | PATCH | `hr:write` | all |
 | `/api/hr/holidays` | GET / POST | `hr:read` / `hr:write` | all |

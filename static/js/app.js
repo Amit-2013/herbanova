@@ -41,6 +41,8 @@ const state = {user: null, perms: new Set(), features: null, featureFlags: [], m
                expiry: {bucket: "all", loading: false, data: null},
                palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
                hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: [],
+                    branches: [], offices: [], rules: [], shifts: [], siteEmps: [],
+                    mxBranch: "", mxOffice: "", repBranch: "", repOffice: "",
                     from: "", to: "", error: null, profile: null}};
 state.rp.filters = {employee_id: "", department: "", branch_id: ""};
 state.rp.opts = null;
@@ -2521,15 +2523,57 @@ async function openHr() {
     renderHr();
     return;
   }
-  const [d, e, f] = await Promise.all([
-    api(`/api/hr/dashboard?from_date=${encodeURIComponent(state.hr.from)}&to_date=${encodeURIComponent(state.hr.to)}`),
+  const site = hrSiteParams();
+  const [d, e, f, b, o] = await Promise.all([
+    api(`/api/hr/dashboard?from_date=${encodeURIComponent(state.hr.from)}&to_date=${encodeURIComponent(state.hr.to)}${site}`),
     api("/api/hr/employees?page_size=200&sort=name"),
-    api("/api/hr/saved-filters?view=employees")]);
+    api("/api/hr/saved-filters?view=employees"),
+    api("/api/hr/branches"),
+    api("/api/hr/offices")]);
   state.hr.dashboard = d.ok ? d.body : null;
   state.hr.error = d.ok ? null : detail(d.body);
   state.hr.employees = e.ok ? e.body : [];
   state.hr.saved = f.ok ? f.body : [];
+  state.hr.branches = b.ok ? b.body : [];
+  state.hr.offices = o.ok ? o.body : [];
+  fillHrSites();
   if (state.view === "hr") { renderHead(); renderHr(); }
+}
+function hrSiteParams() {
+  const q = new URLSearchParams();
+  if (state.hr.branchFilter) q.set("branch_id", state.hr.branchFilter);
+  if (state.hr.officeFilter) q.set("office_id", state.hr.officeFilter);
+  const s = q.toString();
+  return s ? `&${s}` : "";
+}
+function fillHrSites() {
+  const branches = state.hr.branches || [];
+  const offices = state.hr.offices || [];
+  const branch = state.hr.branchFilter || "";
+  const shown = offices.filter(o => !branch || String(o.branch_id) === branch);
+  const fill = (id, value, allLabel, rows) => {
+    const sel = $("#" + id);
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${esc(allLabel)}</option>` + rows.map(x =>
+      `<option value="${x.id}">${esc(x.name)}${x.branch ? ` · ${esc(x.branch)}` : ""}</option>`).join("");
+    sel.value = [...sel.options].some(o => o.value === value) ? value : "";
+  };
+  fill("hrBranchFilter", branch, "All branches", branches);
+  fill("hrOfficeFilter", state.hr.officeFilter || "", "All offices", shown);
+}
+function setHrSite(kind, value) {
+  if (kind === "office") {
+    state.hr.officeFilter = value;
+    const office = (state.hr.offices || []).find(o => String(o.id) === value);
+    if (office && office.branch_id) state.hr.branchFilter = String(office.branch_id);
+  } else {
+    state.hr.branchFilter = value;
+    const office = (state.hr.offices || []).find(o => String(o.id) === state.hr.officeFilter);
+    if (office && String(office.branch_id) !== value) state.hr.officeFilter = "";
+  }
+  fillHrSites();
+  renderHrDirectory();
+  openHr();
 }
 function setHrRangePreset(key) {
   const w = dashWindow(key === "30" ? "30d" : "month");
@@ -2553,6 +2597,8 @@ function exportHr() {
   if (search) q.set("q", search);
   if ($("#hrStatus").value) q.set("status", $("#hrStatus").value);
   if ($("#hrDept").value) q.set("department", $("#hrDept").value);
+  if (state.hr.branchFilter) q.set("branch_id", state.hr.branchFilter);
+  if (state.hr.officeFilter) q.set("office_id", state.hr.officeFilter);
   const s = q.toString();
   location.href = "/api/hr/employees/export.csv" + (s ? "?" + s : "");
 }
@@ -2681,32 +2727,42 @@ function renderHrShape(d) {
     <b>${x.employees}</b></div>`).join("");
   const branches = (d.by_branch || []).map(x =>
     `<li><span>${esc(x.branch)}</span><b>${x.employees}</b></li>`).join("");
+  const offices = (d.by_office || []).map(x =>
+    `<li><span>${esc(x.office)}</span><b>${x.employees}</b></li>`).join("");
   $("#hrShape").innerHTML = (depts.length
     ? `<div class="hr-bars">${bars}</div>`
     : `<p class="gap-note">No data yet: no active employees are assigned to a department.</p>`)
     + (branches ? `<h3 class="hr-sub">By branch</h3><ul class="hr-split">${branches}</ul>`
-      : `<p class="gap-note">No branch has active employees yet.</p>`);
+      : `<p class="gap-note">No branch has active employees yet.</p>`)
+    + (offices ? `<h3 class="hr-sub">By office</h3><ul class="hr-split">${offices}</ul>`
+      : `<p class="gap-note">No office has active employees yet.</p>`);
 }
 function renderHrDirectory() {
   const q = ($("#hrq").value || "").trim().toLowerCase();
   const status = $("#hrStatus").value;
   const dept = $("#hrDept").value;
+  const branch = state.hr.branchFilter || "";
+  const office = state.hr.officeFilter || "";
   const all = state.hr.employees || [];
-  const list = all.filter(e => (!q || [e.code, e.full_name, e.department, e.designation]
-      .some(x => (x || "").toLowerCase().includes(q)))
+  const list = all.filter(e => (!q || [e.code, e.full_name, e.department, e.designation,
+      e.branch_name, e.office_name].some(x => (x || "").toLowerCase().includes(q)))
     && (!status || e.status === status)
-    && (!dept || (e.department || "Unassigned") === dept));
+    && (!dept || (e.department || "Unassigned") === dept)
+    && (!branch || String(e.branch_id) === branch)
+    && (!office || String(e.office_id) === office));
   $("#hrrows").innerHTML = list.map(e => `<tr>
     <td class="strong">${esc(e.full_name)}<small>${esc(e.code)}</small></td>
     <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td>
+    <td>${e.office_name ? esc(e.office_name) : "–"}<small>${esc(e.branch_name || "No branch")}</small></td>
     <td>${esc(fmtDate(e.joining_date))}</td>
-    <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td>
+    <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span>${e.attendance_required === false
+      ? ` <span class="chip warn" title="${esc(`Not required by policy: ${e.attendance_rule || "default"}`)}">No attendance</span>` : ""}</td>
     <td class="rowacts"><button class="btn ghost sm" type="button" data-act="hr-profile" data-id="${e.id}">Open</button></td></tr>`).join("");
   $("#hrDirNote").textContent = all.length === 200
     ? `Showing the first 200 employees; narrow the search to see the rest. ${list.length} match.`
     : `${list.length} of ${plural(all.length, "employee")}.`;
   empty($("#hrempty"), !list.length, all.length ? "No employee matches these filters." : "No employees yet.",
-    all.length ? "Clear the search, status or department filter." : "Add the first employee with “New employee”.");
+    all.length ? "Clear the search, status, department, branch or office filter." : "Add the first employee with “New employee”.");
 }
 function fillHrSaved() {
   const sel = $("#hrSaved");
@@ -2724,7 +2780,11 @@ function applyHrFilter() {
   $("#hrq").value = p.q || "";
   $("#hrStatus").value = p.status || "";
   $("#hrDept").value = p.department || "";
+  state.hr.branchFilter = p.branch_id ? String(p.branch_id) : "";
+  state.hr.officeFilter = p.office_id ? String(p.office_id) : "";
+  fillHrSites();
   renderHrDirectory();
+  openHr();
 }
 function hrFilterSaveForm() {
   $("#hrSavedBox").innerHTML = `<form id="hrSavedForm" novalidate><h3>Save this view</h3>
@@ -2739,7 +2799,9 @@ async function saveHrFilter(form) {
   if (name.length < 2) { err.textContent = "Give the view a name."; return; }
   const res = await api("/api/hr/saved-filters", {method: "POST", body: {name, view: "employees",
     params: {q: $("#hrq").value.trim(), status: $("#hrStatus").value,
-             department: $("#hrDept").value}}});
+             department: $("#hrDept").value,
+             branch_id: state.hr.branchFilter || "",
+             office_id: state.hr.officeFilter || ""}}});
   toast(res, res.ok ? "Filter saved" : "Filter not saved");
   if (!res.ok) { err.textContent = detail(res.body); return; }
   $("#hrSavedBox").innerHTML = "";
@@ -2776,8 +2838,8 @@ function renderHr() {
   // Payroll is a closed book: the API needs hr:payroll_prepare to even list a period.
   $$('#v-hr [data-act="hr-payroll"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:payroll_prepare"))));
-  // Shift, notices, locks and letter templates are HR/administrator settings.
-  ["hr-shifts", "hr-notices", "hr-locks", "hr-letters"].forEach(a =>
+  // Shift, notices, locks, letter templates and site policy are HR/administrator settings.
+  ["hr-shifts", "hr-notices", "hr-locks", "hr-letters", "hr-sites"].forEach(a =>
     $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !(wholeTeam && can("hr:write")))));
   $$('#v-hr [data-act="hr-reports"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:reports"))));
@@ -2794,6 +2856,7 @@ function renderHr() {
   const d = state.hr.dashboard || {};
   if (!d.from_date) {
     $("#hrKpis").innerHTML = "";
+    $("#hrSiteNote").textContent = "";
     $("#hrAttention").innerHTML = `<li><div class="att-empty">${esc(state.hr.error || "The HR figures did not load. Refresh to try again.")}</div></li>`;
     $("#hrTrend").innerHTML = "";
     $("#hrCalendar").innerHTML = "";
@@ -2804,6 +2867,10 @@ function renderHr() {
   $("#hrFrom").value = state.hr.from;
   $("#hrTo").value = state.hr.to;
   $("#hrRangeNote").textContent = `${fmtDate(d.from_date)} – ${fmtDate(d.to_date)} · today ${fmtDate(d.date)}`;
+  fillHrSites();
+  $("#hrSiteNote").textContent = d.attendance_required_today == null ? ""
+    : `${d.attendance_required_today} of ${d.active_employees} active employee(s) must mark attendance `
+      + `today${d.attendance_exempt_today ? `; ${d.attendance_exempt_today} exempt` : ""}.`;
   fillHrDepartments(d);
   fillHrSaved();
   renderHrKpis(d);
@@ -2858,12 +2925,17 @@ function hrProfileOverview(p) {
   const branch = p.branchNames[e.branch_id], office = p.officeNames[e.office_id];
   const shift = p.shiftNames[e.shift_id];
   const dept = e.department || "Unassigned";
+  const req = p.attendance_requirement;
+  const attendance = req
+    ? `${req.required ? "Required" : "Not required"} · self check-in ${req.self_service ? "on" : "off"}${req.attendance_mode ? ` · ${req.attendance_mode}` : ""} · ${req.source}`
+    : null;
   const personal = [
     row("Status", e.status), row("Department", dept), row("Designation", e.designation),
     row("Employment type", e.employment_type), row("Joined", fmtDate(e.joining_date)),
     row("Probation ends", e.probation_end_date ? fmtDate(e.probation_end_date) : "—"),
     row("Confirmed", e.confirmation_date ? fmtDate(e.confirmation_date) : "—"),
     row("Branch", branch), row("Office", office), row("Shift", shift),
+    row("Attendance policy", attendance),
     row("Phone", e.phone), row("Email", e.email),
     row("Date of birth", e.date_of_birth ? fmtDate(e.date_of_birth) : "—"),
     row("Address", e.address), row("Emergency contact", [e.emergency_name, e.emergency_phone].filter(Boolean).join(" · "))];
@@ -3176,29 +3248,325 @@ async function saveHrShift(form) {
   if (!res.ok) { err.textContent = detail(res.body); return; }
   hrShifts();
 }
+
+/* ---------- HR: branches, offices and attendance policy ---------- */
+const HR_MODE = {office: "Office", gps: "GPS", both: "Office or GPS"};
+const hrMode = v => (v ? HR_MODE[v] || v : "Office default");
+function hrRuleScore(r) {
+  return (r.employee_id ? 1000 : 0) + (r.office_id ? 100 : 0)
+    + (r.designation ? 10 : 0) + (r.branch_id ? 1 : 0);
+}
+function hrRuleTarget(r) {
+  const bits = [];
+  if (r.branch) bits.push(`Branch: ${r.branch}`);
+  if (r.office) bits.push(`Office: ${r.office}`);
+  if (r.designation) bits.push(`Designation: ${r.designation}`);
+  if (r.employee) bits.push(`Employee: ${r.employee}`);
+  return bits.join(" · ") || "Whole company";
+}
+function hrEffective(r) {
+  if (!r.effective_from && !r.effective_to) return "Always";
+  return `${r.effective_from ? fmtDate(r.effective_from) : "start"} – ${r.effective_to ? fmtDate(r.effective_to) : "open"}`;
+}
+async function hrSiteData() {
+  const [b, o, r, s, e] = await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"),
+    api("/api/hr/attendance-rules"), api("/api/hr/shifts"), api("/api/hr/employees?page_size=200&sort=name")]);
+  if (b.ok) state.hr.branches = b.body;
+  if (o.ok) state.hr.offices = o.body;
+  if (r.ok) state.hr.rules = r.body;
+  if (s.ok) state.hr.shifts = s.body;
+  if (e.ok) state.hr.siteEmps = e.body;
+  if (b.ok && o.ok) fillHrSites();
+  if (!(b.ok && o.ok && r.ok)) {
+    toast({ok: false, body: {detail: "Some branch, office or rule data did not load. Try Refresh."}},
+          "Site data incomplete");
+  }
+  return {branches: state.hr.branches || [], offices: state.hr.offices || [],
+          rules: state.hr.rules || [], shifts: state.hr.shifts || [],
+          employees: state.hr.siteEmps || []};
+}
+async function hrSites() {
+  await hrSiteData();
+  const branches = state.hr.branches || [], offices = state.hr.offices || [];
+  const rules = [...(state.hr.rules || [])].sort((a, b) =>
+    hrRuleScore(b) - hrRuleScore(a) || a.priority - b.priority || a.id - b.id);
+  const writable = can("hr:write");
+  const edit = (act, id, label) => writable
+    ? `<button class="btn ghost sm" type="button" data-act="${act}" data-id="${id}">${label}</button>` : "";
+  const branchRows = branches.map(b => `<tr><td class="strong">${esc(b.name)}<small>${esc(b.code)}</small></td>
+    <td>${esc(b.address || "–")}</td><td>${esc(b.hr_admin || "–")}</td>
+    <td class="n">${b.active_employees}</td>
+    <td><span class="chip ${b.status === "active" ? "ok" : "off"}">${esc(b.status)}</span></td>
+    <td class="rowacts">${edit("hr-edit-branch", b.id, "Edit")}</td></tr>`).join("");
+  const officeRows = offices.map(o => `<tr><td class="strong">${esc(o.name)}<small>${esc(o.code)}</small></td>
+    <td>${esc(o.branch || "–")}</td><td>${esc(hrMode(o.attendance_mode))}</td>
+    <td>${o.latitude != null && o.longitude != null
+      ? `${esc(String(o.latitude))}, ${esc(String(o.longitude))} · ${o.geofence_radius_m} m`
+      : '<span class="muted">No geofence</span>'}</td>
+    <td>${esc(o.hr_admin || "–")}</td><td class="n">${o.active_employees}</td>
+    <td><span class="chip ${o.status === "active" ? "ok" : "off"}">${esc(o.status)}</span></td>
+    <td class="rowacts">${edit("hr-edit-office", o.id, "Edit")}</td></tr>`).join("");
+  const ruleRows = rules.map(r => `<tr><td class="strong">${esc(hrRuleTarget(r))}<small>${esc(r.source)}</small></td>
+    <td><span class="chip ${r.required ? "ok" : "off"}">${r.required ? "Required" : "Not required"}</span></td>
+    <td>${r.self_service ? "On" : "Off"}</td>
+    <td>${esc(r.shift || "Office default")}</td><td>${esc(hrMode(r.attendance_mode))}</td>
+    <td>${esc(hrEffective(r))}</td><td class="n">${r.priority}</td>
+    <td><span class="chip ${r.active ? "ok" : "off"}">${r.active ? "active" : "inactive"}</span></td>
+    <td class="rowacts">${edit("hr-edit-rule", r.id, "Edit")}${writable
+      ? ` <button class="btn ghost sm" type="button" data-act="hr-rule-delete" data-id="${r.id}">Delete</button>` : ""}</td></tr>`).join("");
+  openDrawer("Branches, offices & attendance policy",
+    "A branch groups offices. An employee belongs to one office, and that office belongs to one branch. Every change is audited.", `
+    <div class="note">Who must mark attendance: the most specific active rule wins — employee, then office, then designation, then branch, then the company default. With no rule at all, attendance is required. A rule can set its own shift and attendance mode but never overrides the office’s own mode unless the rule dates are in force.</div>
+    ${writable ? `<div class="actions" style="margin-top:0">
+      <button class="btn" type="button" data-act="hr-new-branch">New branch</button>
+      <button class="btn" type="button" data-act="hr-new-office">New office</button>
+      <button class="btn" type="button" data-act="hr-new-rule">New attendance rule</button>
+      <button class="btn ghost" type="button" data-act="hr-sites">Refresh</button></div>` : ""}
+    <h3>Branches</h3>
+    <div class="tw"><table><thead><tr><th>Branch</th><th>Address</th><th>HR responsible</th><th class="n">Active staff</th><th>Status</th><th></th></tr></thead>
+      <tbody>${branchRows || '<tr><td colspan="6" class="empty-row">No branches configured. Attendance is still required company-wide.</td></tr>'}</tbody></table></div>
+    <h3>Offices and work locations</h3>
+    <div class="tw"><table><thead><tr><th>Office</th><th>Branch</th><th>Mode</th><th>Geofence</th><th>HR responsible</th><th class="n">Active staff</th><th>Status</th><th></th></tr></thead>
+      <tbody>${officeRows || '<tr><td colspan="8" class="empty-row">No offices configured.</td></tr>'}</tbody></table></div>
+    <h3>Attendance requirements</h3>
+    <div class="tw"><table><thead><tr><th>Rule applies to</th><th>Attendance</th><th>Self check-in</th><th>Shift</th><th>Mode</th><th>Effective</th><th class="n">Priority</th><th>Status</th><th></th></tr></thead>
+      <tbody>${ruleRows || '<tr><td colspan="9" class="empty-row">No rule yet. Every employee must mark attendance with the office default.</td></tr>'}</tbody></table></div>
+    <div class="note">A branch or office with active staff cannot be switched off or moved until those people are reassigned. Deactivate, never delete.</div>`, true);
+  $("#drawer").classList.add("hr-wide");
+}
+function hrSiteSelect(rows, selected, label) {
+  return `<option value="">—</option>` + rows.map(v =>
+    `<option value="${v.id}"${selected === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+}
+function hrAdminField(selected) {
+  const emps = state.hr.siteEmps || [];
+  return `<label>HR responsible at this site</label><select name="hr_admin_id">${hrSiteSelect(emps, selected,
+    v => `${v.full_name} (${v.code})`)}</select>`;
+}
+async function hrBranchForm(id) {
+  await hrSiteData();
+  const x = id ? (state.hr.branches || []).find(b => b.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Branch not found"}}, "Branch not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", address: "", hr_admin_id: null, status: "active"};
+  openDrawer(x ? `Edit ${x.name}` : "New branch",
+    "The HR responsible at a branch is the employee who answers for its attendance; it does not change who can approve leave.", `
+    <form id="hrBranchForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrb-code">Branch code</label><input id="hrb-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hrb-name">Branch name</label><input id="hrb-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <label for="hrb-addr">Address</label><input id="hrb-addr" name="address" value="${esc(v.address || "")}" autocomplete="off">
+      ${hrAdminField(v.hr_admin_id)}
+      ${x ? `<label for="hrb-status">Status</label><select id="hrb-status" name="status"><option value="active"${v.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${v.status !== "active" ? " selected" : ""}>Inactive</option></select>` : ""}
+      <div class="note">A code cannot be changed once the branch exists. An inactive branch keeps its history and accepts no new assignment.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save branch</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+async function saveHrBranch(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const body = {name: f.name.value.trim(), address: f.address.value.trim() || null,
+                hr_admin_id: f.hr_admin_id.value ? Number(f.hr_admin_id.value) : null};
+  if (!id) body.code = f.code.value.trim().toUpperCase();
+  else body.status = f.status.value;
+  if ((body.name || "").length < 2) { err.textContent = "Enter the branch name."; return; }
+  if (!id && (body.code || "").length < 2) { err.textContent = "Enter a branch code of at least two characters."; return; }
+  const res = await api(id ? `/api/hr/branches/${id}` : "/api/hr/branches",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Branch updated" : "Branch created") : "Branch not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrSites();
+}
+async function hrOfficeForm(id) {
+  await hrSiteData();
+  const x = id ? (state.hr.offices || []).find(o => o.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Office not found"}}, "Office not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", branch_id: null, address: "", latitude: null,
+                  longitude: null, geofence_radius_m: 200, attendance_mode: "both",
+                  hr_admin_id: null, status: "active"};
+  const branches = state.hr.branches || [];
+  openDrawer(x ? `Edit ${x.name}` : "New office",
+    "The geofence centre and radius decide whether a GPS check-in counts at this office. Leave both coordinates empty for an office without GPS.", `
+    <form id="hrOfficeForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hro-code">Office code</label><input id="hro-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hro-name">Office name</label><input id="hro-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <div class="row2"><div><label for="hro-branch">Branch</label><select id="hro-branch" name="branch_id">${hrSiteSelect(branches, v.branch_id, b => b.name)}</select></div>
+      <div><label for="hro-mode">Attendance mode</label><select id="hro-mode" name="attendance_mode">
+        <option value="office"${v.attendance_mode === "office" ? " selected" : ""}>Office</option>
+        <option value="gps"${v.attendance_mode === "gps" ? " selected" : ""}>GPS</option>
+        <option value="both"${v.attendance_mode === "both" ? " selected" : ""}>Office or GPS</option></select></div></div>
+      <label for="hro-addr">Address</label><input id="hro-addr" name="address" value="${esc(v.address || "")}" autocomplete="off">
+      <div class="row2"><div><label for="hro-lat">Latitude</label><input id="hro-lat" name="latitude" inputmode="decimal" value="${v.latitude == null ? "" : esc(String(v.latitude))}" autocomplete="off"></div>
+      <div><label for="hro-lon">Longitude</label><input id="hro-lon" name="longitude" inputmode="decimal" value="${v.longitude == null ? "" : esc(String(v.longitude))}" autocomplete="off"></div></div>
+      <label for="hro-radius">Geofence radius (metres)</label><input id="hro-radius" name="geofence_radius_m" type="number" min="1" max="100000" value="${v.geofence_radius_m}">
+      ${hrAdminField(v.hr_admin_id)}
+      ${x ? `<label for="hro-status">Status</label><select id="hro-status" name="status"><option value="active"${v.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${v.status !== "active" ? " selected" : ""}>Inactive</option></select>` : ""}
+      <div class="note">Self check-in still depends on the attendance rule: an employee exempt at this office is refused a check-in even when GPS matches.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save office</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+async function saveHrOffice(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const lat = f.latitude.value.trim(), lon = f.longitude.value.trim();
+  const body = {name: f.name.value.trim(), branch_id: f.branch_id.value ? Number(f.branch_id.value) : null,
+                address: f.address.value.trim() || null,
+                latitude: lat === "" ? null : Number(lat), longitude: lon === "" ? null : Number(lon),
+                geofence_radius_m: Number(f.geofence_radius_m.value),
+                attendance_mode: f.attendance_mode.value,
+                hr_admin_id: f.hr_admin_id.value ? Number(f.hr_admin_id.value) : null};
+  if (!id) body.code = f.code.value.trim().toUpperCase();
+  else body.status = f.status.value;
+  if ((body.name || "").length < 2) { err.textContent = "Enter the office name."; return; }
+  if (!id && (body.code || "").length < 2) { err.textContent = "Enter an office code of at least two characters."; return; }
+  if ((lat === "") !== (lon === "")) { err.textContent = "Give both the latitude and the longitude, or neither."; return; }
+  if (lat !== "" && (!(body.latitude >= -90 && body.latitude <= 90)
+      || !(body.longitude >= -180 && body.longitude <= 180))) {
+    err.textContent = "Latitude must be between -90 and 90 and longitude between -180 and 180."; return;
+  }
+  if (!(body.geofence_radius_m >= 1)) { err.textContent = "Enter the geofence radius in metres."; return; }
+  const res = await api(id ? `/api/hr/offices/${id}` : "/api/hr/offices",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Office updated" : "Office created") : "Office not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrSites();
+}
+async function hrRuleForm(id) {
+  await hrSiteData();
+  const x = id ? (state.hr.rules || []).find(r => r.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Attendance rule not found"}}, "Rule not loaded"); return; }
+  const v = x || {id: "", branch_id: null, office_id: null, designation: "", employee_id: null,
+                  required: true, self_service: true, shift_id: null, attendance_mode: null,
+                  effective_from: null, effective_to: null, priority: 100, active: true, note: ""};
+  const branches = state.hr.branches || [], shifts = state.hr.shifts || [];
+  const emps = state.hr.siteEmps || [];
+  const designations = [...new Set(emps.map(e => e.designation).filter(Boolean))].sort();
+  const offices = (state.hr.offices || []).filter(o => !v.branch_id || o.branch_id === v.branch_id);
+  openDrawer(x ? `Edit rule ${x.id}` : "New attendance rule",
+    "Leave a target empty to mean “any”. The more targets you fill, the more specific the rule and the earlier it is applied.", `
+    <form id="hrRuleForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrr-branch">Branch</label><select id="hrr-branch" name="branch_id">${hrSiteSelect(branches, v.branch_id, b => b.name)}</select></div>
+      <div><label for="hrr-office">Office / work location</label><select id="hrr-office" name="office_id"><option value="">—</option>${offices.map(o => `<option value="${o.id}" data-branch="${o.branch_id == null ? "" : o.branch_id}"${v.office_id === o.id ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></div></div>
+      <div class="row2"><div><label for="hrr-des">Designation</label><input id="hrr-des" name="designation" list="hrr-deslist" value="${esc(v.designation || "")}" autocomplete="off" placeholder="Any designation">
+        <datalist id="hrr-deslist">${designations.map(d => `<option value="${esc(d)}"></option>`).join("")}</datalist></div>
+      <div><label for="hrr-emp">Employee</label><select id="hrr-emp" name="employee_id">${hrSiteSelect(emps, v.employee_id,
+        e => `${e.full_name} (${e.code})`)}</select></div></div>
+      <div class="row2"><div><label for="hrr-req">Attendance</label><select id="hrr-req" name="required">
+        <option value="true"${v.required ? " selected" : ""}>Required</option><option value="false"${v.required ? "" : " selected"}>Not required</option></select></div>
+      <div><label for="hrr-self">Self check-in</label><select id="hrr-self" name="self_service">
+        <option value="true"${v.self_service ? " selected" : ""}>On</option><option value="false"${v.self_service ? "" : " selected"}>Off</option></select></div></div>
+      <div class="row2"><div><label for="hrr-shift">Shift</label><select id="hrr-shift" name="shift_id">${hrSiteSelect(shifts, v.shift_id, s => s.name)}</select></div>
+      <div><label for="hrr-mode">Attendance mode</label><select id="hrr-mode" name="attendance_mode">
+        <option value=""${v.attendance_mode ? "" : " selected"}>Office default</option>
+        <option value="office"${v.attendance_mode === "office" ? " selected" : ""}>Office</option>
+        <option value="gps"${v.attendance_mode === "gps" ? " selected" : ""}>GPS</option>
+        <option value="both"${v.attendance_mode === "both" ? " selected" : ""}>Office or GPS</option></select></div></div>
+      <div class="row2"><div><label for="hrr-from">Effective from</label><input id="hrr-from" name="effective_from" type="date" value="${v.effective_from || ""}"></div>
+      <div><label for="hrr-to">Effective to</label><input id="hrr-to" name="effective_to" type="date" value="${v.effective_to || ""}"></div></div>
+      <div class="row2"><div><label for="hrr-prio">Priority (1 comes first)</label><input id="hrr-prio" name="priority" type="number" min="1" max="1000" value="${v.priority}"></div>
+      <div><label for="hrr-active">Status</label><select id="hrr-active" name="active">
+        <option value="true"${v.active ? " selected" : ""}>Active</option><option value="false"${v.active ? "" : " selected"}>Inactive</option></select></div></div>
+      <label for="hrr-note">Note</label><input id="hrr-note" name="note" maxlength="200" value="${esc(v.note || "")}" autocomplete="off">
+      <div class="note">Two active rules cannot target exactly the same people. Only one company-wide rule can exist at a time. Dates are inclusive and may be left open.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save rule</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+  const bSel = $("#hrr-branch"), oSel = $("#hrr-office");
+  const syncOffices = () => {
+    const want = bSel.value;
+    $$("option[data-branch]", oSel).forEach(op => {
+      op.hidden = !!(want && op.dataset.branch !== want);
+    });
+    const cur = oSel.selectedOptions[0];
+    if (cur && cur.hidden) oSel.value = "";
+  };
+  bSel.addEventListener("change", syncOffices);
+  oSel.addEventListener("change", () => {
+    const br = oSel.selectedOptions[0] ? oSel.selectedOptions[0].dataset.branch : "";
+    if (br) { bSel.value = br; syncOffices(); }
+  });
+  syncOffices();
+}
+async function saveHrRule(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const num = v => (v ? Number(v) : null);
+  const body = {branch_id: num(f.branch_id.value), office_id: num(f.office_id.value),
+                designation: f.designation.value.trim() || null,
+                employee_id: num(f.employee_id.value),
+                required: f.required.value === "true", self_service: f.self_service.value === "true",
+                shift_id: num(f.shift_id.value), attendance_mode: f.attendance_mode.value || null,
+                effective_from: f.effective_from.value || null, effective_to: f.effective_to.value || null,
+                priority: Number(f.priority.value || 100), active: f.active.value === "true",
+                note: f.note.value.trim() || null};
+  if (body.effective_from && body.effective_to && body.effective_to < body.effective_from) {
+    err.textContent = "The end date cannot be before the start date."; return;
+  }
+  if (!(body.priority >= 1 && body.priority <= 1000)) { err.textContent = "Priority must be between 1 and 1000."; return; }
+  const res = await api(id ? `/api/hr/attendance-rules/${id}` : "/api/hr/attendance-rules",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Rule updated" : "Rule created") : "Rule not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrSites();
+}
+async function hrRuleDelete(id) {
+  const row = (state.hr.rules || []).find(r => r.id === Number(id));
+  if (!confirm(`Delete attendance rule ${id}${row ? ` (${hrRuleTarget(row)})` : ""}? The employees it covers fall back to the next matching rule or the company default.`)) return;
+  const res = await api(`/api/hr/attendance-rules/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Rule deleted" : "Rule not deleted");
+  if (res.ok) hrSites();
+}
 async function hrAttendance() {
-  const [a, o] = await Promise.all([api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
-    can("hr:read") ? api("/api/hr/offices") : Promise.resolve({ok: false, body: []})]);
+  const [a, o, pol] = await Promise.all([api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
+    can("hr:read") ? api("/api/hr/offices") : Promise.resolve({ok: false, body: []}),
+    can("hr:attendance_self") ? api("/api/hr/attendance-rules/resolve") : Promise.resolve({ok: false, body: null})]);
   const rows = a.ok ? a.body : [];
   const offices = o.ok ? o.body : [];
+  const all = state.hr.employees || [];
+  const eligible = all.filter(e => e.attendance_required !== false);
+  const exempt = all.length - eligible.length;
+  const policy = pol.ok ? pol.body : null;
   openDrawer("Attendance — today", "GPS is requested only for check-in/out and never tracked in the background.", `
     <div class="actions">
       ${can("hr:attendance_self") ? `<button class="btn" type="button" data-act="hr-checkin">Check in</button><button class="btn ghost" type="button" data-act="hr-checkout">Check out</button>` : ""}
       <button class="btn ghost" type="button" data-act="hr-refresh-att">Refresh</button></div>
+    ${policy ? `<div class="note">Your policy: attendance ${policy.required ? "required" : "not required"} · self check-in ${policy.self_service ? "on" : "off"}${policy.attendance_mode ? ` · ${esc(policy.attendance_mode)} mode` : ""} · ${esc(policy.source)}.</div>` : ""}
     <div class="tw"><table><thead><tr><th>Employee</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Location</th><th>Late</th></tr></thead><tbody>
       ${rows.map(x => `<tr><td>${esc(x.employee)}<small>${esc(x.employee_code)}</small></td><td>${esc(x.status)}</td><td>${esc(fmtStamp(x.check_in))}</td><td>${esc(fmtStamp(x.check_out))}</td><td>${esc(x.geofence_result)}</td><td class="n">${x.late_minutes}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No attendance recorded today.</td></tr>'}
     </tbody></table></div>
     ${can("hr:attendance_manage") ? `<form id="hrManualForm" novalidate><h3>Manual attendance</h3>
-      <div class="row2"><div><label>Employee</label><select name="employee_id">${state.hr.employees.map(e => `<option value="${e.id}">${esc(e.full_name)} (${esc(e.code)})</option>`).join("")}</select></div>
+      <div class="row2"><div><label>Employee</label><select name="employee_id">${eligible.map(e => `<option value="${e.id}">${esc(e.full_name)} (${esc(e.code)})</option>`).join("")}</select></div>
       <div><label>Date</label><input name="date" type="date" value="${isoDay(0)}"></div></div>
       <label>Status</label><select name="status"><option value="present">Present</option><option value="absent">Absent</option><option value="half_day">Half day</option><option value="paid_leave">Paid leave</option><option value="unpaid_leave">Unpaid leave</option><option value="od">On duty</option><option value="late">Late</option><option value="early_departure">Early departure</option></select>
       <label>Remarks (required)</label><input name="remarks" autocomplete="off">
+      ${exempt ? `<div class="note">${exempt} employee(s) are exempt from attendance by policy and are not listed here. Change the rule under “Branches, offices &amp; attendance policy”.</div>` : ""}
+      ${!eligible.length ? `<div class="note">No employee must mark attendance. Add an attendance rule before recording it manually.</div>` : ""}
       <div class="note">A manual entry is audited with your name, the old value and the new value.</div>
-      <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Save manual attendance</button></div></form>` : ""}
+      <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit"${eligible.length ? "" : " disabled"}>Save manual attendance</button></div></form>` : ""}
     ${offices.length ? `<div class="note">Configured offices: ${offices.length}. Geofence validation runs on the server.</div>` : ""}`, true);
 }
+async function hrSelfPolicy() {
+  const r = await api("/api/hr/attendance-rules/resolve");
+  if (!r.ok) { toast(r, "Check-in not recorded"); return null; }
+  return r.body;
+}
 async function hrCheckIn() {
-  const body = {source: "gps"};
+  const policy = await hrSelfPolicy();
+  if (!policy) return;
+  if (!policy.required) {
+    toast({ok: false, status: 409, body: {detail:
+      `Attendance is not required for you (${policy.source}). Nothing was recorded.`}}, "Check-in not needed");
+    return;
+  }
+  if (!policy.self_service) {
+    toast({ok: false, status: 409, body: {detail:
+      `Self check-in is switched off (${policy.source}). HR records your attendance.`}}, "Check-in not needed");
+    return;
+  }
+  const body = {source: policy.attendance_mode === "gps" ? "gps" : "web"};
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(async pos => {
       body.latitude = pos.coords.latitude; body.longitude = pos.coords.longitude;
@@ -3327,6 +3695,9 @@ const HR_MX = {
   holiday: ["F", "off", "Holiday"], correction_pending: ["C", "warn", "Correction pending"]
 };
 function hrMxCell(c) {
+  if (c.not_required) {
+    return `<td class="hr-mx-c off" title="${esc(`${fmtDate(c.date)} · Not required by policy`)}">–</td>`;
+  }
   const [code, cls, label] = HR_MX[c.status] || ["·", "none", "Not recorded"];
   const bits = [fmtDate(c.date), label];
   if (c.check_in) bits.push(`in ${fmtStamp(c.check_in)}`);
@@ -3342,11 +3713,18 @@ async function hrMonthly() {
   state.hr.mxMonth = month;
   state.hr.mxDept = ($("#hrMxDept") && $("#hrMxDept").value) || state.hr.mxDept || "";
   const depts = [...new Set((state.hr.employees || []).map(e => e.department).filter(Boolean))].sort();
-  openDrawer("Monthly attendance", "A blank day was not recorded. It is a gap, not an absence.", `
+  const branches = state.hr.branches || [];
+  const offices = (state.hr.offices || []).filter(o =>
+    !state.hr.mxBranch || String(o.branch_id) === state.hr.mxBranch);
+  openDrawer("Monthly attendance", "A blank day was not recorded. It is a gap, not an absence. A day the policy exempts is marked “not required”.", `
     <div class="toolbar">
       <label class="hr-field">Month <input id="hrMxMonth" type="month" value="${esc(state.hr.mxMonth)}"></label>
       <label class="hr-field">Department <select id="hrMxDept"><option value="">All departments</option>
         ${depts.map(d => `<option value="${esc(d)}"${d === state.hr.mxDept ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+      <label class="hr-field">Branch <select id="hrMxBranch"><option value="">All branches</option>
+        ${branches.map(b => `<option value="${b.id}"${String(b.id) === state.hr.mxBranch ? " selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>
+      <label class="hr-field">Office <select id="hrMxOffice"><option value="">All offices</option>
+        ${offices.map(o => `<option value="${o.id}"${String(o.id) === state.hr.mxOffice ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></label>
       <button class="btn ghost" type="button" data-act="hr-monthly-refresh">Refresh</button>
       <button class="btn ghost" type="button" data-act="hr-sheet">Sheet (PDF)</button>
     </div>
@@ -3354,6 +3732,7 @@ async function hrMonthly() {
       <span class="hr-lg warn">L</span> late <span class="hr-lg warn">H</span> half day
       <span class="hr-lg lev">L / U</span> leave <span class="hr-lg od">O</span> on duty
       <span class="hr-lg bad">A</span> absent <span class="hr-lg off">W / F</span> weekly off / holiday
+      <span class="hr-lg off">–</span> not required
       <span class="hr-lg none">·</span> not recorded</div>
     <div id="hrMxBody" aria-live="polite"><p class="muted">Loading…</p></div>`, true);
   $("#drawer").classList.add("hr-wide");
@@ -3367,27 +3746,31 @@ async function loadHrMx() {
   box.innerHTML = `<p class="muted">Loading…</p>`;
   const q = new URLSearchParams({year: y, month: m});
   if (state.hr.mxDept) q.set("department", state.hr.mxDept);
+  if (state.hr.mxBranch) q.set("branch_id", state.hr.mxBranch);
+  if (state.hr.mxOffice) q.set("office_id", state.hr.mxOffice);
   const r = await api(`/api/hr/attendance/monthly?${q}`);
   if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
   const d = r.body;
   if (!d.employees.length) {
-    box.innerHTML = `<div class="empty">No active employee matches this month and department.</div>`;
+    box.innerHTML = `<div class="empty">No active employee matches this month and filter.</div>`;
     return;
   }
   const head = d.days.map(day => `<th class="hr-mx-d" scope="col">${Number(day.slice(8, 10))}</th>`).join("");
   const rows = d.employees.map(e => `<tr><th scope="row" class="hr-mx-name">${esc(e.name)}<small>${esc(e.code)}</small></th>
     ${e.calendar.map(hrMxCell).join("")}
     <td class="n">${qty(e.summary.present_days)}</td><td class="n">${qty(e.summary.leave_days)}</td>
-    <td class="n">${e.summary.absent_days}</td><td class="n">${e.summary.missing_days}</td></tr>`).join("");
+    <td class="n">${e.summary.absent_days}</td><td class="n">${e.summary.missing_days}</td>
+    <td class="n">${e.summary.not_required_days || 0}</td></tr>`).join("");
   const t = d.totals;
   box.innerHTML = `<div class="tw hr-mx-wrap"><table class="hr-mx">
-      <thead><tr><th scope="col">Employee</th>${head}<th class="n">Present</th><th class="n">Leave</th><th class="n">Absent</th><th class="n">Not recorded</th></tr></thead>
+      <thead><tr><th scope="col">Employee</th>${head}<th class="n">Present</th><th class="n">Leave</th><th class="n">Absent</th><th class="n">Not recorded</th><th class="n">Not required</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><th scope="row">All ${d.employees.length} employee(s)</th><td colspan="${d.days.length}"></td>
         <td class="n">${qty(t.present_days)}</td><td class="n">${qty(t.leave_days)}</td>
-        <td class="n">${t.absent_days}</td><td class="n">${t.missing_days}</td></tr></tfoot>
+        <td class="n">${t.absent_days}</td><td class="n">${t.missing_days}</td>
+        <td class="n">${t.not_required_days || 0}</td></tr></tfoot>
     </table></div>
-    <p class="note">${t.missing_days} employee-day(s) have no attendance row. HR reports count them as gaps until they are recorded.</p>`;
+    <p class="note">${t.missing_days} employee-day(s) have no attendance row. HR reports count them as gaps until they are recorded. ${t.not_required_days || 0} employee-day(s) are exempt by policy and are not gaps.</p>`;
 }
 
 /* ---------- HR: leave calendar ---------- */
@@ -3452,13 +3835,21 @@ async function loadHrCal() {
 
 /* ---------- HR: reports ---------- */
 async function hrReports() {
-  const r = await api("/api/hr/reports");
+  const [r, b, o] = await Promise.all([api("/api/hr/reports"), api("/api/hr/branches"),
+                                       api("/api/hr/offices")]);
   const items = r.ok ? r.body : [];
+  const branches = b.ok ? b.body : [];
+  const offices = (o.ok ? o.body : []).filter(x =>
+    !state.hr.repBranch || String(x.branch_id) === state.hr.repBranch);
   state.hr.repKey = state.hr.repKey || "headcount";
   openDrawer("HR reports", "Every report states its filters and lists missing data instead of filling it with zeroes.", `
     <div class="toolbar">
       <label class="hr-field">From <input id="hrRepFrom" type="date"></label>
       <label class="hr-field">To <input id="hrRepTo" type="date"></label>
+      <label class="hr-field">Branch <select id="hrRepBranch"><option value="">All branches</option>
+        ${branches.map(x => `<option value="${x.id}"${String(x.id) === state.hr.repBranch ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+      <label class="hr-field">Office <select id="hrRepOffice"><option value="">All offices</option>
+        ${offices.map(x => `<option value="${x.id}"${String(x.id) === state.hr.repOffice ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
       <button class="btn ghost" type="button" data-act="hr-report-refresh">Refresh</button>
     </div>
     <div class="tw"><table><thead><tr><th>Report</th><th>Access</th><th></th></tr></thead><tbody>
@@ -3468,6 +3859,7 @@ async function hrReports() {
           <button class="btn ghost sm" type="button" data-act="hr-report-file" data-key="${esc(x.key)}" data-format="csv">CSV</button>
           <button class="btn ghost sm" type="button" data-act="hr-report-file" data-key="${esc(x.key)}" data-format="pdf">PDF</button>` : `<span class="muted">Ask the Administrator for confidential HR rights.</span>`}</td></tr>`).join("") || '<tr><td colspan="3" class="empty-row">No reports for your role.</td></tr>'}
     </tbody></table></div>
+    <div class="note">A branch or office filter narrows every report to the employees assigned there. The header of each report repeats the filter the server applied.</div>
     <div id="hrReportBody" aria-live="polite"><p class="muted">Choose View to open a report.</p></div>`, true);
   $("#drawer").classList.add("hr-wide");
   await hrReportView(state.hr.repKey);
@@ -3478,6 +3870,8 @@ function hrReportQuery() {
   const to = $("#hrRepTo") && $("#hrRepTo").value;
   if (from) q.set("from_date", from);
   if (to) q.set("to_date", to);
+  if (state.hr.repBranch) q.set("branch_id", state.hr.repBranch);
+  if (state.hr.repOffice) q.set("office_id", state.hr.repOffice);
   return q.toString();
 }
 async function hrReportView(key) {
@@ -5681,16 +6075,22 @@ async function employeeForm(empId) {
     const full = await api(`/api/hr/employees/${empId}`);
     if (full.ok) e = full.body;
   }
-  const [b, o, s] = rich
-    ? await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts")])
-    : [null, null, null];
+  const [b, o, s, prof] = rich
+    ? await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts"),
+        empId ? api(`/api/hr/employees/${empId}/profile`) : Promise.resolve(null)])
+    : [null, null, null, null];
   const opts = (res, sel, label) => (res && res.ok ? res.body : [])
     .map(v => `<option value="${v.id}"${sel === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+  const req = prof && prof.ok ? prof.body.attendance_requirement : null;
+  const policy = req
+    ? `<div class="note" id="ne-policy">Attendance policy: ${req.required ? "required" : "not required"} · self check-in ${req.self_service ? "on" : "off"}${req.attendance_mode ? ` · ${req.attendance_mode} mode` : ""} · ${esc(req.source)}.</div>`
+    : `<div class="note" id="ne-policy">Attendance is required by default. The rule that applies (branch, office, designation or employee) is shown here after the employee is saved.</div>`;
   const hrFields = rich ? `
       <div class="row2"><div><label for="ne-join">Joining date</label><input id="ne-join" name="joining_date" type="date" value="${e && e.joining_date ? e.joining_date : ""}"></div>
       <div><label for="ne-type">Employment type</label><input id="ne-type" name="employment_type" autocomplete="off" value="${e && e.employment_type ? esc(e.employment_type) : ""}" placeholder="Full time / Contract"></div></div>
       <div class="row2"><div><label for="ne-branch">Branch</label><select id="ne-branch" name="branch_id"><option value="">—</option>${opts(b, e ? e.branch_id : null, v => v.name)}</select></div>
-      <div><label for="ne-office">Office / work location</label><select id="ne-office" name="office_id"><option value="">—</option>${opts(o, e ? e.office_id : null, v => v.name)}</select></div></div>
+      <div><label for="ne-office">Office / work location</label><select id="ne-office" name="office_id"><option value="">—</option>${(o && o.ok ? o.body : []).map(v => `<option value="${v.id}" data-branch="${v.branch_id == null ? "" : v.branch_id}"${e && e.office_id === v.id ? " selected" : ""}>${esc(v.name)}</option>`).join("")}</select></div></div>
+      ${policy}
       <div class="row2"><div><label for="ne-shift">Shift</label><select id="ne-shift" name="shift_id"><option value="">—</option>${opts(s, e ? e.shift_id : null, v => v.name)}</select></div>
       <div><label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${!e || e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e && e.status === "inactive" ? "selected" : ""}>Inactive</option></select></div></div>`
     : `<label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${!e || e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e && e.status === "inactive" ? "selected" : ""}>Inactive</option></select>`;
@@ -5707,6 +6107,24 @@ async function employeeForm(empId) {
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">${e ? "Save employee" : "Create employee"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`, true);
+  if (!rich) return;
+  // An office belongs to one branch, so the pair can never disagree: picking a
+  // branch hides the offices of other branches, picking an office fills its branch.
+  const bSel = $("#ne-branch"), oSel = $("#ne-office");
+  const syncOffices = () => {
+    const want = bSel.value;
+    $$("option[data-branch]", oSel).forEach(op => {
+      op.hidden = !!(want && op.dataset.branch !== want);
+    });
+    const cur = oSel.selectedOptions[0];
+    if (cur && cur.hidden) oSel.value = "";
+  };
+  bSel.addEventListener("change", syncOffices);
+  oSel.addEventListener("change", () => {
+    const br = oSel.selectedOptions[0] ? oSel.selectedOptions[0].dataset.branch : "";
+    if (br) { bSel.value = br; syncOffices(); }
+  });
+  syncOffices();
 }
 async function saveEmployee(form) {
   const f = form.elements, err = $(".err", form), id = form.dataset.id || null, rich = can("hr:write");
@@ -6679,6 +7097,14 @@ document.addEventListener("click", e => {
     else if (act === "hr-shifts") hrShifts();
     else if (act === "hr-new-shift") hrShiftForm();
     else if (act === "hr-edit-shift") hrShiftForm(a.dataset.id);
+    else if (act === "hr-sites") hrSites();
+    else if (act === "hr-new-branch") hrBranchForm();
+    else if (act === "hr-edit-branch") hrBranchForm(a.dataset.id);
+    else if (act === "hr-new-office") hrOfficeForm();
+    else if (act === "hr-edit-office") hrOfficeForm(a.dataset.id);
+    else if (act === "hr-new-rule") hrRuleForm();
+    else if (act === "hr-edit-rule") hrRuleForm(a.dataset.id);
+    else if (act === "hr-rule-delete") hrRuleDelete(a.dataset.id);
     else if (act === "hr-new-emp") employeeForm();
     else if (act === "hr-edit-emp") employeeForm(a.dataset.id);
     else if (act === "hr-attendance") hrAttendance();
@@ -6840,6 +7266,9 @@ document.addEventListener("submit", e => {
   else if (f.id === "slabPatchForm") saveSlabPatch(f);
   else if (f.id === "quoteForm") doQuote(f);
   else if (f.id === "hrShiftForm") saveHrShift(f);
+  else if (f.id === "hrBranchForm") saveHrBranch(f);
+  else if (f.id === "hrOfficeForm") saveHrOffice(f);
+  else if (f.id === "hrRuleForm") saveHrRule(f);
   else if (f.id === "hrManualForm") saveManualAttendance(f);
   else if (f.id === "hrLeaveForm") saveHrLeave(f);
   else if (f.id === "hrOdForm") saveHrOd(f);
@@ -7012,6 +7441,32 @@ document.addEventListener("change", e => {
     else state.hr.calDept = e.target.value;
     loadHrCal();
   }
+  if (e.target.id === "hrMxBranch" || e.target.id === "hrMxOffice") {
+    if (e.target.id === "hrMxOffice") {
+      state.hr.mxOffice = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.mxOffice);
+      if (o && o.branch_id) state.hr.mxBranch = String(o.branch_id);
+    } else {
+      state.hr.mxBranch = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.mxOffice);
+      if (o && String(o.branch_id) !== state.hr.mxBranch) state.hr.mxOffice = "";
+    }
+    hrMonthly();
+  }
+  if (e.target.id === "hrRepBranch" || e.target.id === "hrRepOffice") {
+    if (e.target.id === "hrRepOffice") {
+      state.hr.repOffice = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.repOffice);
+      if (o && o.branch_id) state.hr.repBranch = String(o.branch_id);
+    } else {
+      state.hr.repBranch = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.repOffice);
+      if (o && String(o.branch_id) !== state.hr.repBranch) state.hr.repOffice = "";
+    }
+    hrReports();
+  }
+  if (e.target.id === "hrBranchFilter") setHrSite("branch", e.target.value);
+  if (e.target.id === "hrOfficeFilter") setHrSite("office", e.target.value);
 });
 document.addEventListener("change", e => {
   if (e.target.id === "sr-freq" || e.target.id === "sr-monthrule") srFreqSync();

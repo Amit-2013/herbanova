@@ -12,8 +12,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models.hr import (Attendance, PayrollEntry, PayrollEntryLine, SalaryComponent,
-                         SalaryStructure)
+from ..models.hr import (Attendance, AttendanceRule, PayrollEntry, PayrollEntryLine, SalaryComponent,
+                         SalaryStructure, WorkLocation)
 from ..models.users import Employee
 from . import hr as hr_svc
 
@@ -48,6 +48,9 @@ def run_payroll(db: Session, period) -> list[PayrollEntry]:
     start, end = _month_bounds(period.year, period.month)
     employees = db.scalars(select(Employee).where(Employee.status == "active")).all()
     components = {c.id: c for c in db.scalars(select(SalaryComponent)).all()}
+    rules = list(db.scalars(select(AttendanceRule)
+                            .where(AttendanceRule.active.is_(True))).all())
+    offices = {o.id: o for o in db.scalars(select(WorkLocation)).all()}
     out: list[PayrollEntry] = []
     for emp in employees:
         if emp.joining_date and emp.joining_date > end:
@@ -82,8 +85,22 @@ def run_payroll(db: Session, period) -> list[PayrollEntry]:
                 present += Decimal("0.5")
         if not rows:
             present = working_days
-        payable = min(working_days, present + paid_leave)
-        lop = max(ZERO, working_days - payable)
+        required = hr_svc.resolve_attendance_requirement(db, emp, end, rules,
+                                                         offices).required
+        if not required:
+            # No absence is inferred for an attendance-exempt employee. Only
+            # unpaid leave the record actually holds reduces pay.
+            unpaid = ZERO
+            for a in rows:
+                if a.status == "unpaid_leave":
+                    unpaid += Decimal("0.5") if a.leave_portion in (
+                        "first_half", "second_half") else 1
+            lop = min(working_days, unpaid)
+            payable = working_days - lop
+            present = max(ZERO, payable - paid_leave)
+        else:
+            payable = min(working_days, present + paid_leave)
+            lop = max(ZERO, working_days - payable)
         ratio = (payable / working_days) if working_days > 0 else ZERO
 
         amounts: dict[str, Decimal] = {}
@@ -142,6 +159,13 @@ def run_payroll(db: Session, period) -> list[PayrollEntry]:
                                     kind="deduction", amount=amount, basis=basis))
         entry.gross, entry.deductions = money(gross), money(deductions)
         entry.net = money(gross - deductions)
-        entry.note = None if rows else "No attendance recorded for this month; paid days defaulted to the working days."
+        if not required:
+            entry.note = ("Attendance is not required for this employee; every working day "
+                          "is payable except recorded unpaid leave.")
+        elif not rows:
+            entry.note = ("No attendance recorded for this month; paid days defaulted to the "
+                          "working days.")
+        else:
+            entry.note = None
         out.append(entry)
     return out

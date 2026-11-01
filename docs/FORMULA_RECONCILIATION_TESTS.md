@@ -187,8 +187,9 @@ These reports call `_empty_reconciled()` without a `source_count`. Their only ch
 | Leave and OD attendance effects | F-63–F-66 | `test_leave_approval...` | VERIFIED |
 | Tax identity (GSTIN/PAN) | F-67–F-70 | Product HSN tests; identity itself only read | PARTIAL |
 | Audit, permissions, backup | F-71–F-75 | Backup test; export audit test | VERIFIED |
+| Attendance requirement resolution, gating and exempt days | F-76–F-79 | `tests/test_hr_sites.py` (7 tests) | VERIFIED |
 
-The full expressions and source lines are in `docs/FORMULA_AND_BUSINESS_RULE_REGISTER.md` (F-01–F-75).
+The full expressions and source lines are in `docs/FORMULA_AND_BUSINESS_RULE_REGISTER.md` (F-01–F-79). Section 4 is the 31 October 2026 baseline; the current suite total is recorded in `docs/VERIFICATION_REPORT.md` §2.
 
 ---
 

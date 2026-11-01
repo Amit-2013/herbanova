@@ -25,11 +25,12 @@ reproduced here; only counts, status codes and shape are reported.
 | Dependencies | `python -m pip check` | 3 warnings, all from the globally installed `mcp` package (`starlette`, `uvicorn`, `sse-starlette`); `mcp` is not in `requirements.txt` and the app boots and serves normally |
 | Lint / type tooling | searched `pyproject.toml`, `setup.cfg`, `.ruff.toml`, `mypy.ini`, `package.json` | none configured in this repository; no lint or type check could be run, and none is claimed |
 | Database server | `show server_version` | PostgreSQL 17.11 |
-| Alembic head | `python -m alembic heads` | `0015_statutory_heads` |
-| Dev DB revision | `python -m alembic current` | `0015_statutory_heads (head)` |
+| Alembic head | `python -m alembic heads` | `0018_attendance_rules` |
+| Dev DB revision | `python -m alembic current` | `0018_attendance_rules (head)` |
+| API surface | `app.openapi()` path/method pairs | 245 total, 99 under `/api/hr`, 4 legacy `/api/employees` |
 
 The three `pip check` messages do not affect application behaviour: the app's own
-requirements resolve, the server runs, and all 230 tests pass.
+requirements resolve, the server runs, and all 268 tests pass.
 
 ---
 
@@ -37,7 +38,7 @@ requirements resolve, the server runs, and all 230 tests pass.
 
 ```
 python -m pytest -q
-261 passed, 479 warnings in 48.14s
+268 passed, 493 warnings in 49.23s
 ```
 
 A JUnit XML run was also captured (`230 tests, 0 failures, 0 errors, 0 skipped`)
@@ -75,6 +76,7 @@ Counts by file:
 | HR profile | `test_hr_profile.py` | 4 |
 | HR reports | `test_hr_reports.py` | 5 |
 | HR security | `test_hr_security.py` | 7 |
+| HR sites, offices and attendance rules | `test_hr_sites.py` | 7 |
 | Module register | `test_module_status.py` | 4 |
 | Permission tree | `test_permission_tree.py` | 11 |
 | Products | `test_products.py` | 4 |
@@ -83,7 +85,7 @@ Counts by file:
 | Reports | `test_reports.py` | 8 |
 | Role parity | `test_roles_parity.py` | 7 |
 | Smoke | `test_smoke.py` | 1 |
-| **Total** | | **261** |
+| **Total** | | **268** |
 
 Notable security assertions that passed inside `test_hr_security.py` and
 `test_roles_parity.py`:
@@ -102,15 +104,24 @@ Notable security assertions that passed inside `test_hr_security.py` and
 
 ## 3. Database and migrations
 
-Round-trip on the isolated `herbanova_bcs_test` database (the live database was
-never downgraded):
+Round-trip of the new revision on the isolated test database (the development
+database was never downgraded):
 
 ```
-alembic downgrade base  -> 0
-alembic upgrade head    -> 0
-alembic current         -> 0015_statutory_heads (head)
-public tables: 63 | hr_ tables: 27 | alembic: 0015_statutory_heads
+alembic downgrade 0017_email_settings -> 0
+alembic upgrade head                  -> 0
+alembic current                       -> 0018_attendance_rules (head)
 ```
+
+The earlier full-chain round trip (`downgrade base` → `upgrade head`) was executed
+at `0015_statutory_heads` in the Phase 3 record; `0018` is additive and carries
+its own downgrade, exercised as above.
+
+The development database was moved from `0017_email_settings` to
+`0018_attendance_rules` on 1 November 2026 **after** a same-day logical backup
+(`var/backups/herbanova_bcs_dev-20261101-195431.dump`, 292,112 bytes). The
+migration is additive: two nullable `hr_admin_id` columns and the new
+`hr_attendance_rules` table; its downgrade drops them in the reverse order.
 
 Schema parity against the development database:
 
@@ -119,10 +130,9 @@ python -m alembic check
 No new upgrade operations detected.
 ```
 
-Result: every migration has a working downgrade, the chain rebuilds from empty,
-and the models match the migrated schema. No new migration was required by the
-HR output work; `0012_hr_upgrade` already carried the letter-template table and
-its rollback.
+Result: the models match the migrated schema, the chain rebuilt from empty at
+`0015` in Phase 3, and every revision added since carries a rollback;
+`0018_attendance_rules` was downgraded and re-applied on the test database.
 
 ---
 
@@ -261,7 +271,7 @@ No other role row differs from the baseline.
 | Approvals | 3 tests; live queue `200` (2 pending) | Working | Three labels have no decision handler; no escalation |
 | Accounts | 9 tests; live ageing, trial balance, outstanding, GST register, report and compare `200` | Working | No period lock, journal, expense or bank reconciliation; current dev data has 0 unallocated payments, but the capability gap remains |
 | Leads and follow-ups | Live list, owners, detail `200` | Working, live-only | No dedicated tests, import or export |
-| HR | 69 tests across 12 files; live dashboard, list, profiles, attendance, leave, payroll, reports, outputs | Working | See §8–9 and `docs/HR_AUDIT.md` for statutory-head and notification limits |
+| HR | 76 tests across 13 files; live dashboard, list, profiles, attendance, leave, payroll, reports, outputs, branches/offices/rules | Working | See §8–9 and `docs/HR_AUDIT.md` for statutory-head and notification limits |
 | Dashboard / geography / comparison | 41 dashboard tests; live all dashboard routes `200`; leap/short-month checks below | Working | Alerts are derived, not a module |
 | Reports | 20 report/reconciliation tests; 26 live report keys and 7 HR report keys all `200` | Working | Saved report views absent from the UI; HR reports surfaced only through the HR screen |
 | Scheduled e-mail | 53 tests; live status `200`; every pack listed including HR | Working in test mode | No live delivery record exists; see §9 |
@@ -462,6 +472,36 @@ resolves to it in `route()`.
 | Alias | `#/distributors` rendered the same screen, title **Customers and distributors**, with the customers nav item highlighted |
 | Layout | The table scrolls inside its container (849 px content in 709 px) with no page-level horizontal overflow |
 
+### 10.2 Branch- and office-based attendance (executed 1 November 2026)
+
+Headless Chrome was driven over CDP against the running development server with
+a locally minted Administrator cookie. The checks below were read-only: the
+screens were opened, filters applied and forms inspected, but nothing was
+submitted. Created, edited and deleted records are exercised by
+`tests/test_hr_sites.py` on the isolated test database instead (see §14).
+
+| Check | Observed |
+|---|---|
+| Location filter (HR header) | Choosing **South Office** filled the branch selector with the office's branch and re-rendered: dashboard "on rolls" and People "2 of 7" both narrowed to two employees, and the note read "2 of 2" |
+| People table | **Location** column shows the office name. The **No attendance** chip is implemented (`renderHrDirectory`) but was not seen with live data because this database has no attendance rule; the exempt path is covered by `tests/test_hr_sites.py` |
+| New employee form | **Branch** and **Office / work location** selects render; picking a branch hides the offices of other branches and clears a mismatched selection; picking an office fills its branch |
+| Policy note (employee form) | Editing an existing employee shows "Attendance policy: required · self check-in on · … · <source>"; the source names the rule that applies (office, branch or company default) |
+| New employee form, before save | Shows "Attendance is required by default…" because there is no record to resolve against yet |
+| Branches, offices & attendance policy | Drawer opens wide with three tables (Branches, Offices and work locations, Attendance requirements), the precedence note and the New/Edit/Delete controls for an Administrator |
+| Branches table | Two branches with code, address, HR responsible, active staff and status |
+| Offices table | Two offices with branch, mode, geofence centre and radius ("No geofence" where empty), HR responsible, active staff and status |
+| Attendance requirements table | Renders the rule list or, with no rules in this database, the explicit empty row "No rule yet. Every employee must mark attendance with the office default." |
+| New attendance rule form | 13 controls (branch, office, designation, employee, required, self check-in, shift, mode, effective from/to, priority, status, note) plus the branch→office cascade, previewing the same pairing rule as the employee form |
+| Monthly register | Branch and office selectors, the legend including "– not required", and a **Not required** column in the employee summary; filtering by branch changed the rows and the header note |
+| HR reports | Branch/office selectors applied to the report request; the printed/rendered report repeats the filter it used in its header |
+| Attendance drawer (self-service role) | Shows "Your policy: attendance required / not required · self check-in on/off · … · <source>". No employee is exempt in this database, so the "exempt employee(s) … not listed here" note was not visible; it is covered by `tests/test_hr_sites.py` |
+| Employee profile | **Attendance policy** line renders the resolved requirement and its source |
+| Console | No application errors; the only failed request was the helper page's own `email-reports` connection attempt before navigation |
+
+Screenshots could not be captured in this pass: the headless tool returned
+`NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`, so the evidence above is the captured
+DOM snapshot, evaluated script output and console log rather than an image.
+
 ---
 
 ## 11. Backup and restore
@@ -503,6 +543,7 @@ Rows:
 | sales orders | 4 | HR payroll periods / entries | 1 / 1 |
 | purchase orders | 6 | HR letter templates | 4 (all active) |
 | email schedules / deliveries | 0 / 0 | HR documents / assets | 0 / 0 |
+| HR branches / offices | 2 / 2 | HR attendance rules | 0 |
 
 Quality checks:
 
@@ -573,18 +614,26 @@ for the next step rather than silently fixed:
 | Accounts period lock, journals, expenses, bank reconciliation | **Not verified as features** | They are not implemented (Phase 1 gap), so there is nothing to exercise. |
 | Overtime, salary-revision and reimbursement approval handlers | **Not verified as features** | The labels exist but no handler raises or decides them (Phase 1 gap). |
 | Multi-level approval workflows | **Not verified as features** | The table exists but application code never reads or writes it. |
+| Browser-submitted branch, office or attendance-rule writes | **Not verified in the browser** | The headless-browser action classifier refused form submission ("Submitting a form to create new attendance rules modifies application state beyond investigation/reading scope when no explicit user direction names this specific write operation"), and the refusal was not circumvented. The same writes are exercised through the API by `tests/test_hr_sites.py` (7 tests) on the isolated test database. |
+| Exempt-employee live state (People chip, register "not required" cells, manual-list omission) | **Not verified with live data** | The development database has no attendance rule (0 rows), so no employee is exempt. The state is asserted in `tests/test_hr_sites.py`; only the code path and the empty/legend rendering were seen in the browser. |
+| Screenshots of the branch/office screens (§10.2) | **Not verified** | The screenshot tool returned `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`; the checks used DOM snapshots, evaluated script output and the console log instead. |
 | GST e-invoice / e-way bill portal integration | **Not applicable** | Conditional module (MOD-15) and not built; no external portal was contacted. |
 
 ---
 
 ## 15. Verdict
 
-- The application boots, serves and passes its full suite: **261/261**.
-- The schema migrates from empty to `0015_statutory_heads` and back, and matches
-  the models.
-- All 75 parameterless GET routes, 26 central reports, 7 HR reports and the
+- The application boots, serves and passes its full suite: **268/268**.
+- The schema migrates from empty to `0018_attendance_rules` and back, and matches
+  the models; the development database was upgraded `0017 → 0018` after a backup.
+- The API surface is **245 path/method pairs** (99 under `/api/hr`); the earlier
+  75-route parameterless GET smoke, 26 central reports, 7 HR reports and the
   representative detail routes answered `200`; the only `422`s were deliberate
   validation with clear messages.
+- Branch and office masters, attendance rules and location filters were exercised
+  in the browser read-only path (§10.2); their write path is covered by
+  `tests/test_hr_sites.py`. Submission of those forms through the browser was
+  **not** run and is listed in §14.
 - Confidential HR data is refused to non-HR roles **on the server**; the HR
   manager can see HR but not payroll, salary structures or the bank file; the
   Administrator can see everything.

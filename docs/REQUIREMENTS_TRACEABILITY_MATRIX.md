@@ -26,12 +26,12 @@ are **PARTIAL** and say so. Every requirement that is not met is listed in §5.
 
 | Status | Count | Meaning |
 |---|---:|---|
-| MET | 70 | Exercised by a test or a live check, as cited. |
+| MET | 79 | Exercised by a test or a live check, as cited. |
 | MET (test mode) | 1 | Works end-to-end but delivery is deliberately redirected. |
 | PARTIAL | 9 | Works with the stated limitation; no dedicated test or an unrun path. |
 | NOT VERIFIED | 2 | Exists but was not executed (destructive or environment-bound). |
 | NOT BUILT | 3 | In scope of the audit, not implemented. |
-| **Total requirements** | **85** | 12 governing + 73 functional. |
+| **Total requirements** | **94** | 12 governing + 82 functional. |
 
 A feature can be MET while a related capability is NOT BUILT; for example
 payroll preparation is MET while payroll posting to the ledger is not built
@@ -42,16 +42,16 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | ID | Requirement | Source | Implementation / evidence | Status |
 |---|---|---|---|---|
 | R-01 | Audit the whole project before changing it | BRIEF | `docs/PROJECT_AUDIT.md`, `docs/STAGE1_REAUDIT.md`, `HR_AUDIT.md` | MET |
-| R-02 | Upgrade HR: dashboard, easy operation, presentable output, server-side controls, audit, locks, masking | BRIEF | `app/api/hr.py`, `app/services/hr*.py`, `static/js/app.js`; 69 HR test functions; §4.7 | MET |
-| R-03 | Verify the whole project with real commands and outputs | BRIEF | `docs/VERIFICATION_REPORT.md`; 230/230 tests; 75-route live smoke | MET |
+| R-02 | Upgrade HR: dashboard, easy operation, presentable output, server-side controls, audit, locks, masking | BRIEF | `app/api/hr.py`, `app/services/hr*.py`, `static/js/app.js`; 76 HR test functions in 13 files; §4.7 | MET |
+| R-03 | Verify the whole project with real commands and outputs | BRIEF | `docs/VERIFICATION_REPORT.md`; 268/268 tests; 75-route live smoke plus the 245-pair API count | MET |
 | R-04 | Never invent data or numbers; show "No data yet" and list it as a gap | BRIEF | D-12; `test_reports_say_no_data_yet_instead_of_zeroes`, `test_missing_expenses_and_profit_are_gaps_not_zeroes`, `test_dashboard_defaults_to_this_month_and_reports_no_data_as_null` | MET |
-| R-05 | Additive changes; every schema change has a migration and rollback; no broken screens, routes, permissions or reports | BRIEF | `alembic/versions/0001`–`0015`; upgrade→downgrade→upgrade round-trip; full suite | MET |
-| R-06 | Work on a new branch and take a database backup first | BRIEF | `feature/scheduled-reports`; `backup_restore_test.py` run 1 Nov 2026 | MET |
+| R-05 | Additive changes; every schema change has a migration and rollback; no broken screens, routes, permissions or reports | BRIEF | `alembic/versions/0001`–`0018`; upgrade→downgrade→upgrade round-trip; full suite | MET |
+| R-06 | Work on a new branch and take a database backup first | BRIEF | `feature/hr-upgrade`; `backup_restore_test.py` run 1 Nov 2026 | MET |
 | R-07 | Check roles on the server; salary, bank, ID visible only to Administrator, MD and allowed HR roles | BRIEF | [`HR_ROLES.md`](HR_ROLES.md); `test_hr_security.py`; live role matrix | MET |
 | R-08 | No real e-mail; never print passwords or keys | BRIEF | test-mode mailer (`mode: test`, `send_enabled: false`); secret scan §13 of the verification report | MET |
 | R-09 | Do not mark anything done unless it was run; otherwise write "Not verified" and why | BRIEF | `VERIFICATION_REPORT.md` §14 | MET |
 | R-10 | Provide a feature inventory and a requirements traceability matrix | BRIEF | [`FEATURE_INVENTORY.md`](FEATURE_INVENTORY.md) and this file | MET |
-| R-11 | Record decisions and assumptions | BRIEF | [`DECISIONS.md`](DECISIONS.md) D-01–D-24, Q-01–Q-06 | MET |
+| R-11 | Record decisions and assumptions | BRIEF | [`DECISIONS.md`](DECISIONS.md) D-01–D-32, Q-01–Q-06 | MET |
 | R-12 | Update the module register, permission matrix and stale user manual | BRIEF | `module_register.py` (17 counted/17 working); [`permissions-matrix.md`](permissions-matrix.md); [`user-manual/`](user-manual/) | MET |
 
 ## 4. Functional requirements
@@ -185,7 +185,21 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | R-95 | Administrator-only permissions remain restricted to Administrators | BRIEF (new) | `ADMIN_ONLY_PERMISSIONS`; locked editor inputs; `validate_permissions`; admin keep-check | `test_permission_tree.py`; `test_roles_parity.py` | MET |
 | R-96 | The same rules extend to future modules | BRIEF (new) | Catalogue/parent-map completeness tests; feature registration test | `test_permission_tree.py`, `test_feature_switches.py` | MET |
 
-### 4.10 Screen consolidation
+### 4.10 Branch- and office-based attendance
+
+| ID | Requirement | Source | Implementation | Evidence | Status |
+|---|---|---|---|---|---|
+| R-100 | Assign an employee to a branch and an office/work location; one office belongs to one branch, the branch is inferred from the office, and a mismatched pair is refused | BRIEF (new) | `_normalise_employee_location`; `Employee.branch_id/office_id`; new-employee form cascade | `test_hr_sites.py::test_sites_crud_and_employee_assignment`; browser check | MET |
+| R-101 | Maintain branch and office masters (HR responsible, status, geofence centre/radius, attendance mode); refuse deactivation or a branch move while active staff are assigned | BRIEF (new) | `/api/hr/branches`, `/api/hr/offices`; `_site_counts`; migration `0018` | `test_hr_sites.py::test_sites_crud_and_employee_assignment`; browser check of the policy drawer | MET |
+| R-102 | Configure whether attendance is required per branch, office, designation and employee, in any mix, with effective dates, priority, optional shift and attendance-mode override | BRIEF (new) | `AttendanceRule`; `/api/hr/attendance-rules`; rule form | `test_hr_sites.py::test_rule_validation_precedence_and_effective_dates`; browser check (13 fields, cascade) | MET |
+| R-103 | Resolve the rule by specificity — employee, office, designation, branch, company default — and show the source that applied | BRIEF (new) | `resolve_attendance_requirement`, `rule_label`; `/api/hr/attendance-rules/resolve` | `test_hr_sites.py`; profile/form show "Office default (…)" | MET |
+| R-104 | Record attendance only for employees who must mark it: refuse manual, bulk, correction and self check-in for the exempt, naming the rule | BRIEF (new) | `require_attendance`, `require_self_service`; gating in attendance endpoints | `test_hr_sites.py` tests 3 and 4 | MET |
+| R-105 | Exempt working days are "not required" in the monthly register, not gaps or absences | BRIEF (new) | `monthly_attendance`; `not_required_days`; register legend and column | `test_hr_sites.py::test_monthly_register_marks_exempt_days_as_not_required`; browser check of the column and legend | MET |
+| R-106 | Payroll infers no absence for an exempt employee; only recorded unpaid leave reduces pay | BRIEF (new) | `app/services/payroll.py` exempt branch | `test_hr_sites.py::test_payroll_does_not_invent_absence_for_exempt_employees` | MET |
+| R-107 | Location filters narrow attendance, monthly register, People, dashboard and every HR report, and the report header states the filter applied | BRIEF (new) | `branch_id`/`office_id` on the HR APIs; `hrSiteParams`; `by_office`/`by_branch` | `test_hr_sites.py::test_site_filters_reach_attendance_employees_dashboard_and_reports`; browser check | MET |
+| R-108 | The new-employee screen captures branch/office and shows the resolved policy before saving | BRIEF (new) | `employeeForm` in `static/js/app.js` | browser check 1 Nov 2026 (cascade, policy note) | MET |
+
+### 4.11 Screen consolidation
 
 | ID | Requirement | Source | Implementation | Evidence | Status |
 |---|---|---|---|---|---|
@@ -216,10 +230,10 @@ payroll preparation is MET while payroll posting to the ledger is not built
 
 | Check | Command / source | Result |
 |---|---|---|
-| Route count | FastAPI `app.routes` | 238 API method entries; 92 HR + 4 legacy employee |
-| Test count | `python -m pytest -q` | 261 passed |
-| Schema | `alembic current` / `heads` | `0017_email_settings` |
-| Migration round-trip | upgrade → downgrade base → upgrade | pass (verification report §3) |
+| Route count | FastAPI `app.openapi()` | 245 API method entries; 99 HR + 4 legacy employee |
+| Test count | `python -m pytest -q` | 268 passed |
+| Schema | `alembic current` / `heads` | `0018_attendance_rules` |
+| Migration round-trip | upgrade → downgrade 0018 → upgrade head | pass (verification report §3) |
 | Live smoke | 75 GET routes as Administrator | all 200 |
 | Roles | read-only `roles` query + live matrix | 44 keys for Administrator; HR role sets as documented |
 | Backup/restore | `python backup_restore_test.py` | PASS, 26 reports, 0 unreconciled |

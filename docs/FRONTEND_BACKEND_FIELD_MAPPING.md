@@ -482,6 +482,8 @@ Filters are validated per report: a filter a report cannot use is refused with 4
 
 **UI:** `#/hr`. A role with only `hr:attendance_self` sees its own day; a role with `hr:read` sees the team. The server enforces the same distinction inside `/api/hr/attendance` (`app/api/hr.py:542-560`).
 
+The People table shows each employee's office under **Location** and a **No attendance** chip when the attendance policy exempts that employee (`app.js:2740`). The header offers **Branches, offices & attendance policy** (`data-act="hr-sites"`) to `hr:write`, and branch/office filters (`#hrBranchFilter`, `#hrOfficeFilter`) that scope the dashboard, the register and the reports (`setHrSite`, `app.js:2564`).
+
 ### 14.1 Employee master
 
 Two APIs exist:
@@ -489,9 +491,26 @@ Two APIs exist:
 - `POST/PATCH /api/employees` — the legacy, narrow employee record used by the Users page; `EmployeeIn{code, full_name, department, designation, phone, email, joining_date, manager_id}`.
 - `POST/PATCH /api/hr/employees` — the full HR record. `EmployeeIn` accepts 27 fields: the eight above plus `branch_id, office_id, department_id, shift_id, hr_admin_id, employment_type, work_schedule, date_of_exit, address, emergency_name, emergency_phone, bank_name, bank_account_no, bank_ifsc, pan, uan, esi_no, attendance_policy, leave_policy`; `EmployeePatch` adds `status` (`app/api/hr.py:83-139`).
 
-The HR screen (`app.js:646-685`) sends only: `code` (create), `full_name`, `department`, `designation`, `phone`, `email`, `joining_date`, `employment_type`, `branch_id`, `office_id`, `shift_id`, `status`.
+| UI field (`employeeForm`, `app.js:6069`) | Request field | Schema | Store (`employees`) | Perm |
+|---|---|---|---|---|
+| Employee code (create only) | `code` | `str` | `code` | `hr:write` |
+| Full name | `full_name` | `str`, min 2 | `full_name` | same |
+| Department (free text) | `department` | `str \| None` | `department` | same |
+| Designation | `designation` | `str \| None` | `designation` | same |
+| Phone, email | `phone`, `email` | `str \| None` | same | same |
+| Joining date | `joining_date` | `date \| None` | `joining_date` | same |
+| Employment type | `employment_type` | `str \| None` | `employment_type` | same |
+| **Branch** | `branch_id` | `int \| None` | `branch_id` → `hr_branches.id` | same |
+| **Office / work location** | `office_id` | `int \| None` | `office_id` → `hr_work_locations.id` | same |
+| Shift | `shift_id` | `int \| None` | `shift_id` | same |
+| Status | `status` | `active` / `inactive` | `status` | same |
+| Attendance policy (read-only note) | — | `/api/hr/employees/{id}/profile` → `attendance_requirement` | computed | `hr:write` |
 
-**Mismatch M-07 (Low).** The HR screen cannot capture bank details, PAN, UAN, ESI number, emergency contacts, address, exit date, `department_id`, `hr_admin_id`, work schedule or the attendance/leave policies, although the API accepts all of them. Those fields can only be set through the API or a data load.
+**Branch/office cascade (`app.js:6110-6127`).** Each office option carries `data-branch`. Choosing a branch hides the offices of other branches and clears an office that no longer belongs; choosing an office fills its branch. The server repeats the pairing check (`OfficeIn`/`EmployeeIn`: an office's branch must match `branch_id` when both are given) and refuses a mismatch with 422, so a crafted request cannot create the disagreement the screen prevents. When absent, `branch_id` is inferred from the chosen office.
+
+The policy note is read, never edited: it shows `required`, `self_service`, the mode override and the rule `source` returned by `resolve_attendance_requirement()`. Before the first save it says attendance is required by default, because there is no record to resolve against yet.
+
+**Mismatch M-07 (Low, narrowed).** The HR screen still cannot capture bank details, PAN, UAN, ESI number, emergency contacts, address, exit date, `department_id`, `hr_admin_id`, work schedule or the attendance/leave policy permanent overrides, although the API accepts all of them. Those remain API- or data-load-only. Branch, office and shift are no longer part of M-07.
 
 **Reports:** `hr_employee_master`, `hr_joining_exit` — **row-count-only reconciliation**. The employee master report deliberately omits confidential bank and identity fields.
 
@@ -505,8 +524,14 @@ The HR screen (`app.js:646-685`) sends only: `code` (create), `full_name`, `depa
 | Manual entry | `POST /api/hr/attendance/manual` | `ManualAttendanceIn{employee_id, date, status, check_in, check_out, office_id, remarks}` | `hr_attendance` | `hr:attendance_manage` |
 | Request correction | `POST /api/hr/attendance/{id}/correction` | `CorrectionIn{new_status, new_check_in, new_check_out, reason}` | `hr_attendance_corrections` | `hr:attendance_self` |
 | Correction queue | `GET /api/hr/attendance/corrections` | — | same | `hr:read` |
+| Your own policy (note) | `GET /api/hr/attendance-rules/resolve` | — (defaults to the signed-in employee) | computed from `hr_attendance_rules` | `current_user` |
+| Today's register (location filters) | `GET /api/hr/attendance?...&branch_id=&office_id=` | — | `hr_attendance` | `hr:read` |
+| Monthly register | `GET /api/hr/attendance/monthly?year=&month=&branch_id=&office_id=` | — | computed | own row or `hr:read` |
+| HR dashboard | `GET /api/hr/dashboard?branch_id=&office_id=` | — | computed | `hr:read` |
 
 The UI sends `source: "gps"` with coordinates when the browser allows it and falls back to `source: "web"` without coordinates. The geofence result is computed on the server (`app/services/hr.py:80-86`); the browser never decides it.
+
+**Attendance requirement is enforced on the server.** Before any write, the service calls `require_attendance()` and `require_self_service()` (`app/services/hr.py`), which resolve the employee's rule for the day. An employee the policy exempts is refused check-in, check-out, a correction request, a manual entry and a bulk row with **409** and the rule's source in the message; `hrAttendance()` hides exempt employees from the manual list and states how many were left out. A day the policy exempts is written to the register as `status: null, not_required: true` and to the totals as `not_required_days` — never as a gap and never as an inferred absence. Screening differs from gating: hiding the button is a convenience; the 409 is the control.
 
 **Mismatch M-09 (Low).** The manual-attendance form sends only `employee_id`, `date`, `status` and `remarks`; `check_in`, `check_out` and `office_id` are accepted by the schema but not offered. A corrected punch time therefore cannot be entered from this screen; the correction request endpoint exists but has no UI either.
 
@@ -544,14 +569,15 @@ The UI sends `employee_id`, `date`, `visit_type`, `purpose`, `destination`. The 
 
 **Mismatch M-06 (Medium).** There is **no UI for salary components or salary structures** (`grep` for `/api/hr/salary` in `static/js/app.js` finds nothing), and `run_payroll()` silently skips any active employee without an effective structure (`app/services/payroll.py:59-60`). The live database currently holds 11 components and one structure for five employees (read-only count), so a payroll run will produce one entry and look empty to an operator. Components and structures are otherwise complete APIs (`POST /api/hr/salary/components`, `POST /api/hr/salary/structures`).
 
-**Formula references:** F-51–F-58 (gross, deductions, net, effective dating, state machine). Payroll is audited and a paid period cannot be paid twice.
+**Formula references:** F-51–F-58 (gross, deductions, net, effective dating, state machine). Payroll is audited and a paid period cannot be paid twice. An employee whose attendance policy exempts them has `payable_days = working_days − recorded unpaid days` and the period note says attendance is not required for them (`app/services/payroll.py`), so an exempt person is never docked for days they were not asked to mark.
 
-### 14.6 HR master data — API complete, UI absent
+### 14.6 HR master data
 
 | Master | API | UI |
 |---|---|---|
-| Branches | `GET/POST /api/hr/branches` | read via dropdown; **no create form** |
-| Offices / work locations | `GET/POST /api/hr/offices` | read via dropdown; **no create form** |
+| Branches | `GET/POST /api/hr/branches`, `PATCH /api/hr/branches/{id}` | **full UI** — New/Edit on *Branches, offices & attendance policy* (`hrBranchForm`, `app.js:3346`) |
+| Offices / work locations | `GET/POST /api/hr/offices`, `PATCH /api/hr/offices/{id}` | **full UI** — New/Edit, branch, mode, geofence (`hrOfficeForm`, `app.js:3380`) |
+| Attendance rules | `GET/POST /api/hr/attendance-rules`, `PATCH`/`DELETE /{id}`, `GET /resolve` | **full UI** — New/Edit/Delete (`hrRuleForm`, `app.js:3436`; `hrRuleDelete`, `app.js:3515`) |
 | Departments | `GET/POST /api/hr/departments` | **no UI at all** |
 | Shifts | `GET/POST/PATCH /api/hr/shifts` | full UI (`app.js:691-755`) |
 | Holidays | `GET/POST /api/hr/holidays` | **no UI at all** |
@@ -559,13 +585,64 @@ The UI sends `employee_id`, `date`, `visit_type`, `purpose`, `destination`. The 
 | Salary components | `GET/POST /api/hr/salary/components` | **no UI** |
 | Salary structures | `GET/POST /api/hr/salary/structures` | **no UI** |
 
-The development database already contains two branches, two work locations, two departments, one active "General" shift, five leave types and eleven salary components (read-only counts, no amounts read). Those records were not created by `seed.py`, which seeds no HR masters, so a fresh environment would have none of them and the UI cannot create them. This is M-06.
+The development database already contains two branches, two work locations, two departments, one active "General" shift, five leave types and eleven salary components (read-only counts, no amounts read). Those records were not created by `seed.py`, which seeds no HR masters. Branches, offices and attendance rules can now be created in the browser, so a fresh environment is usable for location-based attendance; departments, holidays, leave types and the salary masters still cannot be created from the screen, which is what remains of M-06.
 
-**Reports:** twelve HR registers. `hr_attendance`, `hr_leave`, `hr_od`, `hr_payroll` and the other period registers share the `_empty_reconciled` row-count-only check.
+**Reports:** twelve HR registers. `hr_attendance`, `hr_leave`, `hr_od`, `hr_payroll` and the other period registers share the `_empty_reconciled` row-count-only check. The register and report screens pass the selected branch/office to the server (`hrReports`, `app.js:3837`; request fields `branch_id`, `office_id`) and repeat the selection in the printed header, so a filtered sheet always says what it was filtered by.
 
 ### 14.7 HR approvals
 
-Leave and OD applications create `approval_requests` rows through `request_approval()` (`app/services/hr.py:153+`). The HR screen shows status and remarks but does not offer a decision button; decisions are made in `#/approvals` or through the HR approval endpoints (`app/services/hr_approvals.py`). HR self-approval is refused (F-66), tested in `tests/test_hr.py:11-47`.
+Leave and OD applications create `approval_requests` rows through `request_approval()` (`app/services/hr.py:153+`). The HR screen shows status and remarks but does not offer a decision button; decisions are made in `#/approvals` or through the HR approval endpoints (`app/services/hr_approvals.py`). HR self-approval is refused (F-66), tested in `tests/test_hr.py:11-47`. Naming an `hr_admin` on a branch or office does not grant approval rights and does not widen data scope; it is a display label for who answers for attendance there.
+
+### 14.8 Branch, office and attendance-rule screens
+
+**Branch** (`hrBranchForm`, `app.js:3346`; `saveHrBranch`, `app.js:3364`)
+
+| UI field | Request field | Schema (`BranchIn` / `BranchPatch`) | Store (`hr_branches`) | Perm |
+|---|---|---|---|---|
+| Branch code (create only, upper-cased) | `code` | `str`, min 2, unique | `code` | `hr:write` |
+| Branch name | `name` | `str`, min 2 | `name` | same |
+| Address | `address` | `str \| None` | `address` | same |
+| HR responsible | `hr_admin_id` | `int \| None` → `employees.id` | `hr_admin_id` | same |
+| Status (edit only) | `status` | `active` / `inactive` | `status` | same |
+
+**Office / work location** (`hrOfficeForm`, `app.js:3380`; `saveHrOffice`, `app.js:3409`)
+
+| UI field | Request field | Schema (`OfficeIn` / `OfficePatch`) | Store (`hr_work_locations`) | Perm |
+|---|---|---|---|---|
+| Office code (create only, upper-cased) | `code` | `str`, min 2, unique | `code` | `hr:write` |
+| Office name | `name` | `str`, min 2 | `name` | same |
+| Branch | `branch_id` | `int \| None` → `hr_branches.id` | `branch_id` | same |
+| Address | `address` | `str \| None` | `address` | same |
+| Latitude, longitude | `latitude`, `longitude` | `Decimal \| None`; **both or neither**, lat −90..90, lon −180..180 | same | same |
+| Geofence radius (m) | `geofence_radius_m` | `int`, 1–100 000, default 200 | same | same |
+| Attendance mode | `attendance_mode` | `office` / `gps` / `both` | same | same |
+| HR responsible | `hr_admin_id` | `int \| None` | same | same |
+| Status (edit only) | `status` | `active` / `inactive` | same | same |
+
+The client mirrors the server's coordinate rule (`saveHrOffice`: both-or-neither, range, radius) so the operator sees the error before the request; the schema validator is the control, and a crafted payload cannot store half a geofence centre.
+
+**Attendance rule** (`hrRuleForm`, `app.js:3436`; `saveHrRule`, `app.js:3492`)
+
+| UI field | Request field | Schema (`AttendanceRuleIn` / `AttendanceRulePatch`) | Store (`hr_attendance_rules`) |
+|---|---|---|---|
+| Branch | `branch_id` | `int \| None` (any) | `branch_id` |
+| Office / work location | `office_id` | `int \| None` (any); must belong to `branch_id` when both set | `office_id` |
+| Designation | `designation` | `str \| None` (any) | `designation` |
+| Employee | `employee_id` | `int \| None` (any) | `employee_id` |
+| Attendance | `required` | `bool`, default `true` | `required` |
+| Self check-in | `self_service` | `bool`, default `true` | `self_service` |
+| Shift | `shift_id` | `int \| None` (office default) | `shift_id` |
+| Attendance mode | `attendance_mode` | `office` / `gps` / `both` / `None` (office default) | `attendance_mode` |
+| Effective from / to | `effective_from`, `effective_to` | `date \| None`, inclusive; end ≥ start | same |
+| Priority | `priority` | `int`, 1–1000, default 100 | `priority` |
+| Status | `active` | `bool`, default `true` | `active` |
+| Note | `note` | `str \| None`, max 200 | `note` |
+
+**Resolution** (`resolve_attendance_requirement`, `app/services/hr.py`). Candidates are active rules whose dates include the day and whose every filled target matches the employee. Score: employee 1000, office 100, designation 10, branch 1. Order: `(-score, priority, -id)` — most specific first, then the lower priority number, then the newest. No match returns `required: true, self_service: true, source: "Company default"`; a rule targeting only the office returns `source: "Office default (<name>)"`. The chosen rule's shift replaces the employee's shift for that day when set. The screen sorts its table with the same score so the operator can read precedence top-down.
+
+**Server validations the form can trigger.** 404 for an unknown branch, office, employee or shift reference; 422 when the office belongs to another branch, when the named employee is not assigned to that office or branch (the rule could never match), or when `effective_to` precedes `effective_from`; 409 when an active rule targets exactly the same people as another, or when a second company-wide rule is active; 409 when a branch or office with active staff is deactivated or moved to another branch; 409 for a duplicate code. The drawer surfaces `detail` verbatim in its `.err` region.
+
+**Read/write split.** `GET` on branches, offices and rules is `hr:read`; every write is `hr:write`. The drawer renders the New/Edit/Delete controls only for `hr:write`, but the endpoints re-check, so a hidden button is never the only guard.
 
 ---
 

@@ -94,6 +94,8 @@ The sidebar has 19 entries. Most are filtered by your permissions when you sign 
 
 An **employee** without `hr:read` sees the HR home page with their own attendance only; the directory, leave/OD registers and payroll buttons are hidden and refused by the server (`static/js/app.js:602-610`).
 
+**Branches, offices and attendance policy.** Every employee can be placed in a **Branch** and an **Office / work location** in the New/Edit employee form; only the offices of the chosen branch are offered, and choosing an office fills its branch. HR Management shows the office under **Location** in the People table, plus a **No attendance** chip when the policy exempts that person. A role with `hr:write` can open **Branches, offices & attendance policy** to create branches and offices, set a geofence, and write attendance rules. The branch and office selectors above the People list, the monthly register and the HR reports narrow every figure to that branch or office, and a printed sheet repeats the filter it used. An employee who is not required to mark attendance is refused a check-in by the server, and their exempt days appear as **not required**, never as absences.
+
 ## 1.6 Messages you may see
 
 | Message | Meaning | What to do |
