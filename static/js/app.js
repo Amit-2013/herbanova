@@ -19,7 +19,7 @@ const fmtDay = s => s ? parseTs(s).toLocaleDateString("en-IN", {day: "2-digit", 
 const daysUntil = iso => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((new Date(iso + "T00:00:00") - t) / 86400000); };
 const poValue = po => Math.round(po.lines.reduce((s, l) => s + Number(l.qty) * Number(l.unit_cost), 0) * 100) / 100;
 
-const state = {user: null, perms: new Set(), modules: null, dashboard: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
+const state = {user: null, perms: new Set(), features: null, featureFlags: [], modules: null, dashboard: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
                suppliers: [], bankChanges: [], supFilter: "all",
                dists: [], orders: [], approvals: [], leads: [], rp: {cat: [], key: "stock", from: "", to: "", data: null, tok: 0}, soFilter: "all", apFilter: "pending", ldFilter: "open", ldOwner: "all", distFilter: "all",
                users: [], roles: [], employees: [], permCatalog: [], audit: {rows: [], actions: [], actors: [], total: 0},
@@ -150,9 +150,23 @@ function closeDrawer() {
 const drawerOpen = () => !$("#drawer").classList.contains("hide");
 
 /* ---------- session ---------- */
+/* Module switches are separate from permissions: the Administrator turns a
+   module off centrally, and the server then removes its permissions from every
+   role. The map mirrors app/core/features.py so navigation never offers a
+   screen whose API answers 403. A missing list (older server) means all on. */
+const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "stock",
+                      suppliers: "suppliers", sales: "sales", billing: "sales",
+                      customers: "sales", distributors: "sales", geo: "sales",
+                      approvals: "approvals", leads: "leads", lost: "leads",
+                      followups: "leads", accounts: "accounts", tax: "tax",
+                      reports: "reports", compare: "reports", hr: "hr", audit: "audit",
+                      scheduled: "scheduled", users: "users"};
+const featureOn = v => !VIEW_FEATURE[v] || !state.features || state.features.has(VIEW_FEATURE[v]);
+
 function enter(u) {
   state.user = u;
   state.perms = new Set(u.permissions || []);
+  state.features = Array.isArray(u.features) ? new Set(u.features) : null;
   if (u.must_change_password) { showPasswordChange(u); return; }
   state.dashboard = null;
   state.dashLoading = true;
@@ -173,7 +187,7 @@ function enter(u) {
   show("#navSettings", can("user:manage") || can("tax:read") || can("audit:read") || can("hr:read"));
   // Every other module link follows the read permission its API requires, so a
   // role is never offered a screen that can only answer 403.
-  const showView = (v, on) => $$(`.side a.nav[data-v="${v}"]`).forEach(a => a.classList.toggle("hide", !on));
+  const showView = (v, on) => $$(`.side a.nav[data-v="${v}"]`).forEach(a => a.classList.toggle("hide", !on || !featureOn(v)));
   showView("lost", can("lead:read"));
   showView("followups", can("lead:read"));
   showView("customers", can("sales:read"));
@@ -193,7 +207,8 @@ function enter(u) {
   loadAll();
 }
 function leave(msg) {
-  state.user = null; state.perms = new Set(); state.movements = null;
+  state.user = null; state.perms = new Set(); state.features = null;
+  state.featureFlags = []; state.movements = null;
   state.dashboard = null; state.dashLoading = false; state.dashError = null;
   closePalette();
   closeDrawer();
@@ -260,7 +275,8 @@ async function loadAll() {
   const canSales = can("sales:read");
   const canAccounts = can("accounts:read");
   const canApprovals = can("approval:read");
-  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da] = await Promise.all([
+  const isAdminRole = !!state.user && String(state.user.role || "").trim().toLowerCase() === "admin";
+  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da, ff] = await Promise.all([
     api("/api/health"), api("/api/modules"),
     can("product:read") ? api("/api/products?page=1&page_size=200") : none,
     can("stock:read") ? api("/api/warehouses") : none,
@@ -282,7 +298,8 @@ async function loadAll() {
     canAccounts ? api("/api/accounts/outstanding") : none,
     canAccounts ? api("/api/accounts/payments") : none,
     canAccounts ? api("/api/accounts/ageing") : none,
-    api(`/api/dashboard?${dashQuery()}`)]);
+    api(`/api/dashboard?${dashQuery()}`),
+    isAdminRole ? api("/api/features") : none]);
   if (!state.user) return;
   // The register is load-bearing for the Overview: keep the last good copy if a
   // refresh fails rather than blanking the module panel.
@@ -309,6 +326,7 @@ async function loadAll() {
   state.roles = rl.ok ? rl.body : [];
   state.employees = em.ok ? em.body : [];
   state.permCatalog = pcat.ok ? pcat.body : [];
+  state.featureFlags = ff.ok ? ff.body : [];
   state.suppliers = sp.ok ? sp.body : [];
   state.bankChanges = bc.ok ? bc.body : [];
   state.tax.company = co.ok ? co.body : null;
@@ -356,7 +374,7 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
 function route() {
   const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
   // Staff with only self-service attendance still reach the HR page for their own day.
-  const allowed = (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
+  const allowed = featureOn(v) && (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
     || (v === "compare" && (can("sales:read") || can("stock:read")))
     || (v === "accounts" && can("accounts:reports")))
     && (v !== "scheduled" || srAllowed());
@@ -5278,6 +5296,16 @@ function renderUsers() {
     <td class="rowacts"><button class="btn ghost sm" type="button" data-act="edit-role" data-id="${r.id}">Edit permissions</button></td></tr>`).join("");
   empty($("#rempty"), !state.roles.length, "No roles are visible.", "");
 
+  if ($("#frows")) {
+    $("#frows").innerHTML = state.featureFlags.map(f => `<tr>
+      <td><span class="strong">${esc(f.label)}</span><small>${esc(f.description)}</small></td>
+      <td>${f.permissions.map(p => `<code>${esc(p)}</code>`).join(" ")}</td>
+      <td><span class="chip ${f.enabled ? "ok" : "off"}">${f.enabled ? "Available" : "Switched off"}</span></td>
+      <td class="rowacts">${f.locked ? '<span class="muted">Always on</span>'
+        : `<button class="btn ghost sm" type="button" data-act="toggle-feature" data-key="${esc(f.key)}" data-enabled="${f.enabled}">${f.enabled ? "Switch off" : "Switch on"}</button>`}</td></tr>`).join("");
+    empty($("#fempty"), !state.featureFlags.length, "Feature availability is managed by the Administrator.", "");
+  }
+
   $("#erows").innerHTML = state.employees.map(e => `<tr>
     <td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
     <td>${esc(e.designation || "–")}</td><td>${esc(e.department || "–")}</td>
@@ -5443,6 +5471,20 @@ function syncPermissionTree(form) {
     child.disabled = !on;
   });
 }
+async function toggleFeature(key, enabled) {
+  const next = enabled !== "true";
+  const row = state.featureFlags.find(f => f.key === key);
+  if (!next && !confirm(`Switch off “${row ? row.label : key}”? Every role loses access to it until it is switched back on.`)) return;
+  const res = await api(`/api/features/${encodeURIComponent(key)}`, {method: "PATCH",
+    body: {enabled: next}});
+  toast(res, res.ok ? (next ? "Module switched on" : "Module switched off") : "Module not changed");
+  if (!res.ok) return;
+  // The switch changes this session's own effective permissions, so re-enter
+  // with a fresh identity rather than patching the browser's copy.
+  const me = await api("/api/auth/me");
+  if (me.ok) enter(me.body); else loadAll();
+}
+
 async function saveRole(form) {
   const perms = $$('input[name="perm"]:checked', form).map(x => x.value);
   const f = new FormData(form);
@@ -6506,6 +6548,7 @@ document.addEventListener("click", e => {
     else if (act === "toggle-user") toggleUser(a.dataset.id, a.dataset.active);
     else if (act === "new-role") roleForm();
     else if (act === "edit-role") roleForm(a.dataset.id);
+    else if (act === "toggle-feature") toggleFeature(a.dataset.key, a.dataset.enabled);
     else if (act === "new-employee") employeeForm();
     else if (act === "edit-emp") employeeForm(a.dataset.id);
     else if (act === "edit-company") companyForm();

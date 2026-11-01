@@ -17,6 +17,7 @@ password is changed.
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from ..services.feature_store import disabled_permissions
 from .db import get_db
 from .permissions import BASELINE_ROLE_PERMS, effective_permissions
 from .security import read_token_full
@@ -41,12 +42,16 @@ def stored_role_permissions(db: Session, user) -> set[str]:
 
 
 def role_permissions(db: Session, user) -> set[str]:
-    """The user's effective permissions: parent-gated database role first.
+    """The user's effective permissions: parent-gated role, minus switched-off modules.
 
-    A child key stored without its parent is not returned, so every route gate,
-    the browser navigation and /api/auth/me see the same fail-closed set.
+    A child key stored without its parent is not returned. A key that belongs to
+    a feature the Administrator has switched off is not returned either, so route
+    gates, the browser navigation, /api/auth/me, the Overview and global search
+    all see the same fail-closed set. Re-enabling the feature restores the keys,
+    because only stored data is the source of truth.
     """
-    return effective_permissions(stored_role_permissions(db, user))
+    granted = effective_permissions(stored_role_permissions(db, user))
+    return granted - disabled_permissions(db)
 
 
 def current_user(request: Request, db: Session = Depends(get_db)):
