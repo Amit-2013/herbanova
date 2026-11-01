@@ -274,6 +274,12 @@ year, short previous month, zero/missing previous month and an empty database; d
 phone, light and dark; e-mail test-mode delivery and figures; backup/restore; data-quality
 counts. Anything that cannot be run will be marked **Not verified** with the reason.
 
+**Result:** executed and recorded in [`docs/VERIFICATION_REPORT.md`](VERIFICATION_REPORT.md).
+The suite passes 230/230, the migrations round-trip to `0015_statutory_heads`, the live role
+matrix refuses confidential data to non-HR roles, backup/restore matches the live database,
+and the remaining unrun items (empty database, live test-mode send, physical-phone and
+external-bank checks) are listed there as **Not verified** with their reasons.
+
 ---
 
 ## 9. Decisions and assumptions
