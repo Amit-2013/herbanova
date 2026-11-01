@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from ..core.india_states import is_union_territory, state_name
 from ..models.core import CreditNote, DebitNote, Invoice, PrintLog
+from ..services import pdf_fonts
 from ..services.qr import SHORT_HASH_LEN, matrix, parse_print_code
 from ..services.words import amount_in_words
 
@@ -154,12 +155,13 @@ def _rate_text(value) -> str:
 
 def _wrap(text: str, max_width: float, size: float = 8) -> list[str]:
     """Split a value into lines that fit a column, so free text cannot run off the page."""
+    pdf_fonts.register()  # stringWidth needs the face even when build() has not run
     words = str(text or "—").split()
     lines: list[str] = []
     current = ""
     for word in words:
         trial = f"{current} {word}".strip()
-        if not current or stringWidth(trial, "Helvetica", size) <= max_width:
+        if not current or stringWidth(trial, pdf_fonts.FONT, size) <= max_width:
             current = trial
         else:
             lines.append(current)
@@ -617,19 +619,20 @@ def build(kind: str, doc, copy: str, printed_by: str, verify_code: str,
     ``verify_code`` is the print reference drawn on every page of it.
     """
     stamp = datetime.now(IST)
+    pdf_fonts.register()
     # One watermark, not two: a cancelled document is stamped CANCELLED instead
     # of its copy name, so the two stamps never sit on top of each other.
     watermark = "CANCELLED" if getattr(doc, "status", "") == "cancelled" else copy
     number = getattr(doc, NUMBER_FIELD[kind], "")
     doc_id = f"{kind.upper()}-{number}-{copy}"
 
-    measure = Doc(canvas.Canvas(BytesIO(), pagesize=A4), DOC_LABEL[kind], stamp,
+    measure = Doc(pdf_fonts.ShapedCanvas(BytesIO(), pagesize=A4), DOC_LABEL[kind], stamp,
                   printed_by, verify_code, watermark, doc_id=doc_id, page_total=None)
     _draw_document(measure, kind, doc, copy, invoice)
     measure.finish_page()
 
     buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
+    c = pdf_fonts.ShapedCanvas(buffer, pagesize=A4)
     c.setTitle(f"{number} {copy}")
     c.setAuthor("HERBANOVA Business Control")
     surface = Doc(c, DOC_LABEL[kind], stamp, printed_by, verify_code, watermark,

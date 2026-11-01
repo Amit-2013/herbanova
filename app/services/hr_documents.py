@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models.tax import CompanyProfile
+from . import pdf_fonts
 
 IST = timezone(timedelta(hours=5, minutes=30))
 DARK = colors.HexColor("#1f3d2f")
@@ -96,23 +97,27 @@ def _stamp(value: datetime | None = None) -> str:
 
 
 def _styles():
+    pdf_fonts.register()
     base = getSampleStyleSheet()
     return {
         "base": base,
         "small": ParagraphStyle("small", parent=base["Normal"], fontSize=8, leading=10,
-                                textColor=GREY),
+                                textColor=GREY, fontName=pdf_fonts.FONT, shaping=1),
         "tiny": ParagraphStyle("tiny", parent=base["Normal"], fontSize=6.5, leading=8,
-                               textColor=GREY),
+                               textColor=GREY, fontName=pdf_fonts.FONT, shaping=1),
         "body": ParagraphStyle("body", parent=base["Normal"], fontSize=10.5, leading=16,
-                               spaceAfter=6),
+                               spaceAfter=6, fontName=pdf_fonts.FONT, shaping=1),
         "subject": ParagraphStyle("subject", parent=base["Normal"], fontSize=11, leading=15,
-                                  fontName="Helvetica-Bold", spaceBefore=4, spaceAfter=8),
-        "cell": ParagraphStyle("cell", parent=base["Normal"], fontSize=8, leading=10),
+                                  fontName=pdf_fonts.FONT_BOLD, shaping=1,
+                                  spaceBefore=4, spaceAfter=8),
+        "cell": ParagraphStyle("cell", parent=base["Normal"], fontSize=8, leading=10,
+                               fontName=pdf_fonts.FONT, shaping=1),
         "cellhead": ParagraphStyle("cellhead", parent=base["Normal"], fontSize=8, leading=10,
-                                   fontName="Helvetica-Bold"),
-        "sheet": ParagraphStyle("sheet", parent=base["Normal"], fontSize=5.5, leading=6.5),
+                                   fontName=pdf_fonts.FONT_BOLD, shaping=1),
+        "sheet": ParagraphStyle("sheet", parent=base["Normal"], fontSize=5.5, leading=6.5,
+                                fontName=pdf_fonts.FONT, shaping=1),
         "sheethead": ParagraphStyle("sheethead", parent=base["Normal"], fontSize=5.5,
-                                    leading=6.5, fontName="Helvetica-Bold"),
+                                    leading=6.5, fontName=pdf_fonts.FONT_BOLD, shaping=1),
     }
 
 
@@ -122,7 +127,7 @@ def _footer(note: str):
         canvas.setStrokeColor(LINE)
         canvas.setLineWidth(0.3)
         canvas.line(16 * mm, 12 * mm, doc.pagesize[0] - 16 * mm, 12 * mm)
-        canvas.setFont("Helvetica", 6.5)
+        canvas.setFont(pdf_fonts.FONT, 6.5)
         canvas.setFillColor(GREY)
         canvas.drawString(16 * mm, 8 * mm, note)
         canvas.drawRightString(doc.pagesize[0] - 16 * mm, 8 * mm,
@@ -134,7 +139,7 @@ def _footer(note: str):
 def _letterhead(company: dict, styles, width: float) -> list:
     lines = [Paragraph(escape(company["name"]), ParagraphStyle(
         "co", parent=styles["base"]["Title"], fontSize=16, leading=20, textColor=DARK,
-        spaceAfter=2))]
+        fontName=pdf_fonts.FONT_BOLD, shaping=1, spaceAfter=2))]
     contact = " · ".join(p for p in (company["address"], company["phone"],
                                      company["email"]) if p)
     if contact:
@@ -241,11 +246,13 @@ def _photo_cell(photo_file, styles):
 
 def _card_front(employee, company, branch: str, office: str, photo_file, styles) -> Table:
     white = ParagraphStyle("white", parent=styles["small"], textColor=colors.white,
-                           fontName="Helvetica-Bold", fontSize=7, leading=9)
+                           fontName=pdf_fonts.FONT_BOLD, fontSize=7, leading=9, shaping=1)
     name = ParagraphStyle("cardname", parent=styles["base"]["Normal"], fontSize=15,
-                          leading=18, fontName="Helvetica-Bold", textColor=DARK)
+                          leading=18, fontName=pdf_fonts.FONT_BOLD, textColor=DARK,
+                          shaping=1)
     line = ParagraphStyle("cardline", parent=styles["base"]["Normal"], fontSize=8.5,
-                          leading=11, textColor=colors.HexColor("#25332c"))
+                          leading=11, textColor=colors.HexColor("#25332c"),
+                          fontName=pdf_fonts.FONT, shaping=1)
     left = [Paragraph(escape(employee.full_name), name),
             Paragraph(escape(" · ".join(p for p in (employee.code,
                                                     employee.designation) if p)), line),
@@ -280,7 +287,8 @@ def _card_front(employee, company, branch: str, office: str, photo_file, styles)
 
 def _card_back(employee, company, styles) -> Table:
     label = ParagraphStyle("bl", parent=styles["small"], fontSize=7)
-    value = ParagraphStyle("bv", parent=styles["base"]["Normal"], fontSize=8.5, leading=11)
+    value = ParagraphStyle("bv", parent=styles["base"]["Normal"], fontSize=8.5, leading=11,
+                           fontName=pdf_fonts.FONT, shaping=1)
     emergency = " · ".join(p for p in (employee.emergency_name, employee.emergency_phone) if p)
     back = Table([
         [Paragraph("IF FOUND, PLEASE RETURN TO", ParagraphStyle(
@@ -314,7 +322,8 @@ def build_id_card(employee, company: dict, *, branch: str = "", office: str = ""
                             topMargin=16 * mm, bottomMargin=20 * mm,
                             title=f"ID card — {employee.full_name}")
     story = [Paragraph(escape(company["name"]), ParagraphStyle(
-                 "co", parent=styles["base"]["Title"], fontSize=14, textColor=DARK)),
+                 "co", parent=styles["base"]["Title"], fontSize=14, textColor=DARK,
+                 fontName=pdf_fonts.FONT_BOLD, shaping=1)),
              Paragraph(escape(f"Employee identity card · {employee.full_name} "
                               f"({employee.code}) · generated {long_date(day)}"),
                        styles["small"]),
@@ -354,7 +363,8 @@ def build_attendance_sheet(data: dict, company: dict, *, department: str | None 
     scope = f" · department: {department}" if department else " · all departments"
     story = [Paragraph(escape(f"{company['name']} — attendance sheet {month_name}"),
                        ParagraphStyle("t", parent=styles["base"]["Title"], fontSize=13,
-                                      leading=16, textColor=DARK)),
+                                      leading=16, textColor=DARK,
+                                      fontName=pdf_fonts.FONT_BOLD, shaping=1)),
              Paragraph(escape(f"Generated {long_date(day)}{scope} · "
                               f"{len(data['employees'])} employee(s)"), styles["small"]),
              Spacer(1, 3 * mm)]
@@ -434,7 +444,8 @@ def build_leave_statement(employee, year: int, balances: list[dict], application
     story = _letterhead(company, styles, width)
     story += [Paragraph(f"Leave statement — {year}",
                         ParagraphStyle("t", parent=styles["base"]["Title"], fontSize=14,
-                                       leading=18, textColor=DARK)),
+                                       leading=18, textColor=DARK,
+                                       fontName=pdf_fonts.FONT_BOLD, shaping=1)),
               Paragraph(escape(f"{employee.full_name} ({employee.code}) · "
                                f"{employee.designation or 'Designation not recorded'} · "
                                f"{employee.department or 'Department not recorded'} · "

@@ -16,7 +16,6 @@ from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import select
@@ -24,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..models.core import ApprovalRequest
-from . import hr_notify, hr_reports
+from . import hr_notify, hr_reports, pdf_fonts
 
 LABEL = "HR Report Pack"
 GREEN = "#1F6B4A"
@@ -363,17 +362,17 @@ def _pdf(data: dict) -> bytes:
                             leftMargin=12 * mm, rightMargin=12 * mm,
                             topMargin=12 * mm, bottomMargin=12 * mm,
                             title=f"{data['label']} {data['period_label']}")
-    styles = getSampleStyleSheet()
-    small = ParagraphStyle("cell", parent=styles["Normal"], fontSize=7.5, leading=9)
-    small_head = ParagraphStyle("cellhead", parent=small, fontName="Helvetica-Bold")
-    story = [Paragraph(escape(f"{data['label']} · {data['period_label']}"), styles["Title"]),
-             Paragraph(escape(data["company"]), styles["Normal"])]
+    small = pdf_fonts.cell_style(7.5)
+    small_head = pdf_fonts.cell_style(7.5, bold=True)
+    story = [Paragraph(escape(f"{data['label']} · {data['period_label']}"),
+                       pdf_fonts.style("Title")),
+             Paragraph(escape(data["company"]), pdf_fonts.style("Normal"))]
     for kpi in data["kpis"]:
         story.append(Paragraph(escape(f"{kpi['label']}: {kpi['display']} — {kpi['note']}"),
                                small))
     for table in data["tables"]:
         story.append(Spacer(1, 4 * mm))
-        story.append(Paragraph(escape(table["title"]), styles["Heading2"]))
+        story.append(Paragraph(escape(table["title"]), pdf_fonts.style("Heading2")))
         rows = [[Paragraph(escape(c["label"]), small_head) for c in table["columns"]]]
         for row in table["rows"]:
             rows.append([Paragraph(escape(str(row.get(c["key"], ""))), small)
@@ -391,7 +390,7 @@ def _pdf(data: dict) -> bytes:
         story.append(grid)
     if data["gaps"]:
         story.append(Spacer(1, 4 * mm))
-        story.append(Paragraph("No data yet", styles["Heading2"]))
+        story.append(Paragraph("No data yet", pdf_fonts.style("Heading2")))
         for gap in data["gaps"]:
             story.append(Paragraph("• " + escape(gap), small))
     doc.build(story)
