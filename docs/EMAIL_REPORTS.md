@@ -1,13 +1,20 @@
 # Scheduled email reports
 
 Scheduled reports send the same figures the screens and Reports show, by email, to
-the MD and the Administrators. Nothing in this document contains a credential:
-SMTP settings live in the environment only and are never logged, returned by an
-API or written to a delivery row.
+the MD and the Administrators. Nothing in this document contains a credential: the
+SMTP password is encrypted at rest, never returned by an API and never written to a
+delivery row.
 
 **Current state: test mode, sending disabled.** No real message can leave the
 server until the owner sets the SMTP values and both switches below. Every queued
 message is redirected to one Administrator address and prefixed `[TEST]`.
+
+SMTP values may be saved on the **Settings → Email and SMTP** screen (stored in
+`email_settings`, password encrypted). The environment values remain the deployment
+default and are used for any field the screen leaves blank, so a server that has
+never opened the screen behaves exactly as before migration `0017`. A saved
+password can be replaced but never read back; the screen shows only
+`password_set`.
 
 ---
 
@@ -29,7 +36,12 @@ the message carries a banner naming the real recipient count that was not used.
 "Send test to me" forces the redirect even in live mode, and uses the requesting
 Administrator's own employee address when it is valid.
 
-### SMTP settings (environment only)
+### SMTP settings
+
+| Where | Purpose |
+|---|---|
+| **Settings → Email and SMTP** | Host, port, security, sending on/off, delivery mode, username, encrypted password, From, Reply-To, test To and test CC |
+| Environment | Deployment default for every field; a saved value wins, an empty saved field falls through |
 
 | Variable | Purpose |
 |---|---|
@@ -43,12 +55,39 @@ Administrator's own employee address when it is valid.
 | `EMAIL_WORKER_INTERVAL` | Seconds between worker cycles, default 60 |
 | `APP_BASE_URL` | Used for the dashboard button and links in the email |
 
+The saved password is encrypted with a Fernet key derived from
+`herbanova:email:` plus `APP_SECRET`; the API returns a boolean `password_set`, and
+the audit row records `unchanged`, `replaced` or `cleared` rather than any value.
+Changing `APP_SECRET` with a saved password makes the field unreadable, and the
+screen says so instead of pretending the password is set.
+
 TLS is always used when configured, with a verifying SSL context. A missing
 `SMTP_HOST` or `SMTP_FROM` makes `smtp_ready` false and a send is refused before
 SMTP is contacted.
 
+Live sending requires **both** the saved delivery mode `live` and
+`EMAIL_MODE=live` in the server environment. The screen refuses to save `live`
+with 409 while the environment still says `test`, so a browser alone cannot put
+the installation into production mode.
+
 There is **no password in any email**, attachment or delivery row. Attachments
 are plain PDF and XLSX files; no archive is created and no link contains a token.
+
+### Test composer
+
+Settings → Email and SMTP has a composer with a message type, To, CC, subject and
+body. Message types are `test`, `hr_notice`, `report_notice` and `custom`; picking
+one fills a default subject and body that the Administrator can edit.
+
+* **Dry run** (default) renders and stores the message in `email_test_messages`
+  with status `captured` and mode `dry_run`; no socket is opened.
+* **Deliver** uses exactly the saved settings and records `sent` or `failed` with
+  the SMTP error. The sink used in verification was a local listener, never a real
+  inbox.
+* Every subject gains `[TEST]`, whatever the chosen type.
+* At most ten To and ten CC addresses, each validated; an empty To is refused.
+* A send or attempted send writes `email.test.send` to the audit log; the outbox
+  keeps the message, size, mode, status and error.
 
 ---
 
@@ -155,6 +194,11 @@ enforced per user on the server by `accounts:reports` (see §9).
 ---
 
 ## 5. Screens (Administrator only)
+
+`Settings → Email and SMTP` (`#/settings`) saves the SMTP configuration and holds
+the test composer and outbox described in §1. The panel appears only while the
+`scheduled` feature is on and the user holds `srAllowed()`; the API repeats the
+`require_admin("email:manage")` check.
 
 `Settings → Scheduled reports` (`#/scheduled`) has three tabs. The screen and the
 route are offered only to the seeded Administrator holding `email:manage`; every
@@ -274,12 +318,16 @@ the email.
 
 | Right | Holder | Scope |
 |---|---|---|
-| `email:manage` | Seeded Administrator | The whole scheduled-reports screen and API |
+| `email:manage` | Seeded Administrator | The Email and SMTP panel, the scheduled-reports screen and both APIs |
 | `accounts:reports` | Administrator (grantable to the MD / Accounts head) | Accounts dashboard, Overview Accounts tiles and the Accounts content in packs |
 
-The scheduler API uses `require_admin("email:manage")`, which checks the seeded
-Administrator as well as the key. The unsubscribe route is public but addressed
-only by a 64-character random token and can deactivate only an `extra` recipient.
+The settings API uses `require_admin("email:manage")`. A saved password is never
+returned; only `password_set` is. Saving settings writes
+`email.settings.update`; a test send or attempt writes `email.test.send`. Neither
+audit row contains the password or the message body. The scheduler API uses
+`require_admin("email:manage")` as well. The unsubscribe route is public but
+addressed only by a 64-character random token and can deactivate only an `extra`
+recipient.
 
 Every schedule create, edit, pause/resume, duplicate, delete, recipient change,
 manual run and test send writes an `audit_logs` row (`email.schedule.*`,
@@ -313,6 +361,16 @@ noted.
 | `POST /deliveries/{id}/resend` | New delivery from the original schedule |
 | `GET/POST /unsubscribe/{token}` | Public; `extra` recipients only |
 
+SMTP settings and the test composer are under `/api/email-settings`, also
+Administrator-only:
+
+| Method and path | Purpose |
+|---|---|
+| `GET /api/email-settings` | Effective settings (password replaced by `password_set`), suggested To address, message types |
+| `PUT /api/email-settings` | Validate and save; `live` refused with 409 unless `EMAIL_MODE=live` |
+| `POST /api/email-settings/test` | Build a `[TEST]` message; dry run by default, `deliver=true` opens one SMTP session |
+| `GET /api/email-settings/test-messages` | Recent attempts and their status |
+
 Run-now and test are refused with 409 when sending is switched off or SMTP is not
 configured; queuing never pretends a message can be delivered.
 
@@ -330,9 +388,11 @@ configured; queuing never pretends a message can be delivered.
 | Scheduling | A slot is enqueued once; two workers cannot create the same delivery; next run moves past it; paused schedule skipped; stale claim released |
 | Failure handling | Transient failure retried four times with increasing delay; permanent failure stops at once |
 | API | Administrator-only; status carries no secrets; validation; lifecycle; queue refused while disabled; preview sends nothing; delivery filters; unsubscribe rules; every schedule change audited |
+| Settings and test composer (`tests/test_email_settings.py`) | Settings are Administrator-only; the password is never returned, is stored encrypted, and is kept, replaced or cleared explicitly; address validation; live mode refused while the environment says test; dry run stores `captured` and opens no socket; real send through a local sink; refused connection recorded `failed`; saved values drive the scheduler recipient; switching the feature off closes the API |
 
-The email worker is exercised with a stub mailer; no test opens an SMTP
-connection or sends a message.
+The email worker is exercised with a stub mailer. One settings test opens a
+connection, but only to a `smtplib` sink started by the test itself on `127.0.0.1`;
+no test contacts an outside server or sends to a real address.
 
 ---
 
@@ -341,14 +401,18 @@ connection or sends a message.
 Nothing below has been done; the system is in test mode.
 
 1. Approve the sender address and Reply-To.
-2. Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`,
-   `SMTP_REPLY_TO`, `SMTP_STARTTLS`/`SMTP_SSL` in the server environment. Do not
-   put them in `.env` copies, screenshots or chat.
-3. Set `EMAIL_TEST_RECIPIENT` to one Administrator address and run **Send test**
-   from every pack. Check rendering in Outlook, Gmail and on a phone.
+2. Enter `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`,
+   `SMTP_REPLY_TO` and the security option on **Settings → Email and SMTP**, or
+   set the matching `SMTP_*` environment values. Do not put them in `.env` copies,
+   screenshots or chat.
+3. Confirm From, Reply-To and the test To/CC addresses, then run a **Deliver**
+   test from the composer to the approved test inbox. Check rendering in Outlook,
+   Gmail and on a phone.
 4. Approve the recipient list: MD group, Administrator group, any extras. Confirm
    who may receive the Accounts block.
-5. Set `EMAIL_MODE=live` and `EMAIL_SEND_ENABLED=true`.
+5. Set `EMAIL_MODE=live` in the environment, then switch the saved delivery mode
+   to `live` and sending to enabled (the screen refuses `live` before the
+   environment does).
 6. Run **Send test to me** once more, then **Run now** on one low-risk schedule.
 7. Start `python -m app.email_worker` under the process supervisor used by the API
    server, with `--interval` as agreed.
@@ -360,7 +424,9 @@ Nothing below has been done; the system is in test mode.
 
 Apply migration `0011_email_reports` before starting the worker. It adds four
 tables and two Administrator keys and has a downgrade that removes only what it
-added.
+added. Apply `0017_email_settings` for the saved SMTP configuration and test
+outbox; it adds two tables and no rows, and its downgrade drops only those tables,
+so the installation returns to the environment-only defaults.
 
 ---
 

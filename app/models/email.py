@@ -112,6 +112,74 @@ class EmailScheduleRecipient(Base):
     recipient = relationship("EmailRecipient", lazy="selectin")
 
 
+class EmailSettings(Base):
+    """The one row (id = 1) the Administrator edits on the settings screen.
+
+    Values stored here override the deployment defaults in `.env`; an empty
+    string means "fall back to the environment". The password is kept as a
+    Fernet token and is never returned by the API. There is no seed row: until
+    an Administrator saves the form the environment stays authoritative, which
+    is exactly how the installation behaved before this table existed.
+    """
+    __tablename__ = "email_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_email_settings_singleton"),
+        CheckConstraint("mode IN ('test','live')", name="ck_email_settings_mode"),
+        CheckConstraint("security IN ('none','starttls','ssl')",
+                        name="ck_email_settings_security"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False, default="test")
+    host: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    port: Mapped[int] = mapped_column(Integer, nullable=False, default=587)
+    security: Mapped[str] = mapped_column(String(10), nullable=False, default="starttls")
+    username: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    password_enc: Mapped[str | None] = mapped_column(Text)
+    from_address: Mapped[str] = mapped_column(String(254), nullable=False, default="")
+    reply_to: Mapped[str] = mapped_column(String(254), nullable=False, default="")
+    test_to: Mapped[str] = mapped_column(String(254), nullable=False, default="")
+    test_cc: Mapped[str] = mapped_column(String(254), nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now(),
+                                                 onupdate=func.now())
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+
+class EmailTestMessage(Base):
+    """Every test message, whether it was captured for review or really sent.
+
+    A dry run stores the exact subject and body and opens no socket; that is how
+    an Administrator checks the wording and the recipient list before turning
+    SMTP on. `status` records what happened, and `error` holds the server's
+    refusal when delivery failed.
+    """
+    __tablename__ = "email_test_messages"
+    __table_args__ = (
+        CheckConstraint("message_type IN ('test','hr_notice','report_notice','custom')",
+                        name="ck_email_test_messages_type"),
+        CheckConstraint("status IN ('captured','sent','failed')",
+                        name="ck_email_test_messages_status"),
+        CheckConstraint("mode IN ('dry_run','smtp')",
+                        name="ck_email_test_messages_mode"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    to_addresses: Mapped[str] = mapped_column(Text, nullable=False)
+    cc_addresses: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    subject: Mapped[str] = mapped_column(String(250), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(10), nullable=False)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now(),
+                                                 index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class EmailDelivery(Base):
     __tablename__ = "email_deliveries"
     __table_args__ = (

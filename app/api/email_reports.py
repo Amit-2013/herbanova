@@ -24,7 +24,7 @@ from ..core.db import get_db
 from ..core.rbac import require_admin
 from ..models.email import (GROUPS, EmailDelivery, EmailRecipient, EmailSchedule,
                             EmailScheduleRecipient)
-from ..services import email_worker, mailer, report_packs, reports
+from ..services import email_config, email_worker, mailer, report_packs, reports
 from ..services import schedule as schedule_service
 from ..services.audit import audit
 from ..services.email_render import render
@@ -103,12 +103,12 @@ class EnableIn(BaseModel):
 # --- configuration ---------------------------------------------------------
 
 @router.get("/status")
-def status(_=Depends(admin_only)):
+def status(db: Session = Depends(get_db), _=Depends(admin_only)):
     """What the screen needs to explain the guardrails, with no secrets."""
     return {
-        "mode": "live" if mailer.live_mode() else "test",
-        "send_enabled": bool(settings.email_send_enabled),
-        "smtp_ready": mailer.smtp_ready(),
+        "mode": "live" if mailer.live_mode(db) else "test",
+        "send_enabled": email_config.effective(db).enabled,
+        "smtp_ready": mailer.smtp_ready(db),
         "test_recipient": settings.email_test_recipient or None,
         "worker_interval": settings.email_worker_interval,
         "max_bytes": settings.email_max_bytes,
@@ -386,11 +386,11 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db),
 
 def _preflight(db: Session, schedule) -> None:
     """Refuse queuing when the send would fail for a reason the admin can fix now."""
-    if not settings.email_send_enabled:
+    if not email_config.effective(db).enabled:
         raise HTTPException(409, "Sending is disabled (EMAIL_SEND_ENABLED is false)")
-    if not mailer.smtp_ready():
+    if not mailer.smtp_ready(db):
         raise HTTPException(409, "SMTP is not configured; a send cannot start")
-    if mailer.live_mode():
+    if mailer.live_mode(db):
         try:
             mailer.resolve(db, schedule)
         except mailer.MailError as exc:
@@ -427,7 +427,7 @@ def send_test(schedule_id: int, db: Session = Depends(get_db), actor=Depends(adm
         raise HTTPException(404, "Schedule not found")
     delivery = _queue(db, schedule, "test", actor)
     return {"delivery_id": delivery.id, "status": delivery.status,
-            "redirected_to": settings.email_test_recipient or "the Administrator"}
+            "redirected_to": mailer.test_recipient(db) or "the Administrator"}
 
 
 @router.get("/schedules/{schedule_id}/preview", response_class=HTMLResponse)

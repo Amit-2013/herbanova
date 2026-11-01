@@ -168,6 +168,9 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | R-83 | Live delivery to a real inbox | BRIEF | — | no SMTP/recipient approval | NOT VERIFIED |
 | R-84 | Backup, restore into scratch DB and reconcile | REG MOD-09 | `backup_restore_test.py` | executed: 63 tables/575 rows, 26 reports, 0 unreconciled | MET |
 | R-85 | Health endpoint and honest module register | REG | `/api/health`, `/api/modules` | `test_dashboard_phase2.py`, `test_module_status.py` | MET |
+| R-86 | SMTP settings editable in the app (host, port, security, sending, mode, username, encrypted password, From, Reply-To, test To/CC), environment as default | BRIEF (new) | `/api/email-settings`; `app/services/email_config.py`; Settings → Email and SMTP | `test_email_settings.py`; local SMTP sink; UI screenshot | MET |
+| R-87 | Test e-mail composer with message type, To, CC, subject and body; dry run and one-session delivery, every attempt stored | BRIEF (new) | `POST /api/email-settings/test`; `email_test_messages` | `test_email_settings.py`; live sink run in `VERIFICATION_REPORT.md` | MET |
+| R-88 | Test e-mails can never reach a real inbox by accident: `[TEST]` subject, dry run default, live needs saved mode and `EMAIL_MODE=live`, password never read back | BRIEF (new) | `app/api/email_settings.py`; `email_config.effective()` | `test_email_settings.py` | MET |
 
 ## 5. Gaps, blockers and open items
 
@@ -193,8 +196,8 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | Check | Command / source | Result |
 |---|---|---|
 | Route count | FastAPI `app.routes` | 232 API pairs; 92 HR + 4 legacy employee |
-| Test count | `python -m pytest -q` | 230 passed |
-| Schema | `alembic current` / `heads` | `0015_statutory_heads` |
+| Test count | `python -m pytest -q` | 261 passed |
+| Schema | `alembic current` / `heads` | `0017_email_settings` |
 | Migration round-trip | upgrade → downgrade base → upgrade | pass (verification report §3) |
 | Live smoke | 75 GET routes as Administrator | all 200 |
 | Roles | read-only `roles` query + live matrix | 44 keys for Administrator; HR role sets as documented |

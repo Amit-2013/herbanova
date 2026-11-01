@@ -77,7 +77,7 @@ def create_delivery(db: Session, schedule, slot: datetime, trigger: str = "sched
     row = EmailDelivery(
         run_key=key, schedule_id=schedule.id, pack_key=schedule.pack_key,
         trigger=trigger, status="queued",
-        mode="live" if mailer.live_mode() else "test",
+        mode="live" if mailer.live_mode(db) else "test",
         created_by=created_by)
     try:
         with db.begin_nested():
