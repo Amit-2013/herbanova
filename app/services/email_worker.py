@@ -305,9 +305,17 @@ def process_due(db: Session, now: datetime | None = None, limit: int = CLAIM_LIM
 
 
 def run_once(db: Session, now: datetime | None = None) -> dict:
+    # A database reset pauses every writer, this process included. Checking at
+    # the top of the cycle covers both the queueing and the sending half, and a
+    # cycle that started just before the pause finishes on its own.
+    from .db_reset import current_maintenance
+    paused = current_maintenance()
+    if paused:
+        return {"paused": True, "maintenance_run": paused.get("run_id"),
+                "enqueued": 0, "released": 0, "processed": []}
     now = _now(now)
-    return {"enqueued": enqueue_due(db, now), "released": recover_stale(db, now),
-            "processed": process_due(db, now)}
+    return {"paused": False, "enqueued": enqueue_due(db, now),
+            "released": recover_stale(db, now), "processed": process_due(db, now)}
 
 
 def main(argv: list[str] | None = None) -> int:

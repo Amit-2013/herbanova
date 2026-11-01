@@ -37,6 +37,10 @@ class User(Base):
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reset_password_secondary_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     secondary_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The second secret for the guarded database reset. It is deliberately
+    # separate from the login and secondary passwords and is never returned.
+    reset_key_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reset_key_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     db_reset_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     db_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     role_rel = relationship("Role", foreign_keys=[role_id], lazy="selectin")

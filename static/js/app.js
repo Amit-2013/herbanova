@@ -4113,8 +4113,234 @@ function renderSettings() {
     if (showEmail && !state.email.loaded && !state.email.loading) loadEmailSettings();
     if (showEmail) renderEmailSettings();
   }
+  renderDbResetPanel();
   $("#setEmprows").innerHTML = state.employees.slice(0, 50).map(e => `<tr><td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
     <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td><td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td></tr>`).join("");
+}
+
+/* ---------- guarded database reset (four server-enforced steps) ---------- */
+const dbReset = {status: null, loaded: false, run: null};
+
+function dbResetPanelRow(c) {
+  return `<li><span class="chip ${c.ok ? "ok" : "bad"}">${c.ok ? "Ready" : "Blocked"}</span>
+    <b>${esc(c.key.replace(/_/g, " "))}</b> <span class="muted">${esc(c.detail)}</span></li>`;
+}
+async function renderDbResetPanel(force) {
+  const panel = $("#dbResetPanel");
+  if (!panel) return;
+  const allowed = can("db:reset");
+  panel.classList.toggle("hide", !allowed);
+  if (!allowed) return;
+  if (!dbReset.loaded || force) {
+    const res = await api("/api/db-reset/status");
+    if (!res.ok) {
+      $("#dbResetBody").innerHTML = `<p class="muted">${esc(detail(res.body))}</p>`;
+      return;
+    }
+    dbReset.status = res.body;
+    dbReset.loaded = true;
+  }
+  const s = dbReset.status;
+  $("#dbResetState").textContent = s.enabled ? "Administrator only." : "Switched off on this server.";
+  const maintenance = s.maintenance
+    ? `<div class="note bad">A reset run is in progress. Writes are paused until it finishes
+       (started ${esc(fmtStamp(s.maintenance.started_at))}).</div>` : "";
+  const locked = s.locked
+    ? `<div class="note bad">Locked after ${s.max_attempts} wrong attempts until
+       ${esc(fmtStamp(s.locked_until))}.</div>` : "";
+  const off = s.enabled ? "" : `<div class="note">Database reset is switched off in this deployment.
+    The Administrator can enable it with <b>DB_RESET_ENABLED=true</b> and the two backup directories.</div>`;
+  $("#dbResetBody").innerHTML = `
+    ${off}${locked}${maintenance}
+    <ul class="hr-notes">${(s.prerequisites.checks || []).map(dbResetPanelRow).join("")}</ul>
+    <div class="note">The reset never runs from this screen alone: the server takes two encrypted backups,
+      verifies both by restoring them, and asks for a separate reset key within ten minutes.</div>
+    <div class="actions"><button class="btn" type="button" data-act="reset-db"${s.enabled && !s.locked && !s.maintenance ? "" : " disabled"}>Start a reset…</button>
+      ${s.maintenance ? `<button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run and resume writes</button>` : ""}</div>
+    ${(s.recent || []).length ? `<h3>Recent reset events</h3><div class="tw"><table><thead><tr><th>When</th><th>Event</th><th>Actor</th><th>Run</th></tr></thead><tbody>
+      ${s.recent.slice().reverse().map(x => `<tr><td>${esc(fmtStamp(x.at))}</td><td>${esc(x.event)}</td><td>${esc(x.actor || "–")}</td><td>${esc(x.run_id || "–")}</td></tr>`).join("")}
+    </tbody></table></div>` : ""}`;
+}
+function dbResetTime(iso) {
+  if (!iso) return "–";
+  try { return new Date(iso).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
+  catch (e) { return iso; }
+}
+async function dbResetOpen() {
+  dbReset.run = null;
+  if (!dbReset.loaded) {
+    const res = await api("/api/db-reset/status");
+    if (!res.ok) { toast(res, "Reset status not loaded"); return; }
+    dbReset.status = res.body;
+    dbReset.loaded = true;
+  }
+  const s = dbReset.status;
+  openDrawer("Reset database",
+    "Four steps, each enforced by the server. Nothing is cleared until the fourth succeeds.", `
+    <div id="dbResetStep"></div>`, true);
+  if (!s.enabled) {
+    $("#dbResetStep").innerHTML = `<div class="note bad">Database reset is switched off on this server.
+      The Administrator must set <b>DB_RESET_ENABLED=true</b>, two backup directories on different devices
+      and <b>DB_RESET_ENCRYPTION_KEY</b>.</div>
+      <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`;
+    return;
+  }
+  if (s.locked) {
+    $("#dbResetStep").innerHTML = `<div class="note bad">Locked after ${s.max_attempts} wrong attempts
+      until ${esc(fmtStamp(s.locked_until))}.</div>
+      <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`;
+    return;
+  }
+  if (s.maintenance) {
+    $("#dbResetStep").innerHTML = `<div class="note bad">A reset run is already in progress.</div>
+      <div class="actions"><button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel that run</button>
+      <button class="btn ghost" type="button" data-act="close">Close</button></div>`;
+    return;
+  }
+  dbResetStep1();
+}
+function dbResetStep1() {
+  const s = dbReset.status || {phrase: ""};
+  $("#dbResetStep").innerHTML = `
+    <p class="sub">Step 1 of 4 — confirm who you are and what should be cleared.</p>
+    <form id="dbResetForm1" novalidate>
+      <label>Mode</label>
+      <select name="mode">
+        <option value="business" selected>Business data only — keeps users, employees, roles, settings and master data</option>
+        <option value="full">Full reset — drops the schema, replays migrations, recreates the base Administrator</option>
+      </select>
+      <label>Your own login password</label>
+      <input type="password" name="password" autocomplete="current-password">
+      <label>Type the confirmation phrase exactly</label>
+      <input name="phrase" autocomplete="off" spellcheck="false" placeholder="${esc(s.phrase || "RESET database")}">
+      <div class="note">Database: <b>${esc(s.database || "–")}</b>. The phrase is case-sensitive.
+        Three wrong attempts lock the feature.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Take the backups</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`;
+}
+async function dbResetBegin(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const res = await api("/api/db-reset/begin", {method: "POST", body: {
+    mode: f.mode.value, password: f.password.value, phrase: f.phrase.value}});
+  if (!res.ok) { err.textContent = detail(res.body); toast(res, "Reset not started"); return; }
+  dbReset.run = {id: res.body.run_id, token: res.body.token, mode: res.body.mode};
+  dbResetStep2(res.body);
+}
+function dbResetStep2(begin) {
+  const modeText = begin.mode === "full"
+    ? "This mode deletes users, roles, employees and settings. Only the base Administrator survives."
+    : "This mode clears documents, stock, payments and HR transactions; users, employees, roles, settings and master data stay.";
+  $("#dbResetStep").innerHTML = `
+    <p class="sub">Step 1 of 4 complete. Step 2 — take two encrypted backups on different devices.</p>
+    <div class="note">${esc(modeText)} Writes are paused while the backup is taken.</div>
+    <div class="note">Each copy is encrypted before it leaves the server. A copy without the key cannot be read.</div>
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="button" data-act="dbreset-backup">Make the backups now</button>
+      <button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run</button></div>`;
+}
+async function dbResetBackup() {
+  const step = $("#dbResetStep");
+  if (!dbReset.run) return;
+  step.querySelectorAll("button").forEach(b => b.disabled = true);
+  const res = await api("/api/db-reset/backup", {method: "POST",
+    body: {run_id: dbReset.run.id, token: dbReset.run.token}});
+  if (!res.ok) {
+    step.querySelector(".err").textContent = detail(res.body);
+    step.querySelectorAll("button").forEach(b => b.disabled = false);
+    return;
+  }
+  dbReset.run.token = res.body.token;
+  const rows = Object.entries(res.body.backups || {}).map(([label, b]) => `<tr>
+    <td>${esc(label)}</td><td>${esc(b.path)}</td><td><code>${esc(b.sha256.slice(0, 16))}…</code></td>
+    <td class="n">${b.bytes.toLocaleString()}</td></tr>`).join("");
+  step.innerHTML = `
+    <p class="sub">Step 2 of 4 complete. Writes are now paused.</p>
+    <div class="tw"><table><thead><tr><th>Copy</th><th>Encrypted file</th><th>SHA-256</th><th class="n">Bytes</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="note">${res.body.tables} tables, ${res.body.rows.toLocaleString()} rows captured.</div>
+    <p class="sub">Step 3 of 4 — prove both copies can be restored.</p>
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="button" data-act="dbreset-verify">Verify both backups</button>
+      <button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run</button></div>`;
+}
+async function dbResetVerify() {
+  const step = $("#dbResetStep");
+  if (!dbReset.run) return;
+  step.querySelectorAll("button").forEach(b => b.disabled = true);
+  step.querySelector(".err").textContent = "";
+  const res = await api("/api/db-reset/verify", {method: "POST",
+    body: {run_id: dbReset.run.id, token: dbReset.run.token}});
+  if (!res.ok) {
+    step.querySelector(".err").textContent = detail(res.body);
+    step.querySelectorAll("button").forEach(b => b.disabled = false);
+    return;
+  }
+  dbReset.run.token = res.body.token;
+  const checks = res.body.checks.map(c => `<tr><td>${esc(c.backup)}</td><td>${esc(c.key.replace(/_/g, " "))}</td>
+    <td><span class="chip ${c.ok ? "ok" : "bad"}">${c.ok ? "Passed" : "Failed"}</span></td>
+    <td>${esc(c.detail)}</td></tr>`).join("");
+  step.innerHTML = `
+    <p class="sub">Step 3 of 4 complete. Both copies were decrypted, restored and compared.</p>
+    <div class="tw"><table><thead><tr><th>Copy</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>${checks}</tbody></table></div>
+    <p class="sub">Step 4 of 4 — confirm with the separate reset key.</p>
+    <form id="dbResetForm4" novalidate>
+      <label>Reset key (not your password)</label>
+      <input type="password" name="reset_key" autocomplete="off">
+      <div class="note">This confirmation expires at ${esc(dbResetTime(res.body.expires_at))}
+        (${res.body.confirm_minutes} minutes after verification). After that you must take a fresh backup.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn danger" type="submit">Reset the database now</button>
+        <button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run</button></div>
+    </form>`;
+}
+async function dbResetExecute(form) {
+  const err = $(".err", form);
+  err.textContent = "";
+  if (!dbReset.run) return;
+  const full = dbReset.run.mode === "full";
+  const question = full
+    ? "Full reset: every user, employee, document and setting is removed and only the base Administrator is recreated. Continue?"
+    : "Clear business data now? Documents, stock, payments and HR transactions are removed. This cannot be undone except from the verified backups.";
+  if (!confirm(question)) return;
+  form.querySelectorAll("button").forEach(b => b.disabled = true);
+  const res = await api("/api/db-reset/execute", {method: "POST", body: {
+    run_id: dbReset.run.id, token: dbReset.run.token, reset_key: form.elements.reset_key.value}});
+  if (!res.ok) {
+    err.textContent = detail(res.body);
+    form.querySelectorAll("button").forEach(b => b.disabled = false);
+    toast(res, "Reset not run");
+    return;
+  }
+  dbReset.loaded = false;
+  const r = res.body.result || {};
+  $("#dbResetStep").innerHTML = `
+    <p class="sub">The reset completed at ${esc(fmtStamp(res.body.completed_at))}.</p>
+    <div class="note"><b>${esc(res.body.mode === "full" ? "Full reset" : "Business data only")}</b>
+      ${res.body.mode === "full"
+        ? "— the schema was rebuilt, migrations replayed and the base Administrator recreated."
+        : `— ${r.tables_cleared || 0} tables cleared, ${(r.rows_cleared || 0).toLocaleString()} rows removed.`}</div>
+    ${res.body.sign_in_again ? `<div class="note bad">Every session has ended. Sign in again as <b>admin</b>
+      with your existing password; you will be asked to change it.</div>` : ""}
+    <div class="note">The audit trail, both backup paths and the result are stored outside the database in the reset log.</div>
+    <div class="actions"><button class="btn" type="button" data-act="close">Close</button></div>`;
+  toast(res, "Database reset completed");
+}
+async function dbResetCancel() {
+  const runId = (dbReset.run && dbReset.run.id)
+    || (dbReset.status && dbReset.status.maintenance && dbReset.status.maintenance.run_id);
+  if (!runId) { closeDrawer(); return; }
+  if (!confirm("Cancel this reset run and let the application accept writes again?")) return;
+  const res = await api("/api/db-reset/cancel", {method: "POST", body: {run_id: runId}});
+  if (!res.ok) { toast(res, "The run was not cancelled"); return; }
+  dbReset.run = null;
+  dbReset.loaded = false;
+  closeDrawer();
+  renderDbResetPanel(true);
+  toast(res, "Reset cancelled");
 }
 
 /* ---------- SMTP settings and the test composer ---------- */
@@ -7016,6 +7242,10 @@ document.addEventListener("click", e => {
   const hrpTab = e.target.closest("[data-hrp]");
   if (hrpTab) return hrProfileDrawer(hrpTab.dataset.hrp);
   const a = e.target.closest("[data-act]");
+  if (a && a.dataset.act === "reset-db") return dbResetOpen();
+  if (a && a.dataset.act === "dbreset-backup") return dbResetBackup();
+  if (a && a.dataset.act === "dbreset-verify") return dbResetVerify();
+  if (a && a.dataset.act === "dbreset-cancel") return dbResetCancel();
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
   if (a && a.dataset.act === "load-tb") return loadTrialBalance();
@@ -7285,6 +7515,8 @@ document.addEventListener("submit", e => {
   else if (f.id === "srRecipientForm") saveRecipient(f);
   else if (f.id === "emailSettingsForm") saveEmailSettings(f);
   else if (f.id === "emailTestForm") sendEmailTest(f);
+  else if (f.id === "dbResetForm1") dbResetBegin(f);
+  else if (f.id === "dbResetForm4") dbResetExecute(f);
 });
 document.addEventListener("input", e => {
   if (e.target.closest("#poForm")) syncPoLines();

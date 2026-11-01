@@ -57,6 +57,29 @@ async def _feature_gate(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _maintenance_gate(request: Request, call_next):
+    """Pause writes while a guarded database reset is running.
+
+    Reads stay open so the reset screen can show progress; the reset's own
+    endpoints and logout must work, otherwise the operator could not finish or
+    leave. The window expires on its own, so an abandoned run cannot freeze the
+    application for ever.
+    """
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/db-reset") or path in ("/api/health", "/api/auth/logout"):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        from .services.db_reset import current_maintenance
+        state = await run_in_threadpool(current_maintenance)
+        if state:
+            return JSONResponse(status_code=503, headers={"Retry-After": "60"}, content={
+                "detail": "A database reset is in progress. Writes are paused until it finishes."})
+    return await call_next(request)
+
+
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(","),
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -67,6 +90,7 @@ app.include_router(roles.router)
 app.include_router(employees.router)
 app.include_router(hr.router)
 app.include_router(db_reset.router)
+app.include_router(db_reset.legacy_router)
 app.include_router(admin.router)
 app.include_router(audit.router)
 app.include_router(modules.router)
