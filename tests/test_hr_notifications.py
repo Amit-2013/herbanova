@@ -4,7 +4,7 @@ The bell is the source of truth: every message is a row addressed to one user.
 Email is a second channel and must always be a test-mode message, so the tests
 patch the SMTP sender out and inspect the envelope instead of posting anything.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -123,6 +123,12 @@ def test_announcement_fans_out_to_linked_users_and_can_be_retired(client, world)
     admin_view = client.as_user("admin").get("/api/hr/announcements",
                                              params={"include_inactive": True}).json()
     assert any(a["id"] == body["id"] for a in admin_view)
+
+
+def test_digest_dedupe_window_starts_at_midnight_in_business_time():
+    """A UTC-midnight window would sit in the future until 05:30 IST."""
+    assert hr_notify._dedupe_since(date(2026, 11, 2)) == datetime(
+        2026, 11, 2, tzinfo=hr_notify.IST)
 
 
 def test_digest_runs_once_a_day_and_only_mails_the_test_address(client, world, monkeypatch):
