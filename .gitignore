@@ -8,6 +8,10 @@ __pycache__/
 venv/
 archive/
 
+# HR profile photos live outside the public static tree and are served by an
+# authenticated endpoint only.
+var/
+
 .cloud-attachments/
 *.dump
 demo_seed_manifest.json
