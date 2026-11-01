@@ -65,8 +65,8 @@ The 24 chapters follow the sidebar and the four end-to-end journeys. Status is t
 | 2 | Finding your way: navigation, roles and permissions | All | Menu filtered by permission | **PLANNED** | `app.js:86-103`; `docs/permissions-matrix.md` |
 | 3 | Overview dashboard | All | `require_login`; panels vary | **PLANNED** | `app/api/dashboard.py`; `app.js:361-423` |
 | 4 | Leads, follow-ups and lost leads | Sales | `lead:read`, `lead:write`, `lead:assign` | **PLANNED** | `app/api/leads.py`; mapping §3 |
-| 5 | Customers | Sales, accounts | `sales:read`, `accounts:read` | **PLANNED** | `app/api/sales_orders.py`, `app/api/invoices.py`; `#/customers` in `app.js`; mapping §4 |
-| 6 | Distributors and credit limits | Sales, admin | `distributor:write`, `credit:manage` | **PLANNED** | `app/api/distributors.py`; formula register F-20 |
+| 5 | Customers and distributors (one master) | Sales, accounts | `sales:read`; `distributor:write`, `sales:write`, `credit:manage` to act | **PLANNED** | `app/api/distributors.py`; `#/customers` in `app.js`; mapping §4 |
+| 6 | Credit limits and exposure | Sales, admin | `credit:manage`; second-person approval | **PLANNED** | `app/api/distributors.py`; formula register F-20 |
 | 7 | Products and GST rates | Stores, sales | `product:read/write`, `tax:read` | **PLANNED** | `app/api/products.py`; `app/api/tax.py`; mapping §5 |
 | 8 | Inventory and warehouses | Stores | `stock:read`, `stock:write` | **PLANNED** | `app/api/inventory.py`; mapping §6; FEFO rules F-24–F-30 |
 | 9 | Purchases and goods receipts | Stores, admin | `stock:read/write`, `supplier:read` | **PLANNED** | `app/api/purchase_orders.py`; mapping §7 |

@@ -74,8 +74,8 @@ hand-typed number.
 | F-15 | Discount slabs | Settings → Discounts; `/api/discount-slabs` | `tax:read/write` | live smoke | VERIFIED (live) |
 | F-16 | Suppliers, GSTIN/PAN checks | Suppliers; `/api/suppliers` | `supplier:read/write` | live smoke | VERIFIED (live) |
 | F-17 | Supplier bank change, second person | Supplier drawer; `/api/suppliers/*/bank-change` | `supplier:bank`, approval | live smoke; no dedicated test | PARTIAL |
-| F-18 | Distributors and credit limits | Distributors; `/api/distributors` | `distributor:write`, `credit:manage` | `test_approvals.py` (credit decision); live | VERIFIED |
-| F-19 | Customers | Customers; sales-order drawer | `sales:read` | live smoke | VERIFIED (live) |
+| F-18 | Customers and distributors: one master, credit limits | Customers & distributors; `/api/distributors` | `sales:read`; `distributor:write`, `credit:manage` to act | `test_approvals.py` (credit decision); browser check 1 Nov 2026 | VERIFIED |
+| F-19 | Party search and status filter (`#/distributors` opens the same screen) | Customers & distributors toolbar; alias in `route()` | `sales:read` | browser check 1 Nov 2026 (search, blocked filter, alias) | VERIFIED |
 | F-20 | Warehouses and capacity | Inventory; `/api/warehouses` | `stock:read/write` | `test_capacity.py` | VERIFIED |
 
 ## 4. Purchasing and inventory

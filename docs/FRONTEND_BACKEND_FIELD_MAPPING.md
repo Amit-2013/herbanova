@@ -142,7 +142,7 @@ API: `POST /api/leads` — permission `lead:write`. The server assigns `lead_no`
 
 ## 4. Distributors and customers
 
-The `#/customers` and `#/distributors` views are two presentations of **one** master: `renderCustomers()` (`app.js:591-606`) reads `state.dists`, which is loaded from `/api/distributors`. The empty-state text says so explicitly.
+`#/customers` is the single master screen, titled **Customers and distributors** (`v-customers` in `static/index.html`, `renderCustomers()` in `app.js`). The two former views read the same rows from `state.dists`, loaded from `/api/distributors`; there is one table, one search box and one status filter. `#/distributors` is kept as an alias in `route()` so the Overview drill-down, bookmarks and older links open the same screen. The merged table shows Code, name with territory and GSTIN, credit limit, in use (with a meter), available, status and actions; the actions are `Open` (`distributor:write`), `New order` (`sales:write`) and `Change limit` (`credit:manage`), so a reader without those rights sees no button that the server would refuse.
 
 ### 4.1 Create / edit (`app.js:1977-2063`)
 
