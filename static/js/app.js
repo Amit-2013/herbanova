@@ -1554,8 +1554,16 @@ function setCompareMonth(value) {
 }
 
 function downloadCsv(name, rows) {
-  const cell = v => {
+  // Same rule as the server exports: text a spreadsheet would run as a formula
+  // is prefixed with an apostrophe, but numbers (including negatives) are not.
+  const formula = /^[=+\-@\t\r]/;
+  const numberLike = /^[+-]?[\d\s().,-]+$/;
+  const text = v => {
     const s = String(v ?? "");
+    return formula.test(s) && !numberLike.test(s) ? "'" + s : s;
+  };
+  const cell = v => {
+    const s = text(v);
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const csv = rows.map(r => r.map(cell).join(",")).join("\r\n");
@@ -1881,7 +1889,11 @@ function exportGeoCsv() {
     if (d.returns.available) row.push(r.return_value, r.return_count, r.reasons.join("; "));
     rows.push(row);
   });
-  rows.push(["Total", "", d.totals.sales, "", d.totals.invoice_count, ""]);
+  if (d.states.length) {
+    rows.push(["Total", "", d.totals.sales, "", d.totals.invoice_count, ""]);
+  } else {
+    rows.push(["No records for this period."]);
+  }
   downloadCsv(`herbanova-geography-${d.from}-to-${d.to}.csv`, rows);
 }
 

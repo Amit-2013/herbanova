@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
+from ..core.downloads import safe_filename
 from ..core.rbac import require
 from ..models.core import CreditNote, DebitNote, Invoice, PrintLog, User
 from ..services.audit import audit
@@ -123,6 +124,10 @@ def print_document(kind: str, document_id: int, copy: str = "ORIGINAL",
         raise HTTPException(422, f"Copy must be one of {', '.join(COPIES)}")
     doc = _load(kind, document_id, db)
     number = getattr(doc, NUMBER_ATTR[kind])
+    # Document numbers carry slashes (INV/2627/000001). A slash inside the
+    # quoted name is not a path, but browsers save it inconsistently, so the
+    # served name uses dashes instead.
+    filename = f"{kind}-{number.replace('/', '-')}-{copy}.pdf"
     # Reserve the row first: the page carries its code, and the code is the row.
     log = reserve_print(db, kind, document_id, number, copy, user.id)
     code = print_code(log.id)
@@ -142,7 +147,7 @@ def print_document(kind: str, document_id: int, copy: str = "ORIGINAL",
         content=payload,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'inline; filename="{kind}-{number}-{copy}.pdf"',
+            "Content-Disposition": f'inline; filename="{safe_filename(filename, "document.pdf")}"',
             "X-Document-SHA256": digest,
             "X-Print-Code": code,
         },
