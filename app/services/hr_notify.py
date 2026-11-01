@@ -153,6 +153,16 @@ def _already_notified(db: Session, user_id: int, kind: str, link: str,
         HRNotification.link == link, HRNotification.created_at >= since)) is not None
 
 
+def _dedupe_since(today: date) -> datetime:
+    """Start of the digest day in business time.
+
+    `today` is an IST date. Using UTC midnight here would start the window 5½
+    hours in the future between 00:00 and 05:30 IST, so a second run on the same
+    day would queue a duplicate.
+    """
+    return datetime.combine(today, time.min, tzinfo=IST)
+
+
 def run_digest(db: Session, today: date | None = None) -> dict:
     """Queue the daily HR digest for the Administrator and HR managers.
 
@@ -164,7 +174,7 @@ def run_digest(db: Session, today: date | None = None) -> dict:
     counts = {key: len(value) for key, value in rows.items()}
     if not any(counts.values()):
         return {"queued": 0, "counts": counts, "skipped": True, "rows": rows, "notes": []}
-    since = datetime.combine(today, time.min, tzinfo=timezone.utc)
+    since = _dedupe_since(today)
     people = ({u.id for u in _role_users(db, "hr_manager")}
               | {u.id for u in _role_users(db, "admin")})
     title = "HR digest for " + today.strftime("%d %B %Y")
