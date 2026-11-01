@@ -53,6 +53,7 @@ class Employee(Base):
     employment_type: Mapped[str | None] = mapped_column(String(30))
     work_schedule: Mapped[str | None] = mapped_column(String(80))
     date_of_exit: Mapped[date | None] = mapped_column(Date)
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
     probation_end_date: Mapped[date | None] = mapped_column(Date)
     confirmation_date: Mapped[date | None] = mapped_column(Date)
     notice_period_days: Mapped[int | None] = mapped_column(Integer)

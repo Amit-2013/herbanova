@@ -12,21 +12,26 @@ right. Decisions go through the central Approvals module (`hr_approvals.py`).
 """
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+import csv
+import io
+from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
 from ..core.rbac import current_user, is_admin, require, role_permissions
-from ..models.core import ApprovalRequest, User
-from ..models.hr import (Attendance, AttendanceCorrection, Branch, Department, Holiday,
+from ..models.core import ApprovalRequest, AuditLog, User
+from ..models.hr import (Attendance, AttendanceCorrection, Branch, Department,
+                         EmployeeAsset, EmployeeDocument, Holiday, ImportBatch,
                          LeaveApplication, LeaveBalance, LeaveType, ODRequest, PayrollEntry,
                          PayrollPeriod, SalaryComponent, SalaryStructure, SalaryStructureLine,
-                         Shift, WorkLocation)
+                         SavedFilter, Shift, WorkLocation)
 from ..models.users import Employee
 from ..services import hr as hr_svc
 from ..services import payroll as payroll_svc
@@ -114,6 +119,7 @@ class EmployeeIn(BaseModel):
     employment_type: str | None = Field(default=None, max_length=30)
     work_schedule: str | None = Field(default=None, max_length=80)
     date_of_exit: date | None = None
+    date_of_birth: date | None = None
     probation_end_date: date | None = None
     confirmation_date: date | None = None
     notice_period_days: int | None = Field(default=None, ge=0, le=365)
@@ -160,6 +166,7 @@ class EmployeePatch(BaseModel):
     employment_type: str | None = None
     work_schedule: str | None = None
     date_of_exit: date | None = None
+    date_of_birth: date | None = None
     probation_end_date: date | None = None
     confirmation_date: date | None = None
     notice_period_days: int | None = Field(default=None, ge=0, le=365)
@@ -188,10 +195,10 @@ class EmployeePatch(BaseModel):
 EMPLOYEE_FIELDS = ["id", "code", "full_name", "department", "designation", "phone", "email",
                    "joining_date", "manager_id", "status", "branch_id", "office_id",
                    "department_id", "shift_id", "hr_admin_id", "employment_type",
-                   "work_schedule", "date_of_exit", "probation_end_date", "confirmation_date",
-                   "notice_period_days", "exit_reason", "address", "emergency_name",
-                   "emergency_phone", "bank_name", "bank_account_no", "bank_ifsc", "pan",
-                   "uan", "esi_no", "attendance_policy", "leave_policy"]
+                   "work_schedule", "date_of_exit", "date_of_birth", "probation_end_date",
+                   "confirmation_date", "notice_period_days", "exit_reason", "address",
+                   "emergency_name", "emergency_phone", "bank_name", "bank_account_no",
+                   "bank_ifsc", "pan", "uan", "esi_no", "attendance_policy", "leave_policy"]
 
 
 def _employee_dict(db: Session, e: Employee, viewer=None) -> dict:
@@ -201,6 +208,7 @@ def _employee_dict(db: Session, e: Employee, viewer=None) -> dict:
     user = (db.get(User, e.user_id) if e.user_id
             else db.scalar(select(User).where(User.employee_id == e.id)))
     d["user_id"] = user.id if user else None
+    d["has_photo"] = bool(e.photo_path)
     # Bank and ID numbers leave the server masked unless the viewer holds the
     # confidential right or is looking at their own record.
     full = True if viewer is None else hr_svc.may_view_confidential(db, viewer, e)
@@ -211,76 +219,582 @@ def _employee_dict(db: Session, e: Employee, viewer=None) -> dict:
     return d
 
 
+def _next_occurrence(d: date, today: date) -> date:
+    """The next time this month/day comes round, on or after today."""
+    try:
+        nxt = d.replace(year=today.year)
+    except ValueError:                      # 29 February in a common year
+        nxt = date(today.year, 2, 28)
+    if nxt < today:
+        try:
+            nxt = d.replace(year=today.year + 1)
+        except ValueError:
+            nxt = date(today.year + 1, 2, 28)
+    return nxt
+
+
 @router.get("/dashboard")
-def dashboard(day: date | None = None, db: Session = Depends(get_db),
+def dashboard(day: date | None = None, from_date: date | None = None,
+              to_date: date | None = None, db: Session = Depends(get_db),
               user=Depends(require("hr:read"))):
-    day = day or date.today()
-    total = db.scalar(select(func.count()).select_from(Employee)) or 0
-    active = db.scalar(select(func.count()).select_from(Employee)
-                       .where(Employee.status == "active")) or 0
-    att = dict(db.execute(select(Attendance.status, func.count())
-                          .where(Attendance.date == day)
-                          .group_by(Attendance.status)).all())
-    pending = db.scalar(select(func.count()).select_from(ApprovalRequest).where(
+    """One screen for the HR home page, scoped to the viewer's team.
+
+    The tiles describe the selected range (default: this month to today); the
+    "today" figures describe `day`. Every list is capped for the payload; the
+    counts are complete.
+    """
+    today = hr_svc.business_today()
+    day = day or today
+    from_date = from_date or today.replace(day=1)
+    to_date = to_date or today
+    if to_date < from_date:
+        raise HTTPException(422, "The range end cannot be before its start")
+    if (to_date - from_date).days > 366:
+        raise HTTPException(422, "Choose a range of at most 366 days")
+
+    scope = hr_svc.scoped_employee_ids(db, user)
+    all_emps = db.scalars(select(Employee)).all()
+    if scope is not None:
+        all_emps = [e for e in all_emps if e.id in scope]
+    emp_ids = {e.id for e in all_emps}
+    active = [e for e in all_emps if e.status == "active"]
+    active_ids = {e.id for e in active}
+
+    day_rows = db.scalars(select(Attendance).where(
+        Attendance.date == day, Attendance.employee_id.in_(emp_ids or {-1}))).all()
+    att = {}
+    for row in day_rows:
+        att[row.status] = att.get(row.status, 0) + 1
+
+    month_start = today.replace(day=1)
+    new_joiners_month = sum(1 for e in all_emps
+                            if e.joining_date and month_start <= e.joining_date <= today)
+    exits_month = sum(1 for e in all_emps
+                      if e.date_of_exit and month_start <= e.date_of_exit <= today)
+    exits_range = sum(1 for e in all_emps
+                      if e.date_of_exit and from_date <= e.date_of_exit <= to_date)
+    # Attrition for the range: leavers / people who were on the rolls at its start.
+    opening = sum(1 for e in all_emps if e.joining_date and e.joining_date <= from_date
+                  and (e.date_of_exit is None or e.date_of_exit >= from_date))
+    attrition = round(exits_range * 100 / opening, 1) if opening else None
+
+    probation_due = [e for e in active if e.probation_end_date
+                     and today <= e.probation_end_date <= today + timedelta(days=30)]
+    expiring_docs = db.scalars(select(EmployeeDocument).where(
+        EmployeeDocument.status == "active",
+        EmployeeDocument.expires_on.is_not(None),
+        EmployeeDocument.expires_on >= today,
+        EmployeeDocument.expires_on <= today + timedelta(days=60),
+        EmployeeDocument.employee_id.in_(emp_ids or {-1}))).all()
+
+    pending_hr = db.scalars(select(ApprovalRequest).where(
         ApprovalRequest.status == "pending",
-        ApprovalRequest.record_type.like("hr_%"))) or 0
+        ApprovalRequest.record_type.like("hr_%"))).all()
+    if scope is not None:
+        pending_hr = [a for a in pending_hr
+                      if a.requested_by == user.id
+                      or int((a.detail or {}).get("employee_id") or -1) in scope]
+    now_local = datetime.now(hr_svc.IST)
+
+    def age_days(dt: datetime) -> int:
+        if dt is None:
+            return 0
+        local = dt.astimezone(hr_svc.IST) if dt.tzinfo else dt
+        return max(0, (now_local.date() - local.date()).days)
+
+    stale = [a for a in pending_hr if age_days(a.requested_at) > 3]
+
+    trend_rows = db.execute(
+        select(Attendance.date, Attendance.status, func.count())
+        .where(Attendance.date >= from_date, Attendance.date <= to_date,
+               Attendance.employee_id.in_(emp_ids or {-1}))
+        .group_by(Attendance.date, Attendance.status)).all()
+    trend = {}
+    for d, status, n in trend_rows:
+        bucket = trend.setdefault(d, {"date": d, "present": 0, "absent": 0,
+                                      "leave": 0, "od": 0, "late": 0})
+        if status in ("present", "late"):
+            bucket["present"] += n
+        if status == "late":
+            bucket["late"] += n
+        elif status == "absent":
+            bucket["absent"] += n
+        elif status in ("paid_leave", "unpaid_leave"):
+            bucket["leave"] += n
+        elif status == "od":
+            bucket["od"] += n
+    attendance_trend = []
+    cursor = from_date
+    while cursor <= to_date:
+        attendance_trend.append(trend.get(cursor, {
+            "date": cursor, "present": 0, "absent": 0, "leave": 0, "od": 0, "late": 0}))
+        cursor += timedelta(days=1)
+
+    leave_rows = db.scalars(select(LeaveApplication).where(
+        LeaveApplication.status == "approved",
+        LeaveApplication.date_from <= to_date,
+        LeaveApplication.date_to >= from_date,
+        LeaveApplication.employee_id.in_(emp_ids or {-1}))).all()
+    leave_types = {t.id: t for t in db.scalars(select(LeaveType)).all()}
+    leave_by_type = {}
+    for app in leave_rows:
+        t = leave_types.get(app.leave_type_id)
+        key = t.code if t else str(app.leave_type_id)
+        entry = leave_by_type.setdefault(key, {
+            "code": key, "name": t.name if t else "Unknown", "days": Decimal(0),
+            "applications": 0})
+        entry["days"] += app.days
+        entry["applications"] += 1
+
+    birthdays = []
+    anniversaries = []
+    for e in active:
+        if e.date_of_birth:
+            nxt = _next_occurrence(e.date_of_birth, today)
+            if (nxt - today).days <= 30:
+                birthdays.append({"employee_id": e.id, "code": e.code,
+                                  "full_name": e.full_name, "date": nxt,
+                                  "days_away": (nxt - today).days,
+                                  "turning": nxt.year - e.date_of_birth.year})
+        if e.joining_date:
+            nxt = _next_occurrence(e.joining_date, today)
+            years = nxt.year - e.joining_date.year
+            if years >= 1 and (nxt - today).days <= 30:
+                anniversaries.append({"employee_id": e.id, "code": e.code,
+                                      "full_name": e.full_name, "date": nxt,
+                                      "days_away": (nxt - today).days, "years": years})
+    birthdays.sort(key=lambda x: x["date"])
+    anniversaries.sort(key=lambda x: x["date"])
+
+    holidays = db.scalars(select(Holiday).where(
+        Holiday.date >= today, Holiday.date <= today + timedelta(days=90))
+        .order_by(Holiday.date)).all()
+
+    missing_punch_rows = db.scalars(select(Attendance).where(
+        Attendance.date >= from_date, Attendance.date < min(today, to_date + timedelta(days=1)),
+        Attendance.employee_id.in_(emp_ids or {-1}),
+        Attendance.status.in_(("present", "late")),
+        (Attendance.check_in.is_(None)) | (Attendance.check_out.is_(None)))).all()
+    negative_rows = db.scalars(select(LeaveBalance).where(
+        LeaveBalance.year == today.year,
+        LeaveBalance.employee_id.in_(emp_ids or {-1}),
+        LeaveBalance.entitled + LeaveBalance.carried - LeaveBalance.used
+        - LeaveBalance.pending < 0)).all()
+    emp_by_id = {e.id: e for e in all_emps}
+    incomplete = []
+    for e in active:
+        missing = []
+        if not e.department:
+            missing.append("department")
+        if not e.designation:
+            missing.append("designation")
+        if not e.joining_date:
+            missing.append("joining date")
+        if not e.manager_id:
+            missing.append("manager")
+        if not e.phone:
+            missing.append("phone")
+        if not e.email:
+            missing.append("email")
+        if not e.office_id:
+            missing.append("office")
+        if missing:
+            incomplete.append({"employee_id": e.id, "code": e.code,
+                               "full_name": e.full_name, "missing": missing})
+
+    dept_rows = db.execute(
+        select(Employee.department, func.count())
+        .where(Employee.id.in_(active_ids or {-1})).group_by(Employee.department)).all()
+    branch_rows = db.execute(
+        select(Branch.name, func.count()).join(Employee, Employee.branch_id == Branch.id)
+        .where(Employee.id.in_(active_ids or {-1})).group_by(Branch.name)).all()
+
     period = db.scalar(select(PayrollPeriod).where(
         PayrollPeriod.year == day.year, PayrollPeriod.month == day.month))
     payable = db.scalar(select(func.coalesce(func.sum(PayrollEntry.net), 0))
                         .where(PayrollEntry.period_id == period.id)) if period else Decimal(0)
-    dept_rows = db.execute(
-        select(Employee.department, func.count())
-        .where(Employee.status == "active").group_by(Employee.department)).all()
-    branch_rows = db.execute(
-        select(Branch.name, func.count()).join(Employee, Employee.branch_id == Branch.id)
-        .where(Employee.status == "active").group_by(Branch.name)).all()
-    # Payroll totals are salary data: only the confidential/payroll roles see them.
     payroll_visible = _can(db, user, "hr:confidential", "hr:payroll_prepare")
+
+    def brief(a: ApprovalRequest) -> dict:
+        return {"approval_id": a.id, "request_type": a.record_type,
+                "document_number": a.document_number, "subject": a.subject,
+                "age_days": age_days(a.requested_at)}
+
     return {
-        "date": day, "total_employees": total, "active_employees": active,
-        "inactive_employees": total - active,
+        "date": day, "from_date": from_date, "to_date": to_date,
+        "total_employees": len(all_emps), "active_employees": len(active),
+        "inactive_employees": len(all_emps) - len(active),
         "present_today": att.get("present", 0) + att.get("late", 0),
         "absent_today": att.get("absent", 0),
         "on_leave_today": att.get("paid_leave", 0) + att.get("unpaid_leave", 0),
         "on_od_today": att.get("od", 0),
-        "late_today": att.get("late", 0), "early_today": att.get("early_departure", 0),
-        "pending_approvals": pending,
+        "late_today": att.get("late", 0),
+        "early_today": att.get("early_departure", 0),
+        "pending_approvals": len(pending_hr),
+        "pending_leave": sum(1 for a in pending_hr if a.record_type == "hr_leave"),
+        "pending_other": sum(1 for a in pending_hr if a.record_type != "hr_leave"),
+        "new_joiners_month": new_joiners_month,
+        "exits_month": exits_month,
+        "exits_in_range": exits_range,
+        "attrition_pct": attrition,
+        "probation_ending_soon": len(probation_due),
+        "documents_expiring": len(expiring_docs),
         "payroll_visible": payroll_visible,
         "payroll_status": period.status if (period and payroll_visible) else None,
         "salary_payable": _m(payable) if payroll_visible else None,
+        "attendance_trend": attendance_trend,
         "by_department": [{"department": d or "Unassigned", "employees": n}
                           for d, n in dept_rows],
         "by_branch": [{"branch": b, "employees": n} for b, n in branch_rows],
+        "leave_by_type": [{"code": v["code"], "name": v["name"],
+                           "days": str(v["days"]), "applications": v["applications"]}
+                          for v in leave_by_type.values()],
+        "birthdays": birthdays,
+        "anniversaries": anniversaries,
+        "holidays": [{"date": h.date, "name": h.name} for h in holidays],
+        "needs_attention": {
+            "missing_punches": {
+                "count": len(missing_punch_rows),
+                "rows": [{"attendance_id": r.id, "employee_id": r.employee_id,
+                          "employee": emp_by_id[r.employee_id].full_name
+                          if r.employee_id in emp_by_id else "?",
+                          "date": r.date} for r in missing_punch_rows[:20]]},
+            "negative_leave": {
+                "count": len(negative_rows),
+                "rows": [{"employee_id": r.employee_id, "leave_type_id": r.leave_type_id,
+                          "year": r.year,
+                          "employee": emp_by_id[r.employee_id].full_name
+                          if r.employee_id in emp_by_id else "?"} for r in negative_rows[:20]]},
+            "stale_approvals": {"count": len(stale),
+                                "rows": [brief(a) for a in stale[:20]]},
+            "incomplete_records": {"count": len(incomplete),
+                                   "rows": incomplete[:20]},
+        },
     }
 
 
 # --------------------------------------------------------------- employees
-@router.get("/employees")
-def list_employees(response: Response, q: str | None = None, department: str | None = None,
-                   branch_id: int | None = None, status: str | None = None,
-                   page: int | None = Query(None, ge=1),
-                   page_size: int = Query(50, ge=1, le=200), db: Session = Depends(get_db),
-                   user=Depends(require("hr:read"))):
-    stmt = select(Employee)
-    scope = hr_svc.scoped_employee_ids(db, user)
+EMPLOYEE_SORTS = {"code": Employee.code, "name": Employee.full_name,
+                  "department": Employee.department, "joining_date": Employee.joining_date,
+                  "status": Employee.status}
+
+
+def _employee_filters(stmt, *, scope, q=None, department=None, branch_id=None, status=None,
+                      office_id=None, department_id=None, manager_id=None,
+                      employment_type=None, joined_from=None, joined_to=None,
+                      exit_from=None, exit_to=None, probation_due=False, incomplete=False):
+    """The directory filters, shared by the list, the CSV export and saved views."""
+    today = hr_svc.business_today()
     if scope is not None:
         stmt = stmt.where(Employee.id.in_(scope or {-1}))
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(Employee.code.ilike(like) | Employee.full_name.ilike(like)
                           | Employee.department.ilike(like) | Employee.designation.ilike(like))
-    if department:
-        stmt = stmt.where(Employee.department == department)
-    if branch_id:
-        stmt = stmt.where(Employee.branch_id == branch_id)
-    if status:
-        stmt = stmt.where(Employee.status == status)
+    for column, value in ((Employee.department, department),
+                          (Employee.branch_id, branch_id), (Employee.status, status),
+                          (Employee.office_id, office_id),
+                          (Employee.department_id, department_id),
+                          (Employee.manager_id, manager_id),
+                          (Employee.employment_type, employment_type)):
+        if value is not None and value != "":
+            stmt = stmt.where(column == value)
+    if joined_from:
+        stmt = stmt.where(Employee.joining_date >= joined_from)
+    if joined_to:
+        stmt = stmt.where(Employee.joining_date <= joined_to)
+    if exit_from:
+        stmt = stmt.where(Employee.date_of_exit >= exit_from)
+    if exit_to:
+        stmt = stmt.where(Employee.date_of_exit <= exit_to)
+    if probation_due:
+        stmt = stmt.where(Employee.status == "active",
+                          Employee.probation_end_date.is_not(None),
+                          Employee.probation_end_date >= today,
+                          Employee.probation_end_date <= today + timedelta(days=30))
+    if incomplete:
+        stmt = stmt.where(
+            Employee.status == "active",
+            or_(Employee.department.is_(None), Employee.department == "",
+                Employee.designation.is_(None), Employee.designation == "",
+                Employee.joining_date.is_(None), Employee.manager_id.is_(None),
+                Employee.phone.is_(None), Employee.phone == "",
+                Employee.email.is_(None), Employee.email == "",
+                Employee.office_id.is_(None)))
+    return stmt
+
+
+@router.get("/employees")
+def list_employees(response: Response, q: str | None = None, department: str | None = None,
+                   branch_id: int | None = None, status: str | None = None,
+                   office_id: int | None = None, department_id: int | None = None,
+                   manager_id: int | None = None, employment_type: str | None = None,
+                   joined_from: date | None = None, joined_to: date | None = None,
+                   exit_from: date | None = None, exit_to: date | None = None,
+                   probation_due: bool = False, incomplete: bool = False,
+                   sort: Literal["code", "name", "department", "joining_date", "status"] = "code",
+                   order: Literal["asc", "desc"] = "asc",
+                   page: int | None = Query(None, ge=1),
+                   page_size: int = Query(50, ge=1, le=200), db: Session = Depends(get_db),
+                   user=Depends(require("hr:read"))):
+    scope = hr_svc.scoped_employee_ids(db, user)
+    stmt = _employee_filters(
+        select(Employee), scope=scope, q=q, department=department, branch_id=branch_id,
+        status=status, office_id=office_id, department_id=department_id,
+        manager_id=manager_id, employment_type=employment_type, joined_from=joined_from,
+        joined_to=joined_to, exit_from=exit_from, exit_to=exit_to,
+        probation_due=probation_due, incomplete=incomplete)
     total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery()))
     response.headers["X-Total-Count"] = str(total or 0)
-    stmt = stmt.order_by(Employee.code)
+    column = EMPLOYEE_SORTS[sort]
+    stmt = stmt.order_by(column.desc() if order == "desc" else column.asc(), Employee.code)
     if page:
         stmt = stmt.limit(page_size).offset((page - 1) * page_size)
     return [_employee_dict(db, e, user) for e in db.scalars(stmt).all()]
+
+
+@router.get("/employees/export.csv")
+def export_employees(response: Response, q: str | None = None, department: str | None = None,
+                     branch_id: int | None = None, status: str | None = None,
+                     office_id: int | None = None, department_id: int | None = None,
+                     manager_id: int | None = None, employment_type: str | None = None,
+                     joined_from: date | None = None, joined_to: date | None = None,
+                     exit_from: date | None = None, exit_to: date | None = None,
+                     probation_due: bool = False, incomplete: bool = False,
+                     db: Session = Depends(get_db), user=Depends(require("hr:read"))):
+    """The directory as CSV. Confidential columns are masked per viewer, as in the API."""
+    scope = hr_svc.scoped_employee_ids(db, user)
+    stmt = _employee_filters(
+        select(Employee), scope=scope, q=q, department=department, branch_id=branch_id,
+        status=status, office_id=office_id, department_id=department_id,
+        manager_id=manager_id, employment_type=employment_type, joined_from=joined_from,
+        joined_to=joined_to, exit_from=exit_from, exit_to=exit_to,
+        probation_due=probation_due, incomplete=incomplete).order_by(Employee.code)
+    emps = db.scalars(stmt).all()
+    managers = {e.id: e.full_name for e in db.scalars(select(Employee)).all()}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    columns = ["code", "full_name", "department", "designation", "status", "joining_date",
+               "date_of_exit", "manager", "phone", "email", "employment_type", "office",
+               "bank_account_no", "bank_ifsc", "pan", "uan", "esi_no"]
+    writer.writerow(columns)
+    offices = {o.id: o.name for o in db.scalars(select(WorkLocation)).all()}
+    for e in emps:
+        d = _employee_dict(db, e, user)
+        writer.writerow([
+            d["code"], d["full_name"], d["department"] or "", d["designation"] or "",
+            d["status"], d["joining_date"] or "", d["date_of_exit"] or "",
+            managers.get(e.manager_id, ""),
+            d["phone"] or "", d["email"] or "", d["employment_type"] or "",
+            offices.get(e.office_id, ""),
+            d["bank_account_no"] or "", d["bank_ifsc"] or "", d["pan"] or "",
+            d["uan"] or "", d["esi_no"] or ""])
+    audit(db, user.id, "hr.employee.export", "employee:export", {"rows": len(emps)})
+    db.commit()
+    return Response(content=out.getvalue(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": 'attachment; filename="employees.csv"',
+        "Cache-Control": "no-store"})
+
+
+# ------------------------------------------------- saved views and bulk import
+class SavedFilterIn(BaseModel):
+    name: str = Field(min_length=2, max_length=60)
+    params: dict = Field(default_factory=dict)
+    view: Literal["employees"] = "employees"
+
+
+@router.get("/saved-filters")
+def list_saved_filters(view: str = "employees", db: Session = Depends(get_db),
+                       user=Depends(require("hr:read"))):
+    rows = db.scalars(select(SavedFilter).where(
+        SavedFilter.user_id == user.id, SavedFilter.view == view)
+        .order_by(SavedFilter.name)).all()
+    return [{"id": r.id, "name": r.name, "view": r.view, "params": r.params} for r in rows]
+
+
+@router.post("/saved-filters", status_code=201)
+def save_filter(body: SavedFilterIn, db: Session = Depends(get_db),
+                user=Depends(require("hr:read"))):
+    row = SavedFilter(user_id=user.id, view=body.view, name=body.name.strip(),
+                      params=body.params)
+    db.add(row)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "A saved view with that name already exists")
+    db.commit()
+    return {"id": row.id, "name": row.name, "view": row.view, "params": row.params}
+
+
+@router.delete("/saved-filters/{filter_id}")
+def delete_saved_filter(filter_id: int, db: Session = Depends(get_db),
+                        user=Depends(require("hr:read"))):
+    row = db.get(SavedFilter, filter_id)
+    if not row or row.user_id != user.id:
+        raise HTTPException(404, "Saved view not found")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True}
+
+
+IMPORT_COLUMNS = ["code", "full_name", "department", "designation", "phone", "email",
+                  "joining_date", "date_of_birth", "employment_type", "manager_code",
+                  "branch_code", "office_code", "department_code", "bank_account_no",
+                  "bank_ifsc", "pan", "uan", "esi_no"]
+
+
+class ImportIn(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    csv_text: str = Field(min_length=1)
+    commit: bool = False
+
+
+def _parse_row(row: dict, seen_codes: set[str]) -> tuple[dict, list[str]]:
+    errors = []
+    data: dict = {}
+    code = (row.get("code") or "").strip().upper()
+    name = (row.get("full_name") or "").strip()
+    if len(code) < 2:
+        errors.append("code is required (2-30 characters)")
+    elif code in seen_codes:
+        errors.append(f"code {code} appears twice in the file")
+    if len(name) < 2:
+        errors.append("full_name is required")
+    data["code"], data["full_name"] = code, name
+    for field in ("department", "designation", "phone", "employment_type"):
+        value = (row.get(field) or "").strip()
+        data[field] = value or None
+    email = (row.get("email") or "").strip()
+    if email and ("@" not in email or "." not in email.split("@")[-1]):
+        errors.append("email is not a valid address")
+    data["email"] = email or None
+    for field in ("joining_date", "date_of_birth"):
+        value = (row.get(field) or "").strip()
+        if value:
+            try:
+                data[field] = date.fromisoformat(value)
+            except ValueError:
+                errors.append(f"{field} must be YYYY-MM-DD")
+        else:
+            data[field] = None
+    for field in ("bank_account_no", "bank_ifsc", "pan", "uan", "esi_no"):
+        value = (row.get(field) or "").strip()
+        data[field] = value or None
+    return data, errors
+
+
+@router.get("/employees/import-template.csv")
+def import_template(_=Depends(require("hr:write"))):
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(IMPORT_COLUMNS)
+    writer.writerow(["EMP001", "Example Name", "Sales", "Associate", "9876543210",
+                     "person@example.com", "2026-01-15", "1995-06-30", "full_time",
+                     "", "", "", "", "", "", "", "", ""])
+    return Response(content=out.getvalue(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": 'attachment; filename="employee-import-template.csv"'})
+
+
+@router.post("/employees/import")
+def import_employees(body: ImportIn, db: Session = Depends(get_db),
+                     actor=Depends(require("hr:write"))):
+    """Validate a CSV; with commit=true create the valid rows and leave an undo record."""
+    if len(body.csv_text) > 2_000_000:
+        raise HTTPException(413, "The import file is too large (2 MB maximum)")
+    reader = csv.DictReader(io.StringIO(body.csv_text.lstrip("\ufeff")))
+    headers = [h.strip() for h in (reader.fieldnames or [])]
+    unknown = [h for h in headers if h and h not in IMPORT_COLUMNS]
+    if unknown:
+        raise HTTPException(422, f"Unknown columns: {', '.join(unknown[:5])}")
+    has_confidential = any((row.get(k) or "").strip() for row in reader
+                           for k in ("bank_account_no", "bank_ifsc", "pan", "uan", "esi_no"))
+    if has_confidential and not _can(db, actor, "hr:confidential", "hr:payroll_prepare"):
+        raise HTTPException(403, "Confidential HR rights are required to import bank or ID data")
+    reader = csv.DictReader(io.StringIO(body.csv_text.lstrip("\ufeff")))
+
+    existing_codes = {c for c in db.scalars(select(Employee.code)).all()}
+    seen: set[str] = set()
+    parsed, errors = [], []
+    managers = {e.code: e.id for e in db.scalars(select(Employee)).all()}
+    branches = {b.code: b.id for b in db.scalars(select(Branch)).all()}
+    offices = {o.code: o.id for o in db.scalars(select(WorkLocation)).all()}
+    departments = {d.code: d.id for d in db.scalars(select(Department)).all()}
+    for number, row in enumerate(reader, start=2):
+        if not any((v or "").strip() for v in row.values() if isinstance(v, str)):
+            continue
+        data, row_errors = _parse_row(row, seen)
+        if data.get("code"):
+            seen.add(data["code"])
+            if data["code"] in existing_codes and not row_errors:
+                row_errors.append(f"employee code {data['code']} already exists")
+        manager_code = (row.get("manager_code") or "").strip().upper()
+        if manager_code:
+            if manager_code in managers:
+                data["manager_id"] = managers[manager_code]
+            else:
+                row_errors.append(f"manager code {manager_code} not found")
+        for key, source in (("branch_id", branches), ("office_id", offices),
+                            ("department_id", departments)):
+            value = (row.get(key.replace("_id", "_code")) or "").strip().upper()
+            if value:
+                if value in source:
+                    data[key] = source[value]
+                else:
+                    row_errors.append(f"{key.replace('_id', '')} code {value} not found")
+        if row_errors:
+            errors.append({"row": number, "code": data.get("code"), "errors": row_errors})
+        else:
+            parsed.append(data)
+
+    created_ids: list[int] = []
+    if body.commit and parsed:
+        for data in parsed:
+            e = Employee(**data)
+            db.add(e)
+            db.flush()
+            created_ids.append(e.id)
+        batch = ImportBatch(kind="employee", filename=body.filename, total_rows=len(parsed) + len(errors),
+                            created_rows=len(created_ids), error_rows=len(errors),
+                            created_ids=created_ids, errors=errors, created_by=actor.id)
+        db.add(batch)
+        db.flush()
+        audit(db, actor.id, "hr.employee.import", f"import:{batch.id}",
+              {"filename": body.filename, "created": len(created_ids),
+               "errors": len(errors)})
+        db.commit()
+        batch_id = batch.id
+    else:
+        db.rollback()
+        batch_id = None
+    return {"commit": body.commit, "batch_id": batch_id, "valid_rows": len(parsed),
+            "error_rows": len(errors), "errors": errors,
+            "preview": [{"code": d["code"], "full_name": d["full_name"],
+                         "department": d.get("department")} for d in parsed[:20]]}
+
+
+@router.post("/employees/import-batches/{batch_id}/undo")
+def undo_import(batch_id: int, db: Session = Depends(get_db),
+                actor=Depends(require("hr:write"))):
+    """Undo a committed import by deactivating what it created. Rows are kept."""
+    batch = db.get(ImportBatch, batch_id)
+    if not batch:
+        raise HTTPException(404, "Import not found")
+    if batch.status == "undone":
+        raise HTTPException(409, "This import has already been undone")
+    deactivated = 0
+    for emp_id in batch.created_ids or []:
+        emp = db.get(Employee, emp_id)
+        if emp and emp.status == "active":
+            emp.status = "inactive"
+            deactivated += 1
+    batch.status = "undone"
+    batch.undone_at = datetime.now(timezone.utc)
+    batch.undone_by = actor.id
+    audit(db, actor.id, "hr.employee.import_undo", f"import:{batch.id}",
+          {"employees_deactivated": deactivated})
+    db.commit()
+    return {"batch_id": batch.id, "status": batch.status, "employees_deactivated": deactivated}
 
 
 @router.post("/employees", status_code=201)
@@ -351,6 +865,257 @@ def get_employee(employee_id: int, db: Session = Depends(get_db),
     if scope is not None and e.id not in scope:
         raise HTTPException(403, "That employee is outside your team")
     return _employee_dict(db, e, user)
+
+
+# ------------------------------------------------- profile: photo, documents, history
+PHOTO_DIR = Path(__file__).resolve().parents[2] / "var" / "hr_photos"
+PHOTO_TYPES = {"JPEG": ("jpg", "image/jpeg"), "PNG": ("png", "image/png"),
+               "WEBP": ("webp", "image/webp")}
+
+
+def _scoped_employee(db: Session, user, employee_id: int) -> Employee:
+    e = db.get(Employee, employee_id)
+    if not e:
+        raise HTTPException(404, "Employee not found")
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if scope is not None and e.id not in scope:
+        raise HTTPException(403, "That employee is outside your team")
+    return e
+
+
+def _may_edit_profile(db: Session, user, e: Employee) -> bool:
+    me = hr_svc.employee_for_user(db, user)
+    return _can(db, user, "hr:write") or bool(me and me.id == e.id)
+
+
+@router.post("/employees/{employee_id}/photo")
+async def upload_photo(employee_id: int, file: UploadFile = File(...),
+                       db: Session = Depends(get_db), user=Depends(current_user)):
+    """A profile photo, served only through this authenticated endpoint.
+
+    Photos are personal data, so they are not written under the public /ui
+    mount; the read route applies the same team scope as the profile.
+    """
+    e = _scoped_employee(db, user, employee_id)
+    if not _may_edit_profile(db, user, e):
+        raise HTTPException(403, "You may change only your own photo")
+    data = await file.read(2_000_001)
+    if len(data) > 2_000_000:
+        raise HTTPException(413, "The photo must be 2 MB or smaller")
+    from PIL import Image, UnidentifiedImageError
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
+            fmt = image.format
+    except UnidentifiedImageError:
+        raise HTTPException(422, "Upload a JPEG, PNG or WebP image")
+    if fmt not in PHOTO_TYPES:
+        raise HTTPException(422, "Upload a JPEG, PNG or WebP image")
+    ext, _media = PHOTO_TYPES[fmt]
+    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    for old in PHOTO_DIR.glob(f"employee_{e.id}.*"):
+        old.unlink(missing_ok=True)
+    target = PHOTO_DIR / f"employee_{e.id}.{ext}"
+    target.write_bytes(data)
+    e.photo_path = f"hr_photos/{target.name}"
+    audit(db, user.id, "hr.employee.photo", f"employee:{e.id}", {"format": fmt})
+    db.commit()
+    return {"employee_id": e.id, "has_photo": True, "url": f"/api/hr/employees/{e.id}/photo"}
+
+
+@router.get("/employees/{employee_id}/photo")
+def get_photo(employee_id: int, db: Session = Depends(get_db),
+              user=Depends(require("hr:read"))):
+    e = _scoped_employee(db, user, employee_id)
+    if not e.photo_path:
+        raise HTTPException(404, "No photo on file")
+    path = PHOTO_DIR / Path(e.photo_path).name
+    if not path.exists():
+        raise HTTPException(404, "Photo file is missing")
+    suffix = path.suffix.lower()
+    media = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(
+        suffix, "application/octet-stream")
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "no-store"})
+
+
+@router.delete("/employees/{employee_id}/photo")
+def delete_photo(employee_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    e = _scoped_employee(db, user, employee_id)
+    if not _may_edit_profile(db, user, e):
+        raise HTTPException(403, "You may change only your own photo")
+    for old in PHOTO_DIR.glob(f"employee_{e.id}.*"):
+        old.unlink(missing_ok=True)
+    e.photo_path = None
+    audit(db, user.id, "hr.employee.photo_delete", f"employee:{e.id}", {})
+    db.commit()
+    return {"employee_id": e.id, "has_photo": False}
+
+
+class DocumentIn(BaseModel):
+    doc_type: str = Field(min_length=2, max_length=40)
+    title: str = Field(min_length=2, max_length=120)
+    number: str | None = Field(default=None, max_length=60)
+    issued_on: date | None = None
+    expires_on: date | None = None
+    file_path: str | None = Field(default=None, max_length=300)
+    status: Literal["active", "expired", "replaced"] = "active"
+
+    @model_validator(mode="after")
+    def dates(self):
+        if self.issued_on and self.expires_on and self.expires_on < self.issued_on:
+            raise ValueError("expiry cannot be before the issue date")
+        return self
+
+
+def _document_dict(doc: EmployeeDocument, full: bool) -> dict:
+    return {"id": doc.id, "employee_id": doc.employee_id, "doc_type": doc.doc_type,
+            "title": doc.title,
+            "number": doc.number if full else hr_svc.mask_secret(doc.number),
+            "number_masked": (not full) and bool(doc.number),
+            "issued_on": doc.issued_on, "expires_on": doc.expires_on,
+            "status": doc.status, "has_file": bool(doc.file_path),
+            "file_path": doc.file_path if full else None,
+            "created_at": doc.created_at}
+
+
+@router.get("/employees/{employee_id}/documents")
+def list_documents(employee_id: int, db: Session = Depends(get_db),
+                   user=Depends(require("hr:read"))):
+    e = _scoped_employee(db, user, employee_id)
+    full = hr_svc.may_view_confidential(db, user, e)
+    rows = db.scalars(select(EmployeeDocument)
+                      .where(EmployeeDocument.employee_id == e.id)
+                      .order_by(EmployeeDocument.expires_on.desc().nullslast(),
+                                EmployeeDocument.id.desc())).all()
+    return [_document_dict(d, full) for d in rows]
+
+
+@router.post("/employees/{employee_id}/documents", status_code=201)
+def add_document(employee_id: int, body: DocumentIn, db: Session = Depends(get_db),
+                 actor=Depends(require("hr:write"))):
+    e = _scoped_employee(db, actor, employee_id)
+    doc = EmployeeDocument(employee_id=e.id, uploaded_by=actor.id, **body.model_dump())
+    db.add(doc)
+    db.flush()
+    audit(db, actor.id, "hr.document.add", f"document:{doc.id}",
+          {"employee": e.code, "doc_type": doc.doc_type,
+           "number": hr_svc.mask_secret(doc.number)})
+    db.commit()
+    return _document_dict(doc, full=True)
+
+
+@router.patch("/employees/{employee_id}/documents/{document_id}")
+def update_document(employee_id: int, document_id: int, body: DocumentIn,
+                    db: Session = Depends(get_db), actor=Depends(require("hr:write"))):
+    e = _scoped_employee(db, actor, employee_id)
+    doc = db.get(EmployeeDocument, document_id)
+    if not doc or doc.employee_id != e.id:
+        raise HTTPException(404, "Document not found")
+    for key, value in body.model_dump().items():
+        setattr(doc, key, value)
+    audit(db, actor.id, "hr.document.update", f"document:{doc.id}",
+          {"employee": e.code, "doc_type": doc.doc_type,
+           "number": hr_svc.mask_secret(doc.number)})
+    db.commit()
+    return _document_dict(doc, full=True)
+
+
+class AssetIn(BaseModel):
+    asset_type: str = Field(min_length=2, max_length=40)
+    name: str = Field(min_length=2, max_length=120)
+    serial_no: str | None = Field(default=None, max_length=80)
+    issued_on: date
+    condition_note: str | None = Field(default=None, max_length=200)
+
+
+class AssetReturnIn(BaseModel):
+    returned_on: date
+    condition_note: str | None = Field(default=None, max_length=200)
+
+
+def _asset_dict(a: EmployeeAsset) -> dict:
+    return {"id": a.id, "employee_id": a.employee_id, "asset_type": a.asset_type,
+            "name": a.name, "serial_no": a.serial_no, "issued_on": a.issued_on,
+            "returned_on": a.returned_on, "condition_note": a.condition_note}
+
+
+@router.get("/employees/{employee_id}/assets")
+def list_assets(employee_id: int, db: Session = Depends(get_db),
+                user=Depends(require("hr:read"))):
+    e = _scoped_employee(db, user, employee_id)
+    rows = db.scalars(select(EmployeeAsset).where(EmployeeAsset.employee_id == e.id)
+                      .order_by(EmployeeAsset.issued_on.desc())).all()
+    return [_asset_dict(a) for a in rows]
+
+
+@router.post("/employees/{employee_id}/assets", status_code=201)
+def issue_asset(employee_id: int, body: AssetIn, db: Session = Depends(get_db),
+                actor=Depends(require("hr:write"))):
+    e = _scoped_employee(db, actor, employee_id)
+    asset = EmployeeAsset(employee_id=e.id, created_by=actor.id, **body.model_dump())
+    db.add(asset)
+    db.flush()
+    audit(db, actor.id, "hr.asset.issue", f"asset:{asset.id}",
+          {"employee": e.code, "name": asset.name, "serial_no": asset.serial_no})
+    db.commit()
+    return _asset_dict(asset)
+
+
+@router.post("/assets/{asset_id}/return")
+def return_asset(asset_id: int, body: AssetReturnIn, db: Session = Depends(get_db),
+                 actor=Depends(require("hr:write"))):
+    asset = db.get(EmployeeAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    _scoped_employee(db, actor, asset.employee_id)
+    if asset.returned_on:
+        raise HTTPException(409, "This asset is already returned")
+    if body.returned_on < asset.issued_on:
+        raise HTTPException(422, "The return date cannot be before the issue date")
+    asset.returned_on = body.returned_on
+    asset.condition_note = body.condition_note
+    audit(db, actor.id, "hr.asset.return", f"asset:{asset.id}",
+          {"employee_id": asset.employee_id, "returned_on": str(body.returned_on)})
+    db.commit()
+    return _asset_dict(asset)
+
+
+@router.get("/employees/{employee_id}/profile")
+def employee_profile(employee_id: int, db: Session = Depends(get_db),
+                     user=Depends(require("hr:read"))):
+    e = _scoped_employee(db, user, employee_id)
+    full = hr_svc.may_view_confidential(db, user, e)
+    documents = db.scalars(select(EmployeeDocument)
+                           .where(EmployeeDocument.employee_id == e.id)
+                           .order_by(EmployeeDocument.id.desc())).all()
+    assets = db.scalars(select(EmployeeAsset)
+                        .where(EmployeeAsset.employee_id == e.id)
+                        .order_by(EmployeeAsset.issued_on.desc())).all()
+    history = db.execute(
+        select(AuditLog, User.username).join(User, User.id == AuditLog.actor_id, isouter=True)
+        .where(AuditLog.record == f"employee:{e.id}")
+        .order_by(AuditLog.id.desc()).limit(30)).all()
+    return {
+        "employee": _employee_dict(db, e, user),
+        "documents": [_document_dict(d, full) for d in documents],
+        "assets": [_asset_dict(a) for a in assets],
+        "history": [{"at": log.at, "action": log.action, "actor": actor or "system",
+                     "changes": log.changes or {}} for log, actor in history],
+        "can_edit": _can(db, user, "hr:write"),
+        "can_edit_confidential": full,
+    }
+
+
+@router.get("/employees/{employee_id}/history")
+def employee_history(employee_id: int, db: Session = Depends(get_db),
+                     user=Depends(require("hr:read"))):
+    e = _scoped_employee(db, user, employee_id)
+    rows = db.execute(
+        select(AuditLog, User.username).join(User, User.id == AuditLog.actor_id, isouter=True)
+        .where(AuditLog.record == f"employee:{e.id}")
+        .order_by(AuditLog.id.desc()).limit(200)).all()
+    return [{"at": log.at, "action": log.action, "actor": actor or "system",
+             "changes": log.changes or {}} for log, actor in rows]
 
 
 # --------------------------------------------------------------- config
