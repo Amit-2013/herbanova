@@ -15,6 +15,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import formatdate
+from html import escape
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -163,3 +164,37 @@ def send(db: Session, schedule, rendered: dict, people: dict) -> dict:
         raise MailError(f"SMTP delivery failed: {type(exc).__name__}: {exc}") from exc
     return {"size": size, "to": len(people["to"]), "cc": len(people.get("cc") or []),
             "bcc": len(people.get("bcc") or [])}
+
+
+def send_note(db: Session, addresses: list[str], subject: str, text: str,
+              html: str | None = None, *, force_test: bool = True) -> dict:
+    """One short plain message, through the same switches as a scheduled pack.
+
+    `force_test` defaults to True: HR notifications have no approved live
+    recipient list, so they always land at the single test address with a
+    [TEST] subject. Callers pass False only for a pack whose recipients the
+    Administrator has configured.
+    """
+    if not settings.email_send_enabled:
+        raise MailError("Sending is disabled (EMAIL_SEND_ENABLED is false).")
+    if not smtp_ready():
+        raise MailError("SMTP is not configured (SMTP_HOST and SMTP_FROM are required).")
+    if force_test or not live_mode():
+        address = test_recipient(db)
+        if not address:
+            raise MailError("Test mode: no Administrator email is configured. "
+                            "Nothing was sent.")
+        people = {"to": [address], "cc": [], "bcc": []}
+        subject = f"[TEST] {subject}"
+        redirected = True
+    else:
+        people = {"to": [a.strip().lower() for a in addresses if valid_address(a)],
+                  "cc": [], "bcc": []}
+        if not people["to"]:
+            raise MailError("No valid recipient address; nothing was sent.")
+        redirected = False
+    safe = escape(text)
+    rendered = {"subject": subject, "text": text,
+                "html": html or f"<p>{safe.replace(chr(10), '<br>')}</p>"}
+    result = send(db, None, rendered, people)
+    return {**result, "redirected": redirected}

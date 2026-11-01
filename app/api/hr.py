@@ -29,13 +29,14 @@ from sqlalchemy.orm import Session
 from ..core.db import get_db
 from ..core.rbac import current_user, is_admin, require, role_permissions
 from ..models.core import ApprovalRequest, AuditLog, User
-from ..models.hr import (Attendance, AttendanceCorrection, Branch, Department,
-                         EmployeeAsset, EmployeeDocument, Holiday, ImportBatch,
+from ..models.hr import (Announcement, Attendance, AttendanceCorrection, Branch, Department,
+                         EmployeeAsset, EmployeeDocument, Holiday, HRNotification, ImportBatch,
                          LeaveApplication, LeaveBalance, LeaveType, ODRequest, PayrollEntry,
                          PayrollPeriod, PeriodLock, SalaryComponent, SalaryStructure,
                          SalaryStructureLine, SavedFilter, Shift, WorkLocation)
 from ..models.users import Employee
 from ..services import hr as hr_svc
+from ..services import hr_notify
 from ..services import payroll as payroll_svc
 from ..services.audit import audit
 from ..services.salary_slip import build_slip
@@ -2981,3 +2982,127 @@ def request_payroll_correction(period_id: int, body: CorrectionIn2, db: Session 
     db.commit()
     return {"id": None, "status": "pending", "note": "Recorded in the audit trail. "
             "Finalised payroll is corrected through the authorised reversal workflow."}
+
+
+# ------------------------------------------------------------------ notices
+class AnnouncementIn(BaseModel):
+    title: str = Field(min_length=3, max_length=160)
+    body: str = Field(min_length=3, max_length=1000)
+
+
+class AnnouncementPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=160)
+    body: str | None = Field(default=None, min_length=3, max_length=1000)
+    active: bool | None = None
+
+
+def _note_row(note: HRNotification) -> dict:
+    return {"id": note.id, "kind": note.kind, "title": note.title, "body": note.body,
+            "link": note.link, "read_at": note.read_at.isoformat() if note.read_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else None}
+
+
+def _announcement_row(row: Announcement) -> dict:
+    return {"id": row.id, "title": row.title, "body": row.body, "active": row.active,
+            "published_by": row.published_by,
+            "published_at": row.published_at.isoformat() if row.published_at else None}
+
+
+@router.get("/notifications")
+def my_notifications(unread_only: bool = False,
+                     limit: int = Query(50, ge=1, le=200),
+                     db: Session = Depends(get_db), user=Depends(current_user)):
+    """The signed-in user's own bell. Another user's notes are never visible."""
+    base = select(HRNotification).where(HRNotification.user_id == user.id)
+    unread = db.scalar(select(func.count()).select_from(HRNotification).where(
+        HRNotification.user_id == user.id, HRNotification.read_at.is_(None))) or 0
+    query = base.where(HRNotification.read_at.is_(None)) if unread_only else base
+    rows = db.scalars(query.order_by(HRNotification.created_at.desc(),
+                                     HRNotification.id.desc()).limit(limit)).all()
+    return {"unread": unread, "items": [_note_row(n) for n in rows]}
+
+
+@router.post("/notifications/{note_id}/read")
+def read_notification(note_id: int, db: Session = Depends(get_db),
+                      user=Depends(current_user)):
+    note = db.get(HRNotification, note_id)
+    if not note or note.user_id != user.id:
+        raise HTTPException(404, "Notification not found")
+    if not note.read_at:
+        note.read_at = datetime.now(timezone.utc)
+        db.commit()
+    return _note_row(note)
+
+
+@router.post("/notifications/read-all")
+def read_all_notifications(db: Session = Depends(get_db), user=Depends(current_user)):
+    unread = db.scalars(select(HRNotification).where(
+        HRNotification.user_id == user.id, HRNotification.read_at.is_(None))).all()
+    stamp = datetime.now(timezone.utc)
+    for note in unread:
+        note.read_at = stamp
+    db.commit()
+    return {"marked": len(unread)}
+
+
+@router.post("/notifications/digest")
+def run_hr_digest(db: Session = Depends(get_db), actor=Depends(require("hr:write"))):
+    """Queue the daily digest once per recipient; a second run does not duplicate it."""
+    result = hr_notify.run_digest(db)
+    audit(db, actor.id, "hr.digest.run", "hr:digest",
+          {"queued": result["queued"], "counts": result["counts"]})
+    db.commit()
+    email = {"sent": False, "reason": "Nothing to report today."}
+    if result["notes"]:
+        email = hr_notify.email_note(db, result["notes"][0],
+                                     subject="Herbanova HR: daily digest")
+    return {"queued": result["queued"], "skipped": result["skipped"],
+            "counts": result["counts"], "rows": result["rows"], "email": email}
+
+
+@router.get("/announcements")
+def list_announcements(include_inactive: bool = False,
+                       limit: int = Query(20, ge=1, le=100),
+                       db: Session = Depends(get_db), user=Depends(current_user)):
+    can_write = is_admin(db, user) or "hr:write" in role_permissions(db, user)
+    query = select(Announcement)
+    if not (include_inactive and can_write):
+        query = query.where(Announcement.active.is_(True))
+    rows = db.scalars(query.order_by(Announcement.published_at.desc(),
+                                     Announcement.id.desc()).limit(limit)).all()
+    return [_announcement_row(a) for a in rows]
+
+
+@router.post("/announcements", status_code=201)
+def create_announcement(body: AnnouncementIn, db: Session = Depends(get_db),
+                        actor=Depends(require("hr:write"))):
+    row = Announcement(title=body.title.strip(), body=body.body.strip(), published_by=actor.id)
+    db.add(row)
+    db.flush()
+    people = db.scalars(select(User).where(User.is_active.is_(True),
+                                           User.employee_id.is_not(None))).all()
+    notes = hr_notify.notify(db, [u.id for u in people], "announcement",
+                             f"Announcement: {row.title}", row.body, "/ui#hr")
+    audit(db, actor.id, "hr.announcement.publish", f"announcement:{row.id}",
+          {"title": row.title, "recipients": len(notes)})
+    db.commit()
+    email = {"sent": False, "reason": "No linked users to notify."}
+    if notes:
+        email = hr_notify.email_note(db, notes[0])
+    return {**_announcement_row(row), "notified": len(notes), "email": email}
+
+
+@router.patch("/announcements/{announcement_id}")
+def patch_announcement(announcement_id: int, body: AnnouncementPatch,
+                       db: Session = Depends(get_db), actor=Depends(require("hr:write"))):
+    row = db.get(Announcement, announcement_id)
+    if not row:
+        raise HTTPException(404, "Announcement not found")
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, "Nothing to change")
+    for field, value in changes.items():
+        setattr(row, field, value.strip() if isinstance(value, str) else value)
+    audit(db, actor.id, "hr.announcement.update", f"announcement:{row.id}", changes)
+    db.commit()
+    return _announcement_row(row)

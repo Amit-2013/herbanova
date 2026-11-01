@@ -16,6 +16,7 @@ from ..models.hr import (Attendance, AttendanceCorrection, LeaveApplication, Lea
                          LeaveType, ODRequest, PayrollPeriod)
 from ..models.users import Employee
 from . import hr as hr_svc
+from . import hr_notify
 from .audit import audit
 
 
@@ -99,7 +100,11 @@ def decide_hr_request(db: Session, approval_id: int, body, user):
     ar.pending_approver_role = None
     audit(db, user.id, "approval.decide", f"approval:{ar.id}",
           {"type": ar.record_type, "decision": body.decision, "reason": ar.decision_reason})
+    notes = hr_notify.notify_decision(db, ar, body.decision == "approve", ar.decision_reason)
     db.commit()
+    if notes:
+        # The decision is already committed; a mail failure must not undo it.
+        hr_notify.email_note(db, notes[0], hr_notify.address_for(db, ar.requested_by))
     from ..api.approvals import _build
     return _build(db, [ar], user)[0]
 
