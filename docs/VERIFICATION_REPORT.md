@@ -465,10 +465,12 @@ for the next step rather than silently fixed:
    no production host is configured (audit assumption A-02), but the label is
    misleading for an operator. Changing it affects cookie and reset guards, so it
    was left for an explicit decision.
-2. **The module register still reports "15 of 15 modules working"** while
-   `docs/PROJECT_AUDIT.md` counts more modules and the audit found gaps. This is
-   the stale-register gap carried into Phase 3; it is a documentation/status
-   defect, not a runtime failure.
+2. **The module register reported "15 of 15 modules working"** while
+   `docs/PROJECT_AUDIT.md` counts more modules and the audit found gaps. This was
+   the stale-register gap carried into Phase 3. **Resolved:** MOD-17 (Accounts
+   reporting) and MOD-18 (Scheduled e-mail) were added to
+   `app/core/module_register.py`, so the card now reads "17 of 17" and the
+   register tests pass.
 3. **The "Approvals waiting" dashboard KPI shows 0 for a one-day range while the
    Approvals card shows 2.** The card states that the two approvals have no order
    date in the selected range, so the figures are consistent, but the KPI can be

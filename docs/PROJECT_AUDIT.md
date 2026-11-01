@@ -119,7 +119,7 @@ list. There is no `alerts` table, route or screen, and no acknowledgement state.
 | Dashboard activity feed | `GET /api/dashboard/activity` | Not referenced by the SPA; documented only in the metric register |
 | HR reports (12 keys) | `app/services/reports.py` | No HR report screen entry and no manual chapter |
 | Payslip PDF | `GET /api/hr/payroll/entries/{id}/slip` | No manual chapter |
-| Module register | `app/core/module_register.py` | 16 modules; does not include Accounts reporting or scheduled e-mails; asserts MOD-16 HR "Working" without the gaps in this audit |
+| Module register | `app/core/module_register.py` | 16 modules; does not include Accounts reporting or scheduled e-mails; asserts MOD-16 HR "Working" without the gaps in this audit. **Closed after this audit:** the register now has MOD-17 Accounts reporting and MOD-18 Scheduled e-mail, 17 counted modules. |
 
 ### 3.3 Stale or contradictory claims
 
