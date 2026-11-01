@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
+from ..core.downloads import safe_filename
 from ..core.rbac import current_user, is_admin, require, role_permissions
 from ..models.core import ApprovalRequest, AuditLog, User
 from ..models.hr import (Announcement, Attendance, AttendanceCorrection, AttendanceRule, Branch,
@@ -41,6 +42,7 @@ from ..services import hr_notify
 from ..services import hr_reports
 from ..services import payroll as payroll_svc
 from ..services.audit import audit
+from ..services.exports import safe_text
 from ..services.salary_slip import build_slip
 
 router = APIRouter(prefix="/api/hr", tags=["hr"])
@@ -704,7 +706,7 @@ def export_employees(response: Response, q: str | None = None, department: str |
                "esi_no"]
     writer.writerow(columns)
     for d in _employee_rows(db, list(emps), user):
-        writer.writerow([
+        writer.writerow([safe_text(v) for v in (
             d["code"], d["full_name"], d["department"] or "", d["designation"] or "",
             d["status"], d["joining_date"] or "", d["date_of_exit"] or "",
             managers.get(d["manager_id"], ""),
@@ -712,12 +714,15 @@ def export_employees(response: Response, q: str | None = None, department: str |
             d["branch_name"] or "", d["office_name"] or "",
             "yes" if d["attendance_required"] else "no",
             d["bank_account_no"] or "", d["bank_ifsc"] or "", d["pan"] or "",
-            d["uan"] or "", d["esi_no"] or ""])
+            d["uan"] or "", d["esi_no"] or "")])
     audit(db, user.id, "hr.employee.export", "employee:export", {"rows": len(emps)})
     db.commit()
-    return Response(content=out.getvalue(), media_type="text/csv; charset=utf-8", headers={
-        "Content-Disposition": 'attachment; filename="employees.csv"',
-        "Cache-Control": "no-store"})
+    # The BOM lets Excel read Hindi names and ₹ amounts as UTF-8. Formula-like
+    # text is prefixed with an apostrophe so a name cannot run in a spreadsheet.
+    return Response(content=("\ufeff" + out.getvalue()).encode("utf-8"),
+                    media_type="text/csv; charset=utf-8", headers={
+                        "Content-Disposition": 'attachment; filename="employees.csv"',
+                        "Cache-Control": "no-store"})
 
 
 # ------------------------------------------------- saved views and bulk import
@@ -766,6 +771,19 @@ IMPORT_COLUMNS = ["code", "full_name", "department", "designation", "phone", "em
                   "joining_date", "date_of_birth", "employment_type", "manager_code",
                   "branch_code", "office_code", "department_code", "bank_account_no",
                   "bank_ifsc", "pan", "uan", "esi_no"]
+# Columns the directory export adds but an import cannot set: they are derived,
+# display names, or catalogue lookups by name. Accepting them keeps an exported
+# file re-importable instead of rejecting it as an unknown format.
+EXPORT_ONLY_COLUMNS = ["status", "date_of_exit", "manager", "branch", "office",
+                       "attendance_required"]
+_ESCAPABLE = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _unescape(value: str) -> str:
+    """Undo the apostrophe the exporter puts in front of formula-like text."""
+    if value.startswith("'") and len(value) > 1 and value[1] in _ESCAPABLE:
+        return value[1:]
+    return value
 
 
 class ImportIn(BaseModel):
@@ -826,16 +844,40 @@ def import_employees(body: ImportIn, db: Session = Depends(get_db),
     """Validate a CSV; with commit=true create the valid rows and leave an undo record."""
     if len(body.csv_text) > 2_000_000:
         raise HTTPException(413, "The import file is too large (2 MB maximum)")
-    reader = csv.DictReader(io.StringIO(body.csv_text.lstrip("\ufeff")))
-    headers = [h.strip() for h in (reader.fieldnames or [])]
-    unknown = [h for h in headers if h and h not in IMPORT_COLUMNS]
+    text = body.csv_text.lstrip("\ufeff")
+    if not text.strip():
+        raise HTTPException(422, "The import file is empty")
+    if "\x00" in text:
+        raise HTTPException(422, "The import file is not a text CSV file")
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        headers = [h.strip() for h in (reader.fieldnames or [])]
+        reader.fieldnames = headers
+        records = list(reader)
+    except csv.Error as exc:
+        raise HTTPException(422, f"The file is not valid CSV: {exc}")
+    if not any(headers):
+        raise HTTPException(422, "The import file is empty")
+    repeated = sorted({h for h in headers if h and headers.count(h) > 1})
+    if repeated:
+        raise HTTPException(422, f"Repeated columns: {', '.join(repeated)}")
+    missing = [h for h in ("code", "full_name") if h not in headers]
+    if missing:
+        raise HTTPException(422, "Missing required columns: " + ", ".join(missing))
+    unknown = [h for h in headers if h and h not in IMPORT_COLUMNS
+               and h not in EXPORT_ONLY_COLUMNS]
     if unknown:
         raise HTTPException(422, f"Unknown columns: {', '.join(unknown[:5])}")
-    has_confidential = any((row.get(k) or "").strip() for row in reader
+    extra = next((row.get(None) for row in records if row.get(None)), None)
+    if extra is not None:
+        raise HTTPException(422, "A row has more values than the header")
+    if not any(any((v or "").strip() for v in row.values() if isinstance(v, str))
+               for row in records):
+        raise HTTPException(422, "The import file has a header but no employee rows")
+    has_confidential = any((row.get(k) or "").strip() for row in records
                            for k in ("bank_account_no", "bank_ifsc", "pan", "uan", "esi_no"))
     if has_confidential and not _can(db, actor, "hr:confidential", "hr:payroll_prepare"):
         raise HTTPException(403, "Confidential HR rights are required to import bank or ID data")
-    reader = csv.DictReader(io.StringIO(body.csv_text.lstrip("\ufeff")))
 
     existing_codes = {c for c in db.scalars(select(Employee.code)).all()}
     seen: set[str] = set()
@@ -844,7 +886,9 @@ def import_employees(body: ImportIn, db: Session = Depends(get_db),
     branches = {b.code: b.id for b in db.scalars(select(Branch)).all()}
     offices = {o.code: o.id for o in db.scalars(select(WorkLocation)).all()}
     departments = {d.code: d.id for d in db.scalars(select(Department)).all()}
-    for number, row in enumerate(reader, start=2):
+    for number, row in enumerate(records, start=2):
+        row = {key: _unescape(value) if isinstance(value, str) else value
+               for key, value in row.items() if key is not None}
         if not any((v or "").strip() for v in row.values() if isinstance(v, str)):
             continue
         data, row_errors = _parse_row(row, seen)
@@ -1033,7 +1077,10 @@ async def upload_photo(employee_id: int, file: UploadFile = File(...),
         with Image.open(io.BytesIO(data)) as image:
             image.verify()
             fmt = image.format
-    except UnidentifiedImageError:
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError,
+            ValueError):
+        # A file that is not an image, or one cut short mid-stream, must be a
+        # clear refusal rather than an unhandled error.
         raise HTTPException(422, "Upload a JPEG, PNG or WebP image")
     if fmt not in PHOTO_TYPES:
         raise HTTPException(422, "Upload a JPEG, PNG or WebP image")
@@ -3086,8 +3133,9 @@ def salary_slip(entry_id: int, db: Session = Depends(get_db),
     emp = db.get(Employee, entry.employee_id)
     period = db.get(PayrollPeriod, entry.period_id)
     body = build_slip(entry, emp, period)
+    code = safe_filename(emp.code, f"employee-{emp.id}")
     return Response(content=body, media_type="application/pdf", headers={
-        "Content-Disposition": f'attachment; filename="salary-slip-{emp.code}-{period.year}-{period.month:02d}.pdf"',
+        "Content-Disposition": f'attachment; filename="salary-slip-{code}-{period.year}-{period.month:02d}.pdf"',
         "Cache-Control": "no-store"})
 
 
@@ -3248,9 +3296,11 @@ def payroll_bank_file(period_id: int, format: Literal["csv", "json"] = "csv",
     narration = f"Salary {p.year}-{p.month:02d}"
     for row in rows:
         emp = row["employee"]
-        writer.writerow([emp.code, emp.full_name, emp.bank_name or "", emp.bank_ifsc or "",
-                         emp.bank_account_no or "", f"{Decimal(row['net']):.2f}", narration,
-                         f"PAY-{p.year}{p.month:02d}-{emp.code}"])
+        writer.writerow([safe_text(emp.code), safe_text(emp.full_name),
+                         safe_text(emp.bank_name or ""), safe_text(emp.bank_ifsc or ""),
+                         safe_text(emp.bank_account_no or ""),
+                         f"{Decimal(row['net']):.2f}", safe_text(narration),
+                         safe_text(f"PAY-{p.year}{p.month:02d}-{emp.code}")])
     return Response(content=out.getvalue(), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": f'attachment; filename="bank-file-{p.year}-{p.month:02d}.csv"',
         "Cache-Control": "no-store"})
@@ -3359,8 +3409,9 @@ def my_payslip(entry_id: int, db: Session = Depends(get_db), user=Depends(curren
     if period.status not in RELEASED_PAYROLL_STATUSES:
         raise HTTPException(409, "This payslip has not been released yet")
     body = build_slip(entry, emp, period)
+    code = safe_filename(emp.code, f"employee-{emp.id}")
     return Response(content=body, media_type="application/pdf", headers={
-        "Content-Disposition": f'attachment; filename="salary-slip-{emp.code}-{period.year}-{period.month:02d}.pdf"',
+        "Content-Disposition": f'attachment; filename="salary-slip-{code}-{period.year}-{period.month:02d}.pdf"',
         "Cache-Control": "no-store"})
 
 
@@ -3635,7 +3686,8 @@ def employee_letter(code: str, employee_id: int | None = None,
     audit(db, user.id, "hr.output.letter", f"employee:{emp.id}",
           {"template": template.code, "exit_date": str(exit_date) if exit_date else None})
     db.commit()
-    return _pdf_response(pdf, f"{template.code.lower()}-letter-{emp.code}.pdf")
+    return _pdf_response(pdf, f"{safe_filename(template.code.lower(), 'letter')}-letter-"
+                              f"{safe_filename(emp.code, f'employee-{emp.id}')}.pdf")
 
 
 @router.get("/outputs/id-card")
@@ -3655,7 +3707,7 @@ def employee_id_card(employee_id: int | None = None, db: Session = Depends(get_d
         photo_file=photo)
     audit(db, user.id, "hr.output.id_card", f"employee:{emp.id}", {"has_photo": bool(photo)})
     db.commit()
-    return _pdf_response(pdf, f"id-card-{emp.code}.pdf")
+    return _pdf_response(pdf, f"id-card-{safe_filename(emp.code, f'employee-{emp.id}')}.pdf")
 
 
 @router.get("/outputs/attendance-sheet")
@@ -3714,4 +3766,5 @@ def leave_statement(employee_id: int | None = None, year: int | None = None,
     audit(db, user.id, "hr.output.leave_statement", f"employee:{emp.id}",
           {"year": year, "applications": len(app_rows)})
     db.commit()
-    return _pdf_response(pdf, f"leave-statement-{emp.code}-{year}.pdf")
+    return _pdf_response(pdf, f"leave-statement-"
+                              f"{safe_filename(emp.code, f'employee-{emp.id}')}-{year}.pdf")

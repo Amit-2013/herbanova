@@ -28,6 +28,7 @@ from ..models.hr import (Attendance, Branch, Department, EmployeeDocument,
 from ..models.users import Employee
 from . import hr as hr_svc
 from . import pdf_fonts
+from .exports import safe_text
 
 CENT = Decimal("0.01")
 ONE_DP = Decimal("0.1")
@@ -430,8 +431,11 @@ def to_csv(report: dict) -> bytes:
     writer = csv.writer(out)
     writer.writerow([c["label"] for c in report["columns"]])
     for row in report["rows"]:
-        writer.writerow([row.get(c["key"], "") for c in report["columns"]])
-    return out.getvalue().encode("utf-8")
+        # Names and designations are typed by people: a leading "=" must stay text.
+        writer.writerow([safe_text(row.get(c["key"], "")) for c in report["columns"]])
+    # The same BOM the other exporters write, so Excel opens Hindi names and ₹
+    # amounts in the right encoding instead of guessing the local code page.
+    return ("\ufeff" + out.getvalue()).encode("utf-8")
 
 
 def _summary_line(report: dict) -> str:
