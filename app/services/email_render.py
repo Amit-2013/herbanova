@@ -270,6 +270,11 @@ def _attachments(attachments: list[dict], notes: list[str], as_of: str) -> str:
 def render(data: dict, attachments: list[dict], *, mode: str = "test",
            test_recipient: str | None = None, real_recipients: int = 0,
            owner: str = "", dashboard_url: str | None = None) -> dict:
+    if data.get("hr_pack"):
+        from . import hr_pack
+        return hr_pack.render(data, attachments, mode=mode, test_recipient=test_recipient,
+                              real_recipients=real_recipients, owner=owner,
+                              dashboard_url=dashboard_url)
     url = dashboard_url or f"{data['base_url']}/ui/"
     images: dict[str, bytes] = {}
     chart_blocks = []

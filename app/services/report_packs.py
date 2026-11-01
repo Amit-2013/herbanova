@@ -58,6 +58,9 @@ PACKS = {
     "custom": {"label": "Custom Report", "period": "month",
                "reports": [], "accounts": True,
                "frequency_hint": "Chosen reports on a chosen schedule"},
+    "hr": {"label": "HR Report Pack", "period": "month",
+           "reports": [], "accounts": False,
+           "frequency_hint": "Monthly to the MD and Administrator"},
 }
 
 
@@ -312,6 +315,9 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
           include_accounts: bool = True, custom_reports: list[str] | None = None,
           base_url: str | None = None, generated_at: datetime | None = None) -> dict:
     meta = pack_meta(pack_key)
+    if pack_key == "hr":
+        from . import hr_pack
+        return hr_pack.build(db, start, end, base_url=base_url, generated_at=generated_at)
     # The comparison windows are measured from the actual window, not recomputed
     # from its end date: a weekly pack must compare with the seven days before it.
     length = (end - start).days + 1
@@ -534,6 +540,9 @@ def _summary_rep(data: dict) -> dict:
 
 def build_attachments(db: Session, data: dict, pack_key: str) -> list[dict]:
     """PDF for reading and Excel for detail, inside the size budget."""
+    if data.get("hr_pack"):
+        from . import hr_pack
+        return hr_pack.build_attachments(db, data)
     if not data.get("include_attachments", True):
         return []
     period = _file_period(date.fromisoformat(data["from"]),
@@ -595,6 +604,9 @@ def build_attachments(db: Session, data: dict, pack_key: str) -> list[dict]:
 
 
 def subject(data: dict) -> str:
+    if data.get("hr_pack"):
+        from . import hr_pack
+        return hr_pack.subject_line(data)
     sales = next((k for k in data["kpis"] if k["key"] == "sales"), None)
     parts = ["HERBANOVA", data["label"], data["period_label"]]
     if sales and sales["available"]:
