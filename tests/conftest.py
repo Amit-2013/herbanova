@@ -88,7 +88,8 @@ def client():
         tokens = {}
         for name, role in (("admin", "admin"), ("sales", "sales"),
                            ("inventory", "inventory"), ("viewer", "viewer"),
-                           ("hr_manager", "hr_manager"), ("payroll", "payroll_officer")):
+                           ("hr_manager", "hr_manager"), ("payroll", "payroll_officer"),
+                           ("manager", "reporting_manager"), ("staff", "employee")):
             user = db.scalar(select(User).where(User.username == f"t_{name}"))
             if not user:
                 emp = Employee(code=f"T_{name}"[:30].upper(), full_name=f"Test {name}",

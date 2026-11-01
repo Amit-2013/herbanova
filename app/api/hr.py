@@ -65,18 +65,35 @@ def _self_employee(db: Session, user) -> Employee:
 
 
 def _employee_or_403(db: Session, user, employee_id: int | None) -> Employee:
-    """A self-service user may only name their own employee record."""
+    """A self-service user may only name their own record; a manager their team.
+
+    Scope comes from the reporting chain, not from the request body, and is
+    enforced for every route that accepts an employee_id.
+    """
     me = hr_svc.employee_for_user(db, user)
-    if _can(db, user, "hr:attendance_manage", "hr:write"):
-        emp = db.get(Employee, employee_id) if employee_id else me
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if employee_id:
+        if scope is not None and employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+        emp = db.get(Employee, employee_id)
         if not emp:
             raise HTTPException(404, "Employee not found")
         return emp
+    if scope is None:
+        if me:
+            return me
+        raise HTTPException(404, "Employee not found")
     if not me:
         raise HTTPException(409, "Your login is not linked to an employee record")
-    if employee_id and employee_id != me.id:
-        raise HTTPException(403, "You can only act on your own attendance and requests")
     return me
+
+
+def _refuse_confidential_write(db: Session, user, data: dict) -> None:
+    """Only confidential HR rights or payroll may set bank/ID values."""
+    if any(data.get(k) is not None for k in hr_svc.CONFIDENTIAL_EMPLOYEE_FIELDS) \
+            and not _can(db, user, "hr:confidential", "hr:payroll_prepare"):
+        raise HTTPException(403, "Confidential HR rights are required to change bank or ID "
+                                 "details")
 
 
 # --------------------------------------------------------------- schemas
@@ -97,6 +114,10 @@ class EmployeeIn(BaseModel):
     employment_type: str | None = Field(default=None, max_length=30)
     work_schedule: str | None = Field(default=None, max_length=80)
     date_of_exit: date | None = None
+    probation_end_date: date | None = None
+    confirmation_date: date | None = None
+    notice_period_days: int | None = Field(default=None, ge=0, le=365)
+    exit_reason: str | None = Field(default=None, max_length=200)
     address: str | None = Field(default=None, max_length=300)
     emergency_name: str | None = Field(default=None, max_length=120)
     emergency_phone: str | None = Field(default=None, max_length=40)
@@ -139,6 +160,10 @@ class EmployeePatch(BaseModel):
     employment_type: str | None = None
     work_schedule: str | None = None
     date_of_exit: date | None = None
+    probation_end_date: date | None = None
+    confirmation_date: date | None = None
+    notice_period_days: int | None = Field(default=None, ge=0, le=365)
+    exit_reason: str | None = Field(default=None, max_length=200)
     address: str | None = None
     emergency_name: str | None = None
     emergency_phone: str | None = None
@@ -163,18 +188,26 @@ class EmployeePatch(BaseModel):
 EMPLOYEE_FIELDS = ["id", "code", "full_name", "department", "designation", "phone", "email",
                    "joining_date", "manager_id", "status", "branch_id", "office_id",
                    "department_id", "shift_id", "hr_admin_id", "employment_type",
-                   "work_schedule", "date_of_exit", "address", "emergency_name",
+                   "work_schedule", "date_of_exit", "probation_end_date", "confirmation_date",
+                   "notice_period_days", "exit_reason", "address", "emergency_name",
                    "emergency_phone", "bank_name", "bank_account_no", "bank_ifsc", "pan",
                    "uan", "esi_no", "attendance_policy", "leave_policy"]
 
 
-def _employee_dict(db: Session, e: Employee) -> dict:
+def _employee_dict(db: Session, e: Employee, viewer=None) -> dict:
     d = {k: getattr(e, k) for k in EMPLOYEE_FIELDS}
     # The login link is stored on both sides; read the user side too so an
     # older one-way link still shows as linked and is never offered as free.
     user = (db.get(User, e.user_id) if e.user_id
             else db.scalar(select(User).where(User.employee_id == e.id)))
     d["user_id"] = user.id if user else None
+    # Bank and ID numbers leave the server masked unless the viewer holds the
+    # confidential right or is looking at their own record.
+    full = True if viewer is None else hr_svc.may_view_confidential(db, viewer, e)
+    d["confidential_visible"] = full
+    if not full:
+        for key in hr_svc.CONFIDENTIAL_EMPLOYEE_FIELDS:
+            d[key] = hr_svc.mask_secret(d.get(key))
     return d
 
 
@@ -201,6 +234,8 @@ def dashboard(day: date | None = None, db: Session = Depends(get_db),
     branch_rows = db.execute(
         select(Branch.name, func.count()).join(Employee, Employee.branch_id == Branch.id)
         .where(Employee.status == "active").group_by(Branch.name)).all()
+    # Payroll totals are salary data: only the confidential/payroll roles see them.
+    payroll_visible = _can(db, user, "hr:confidential", "hr:payroll_prepare")
     return {
         "date": day, "total_employees": total, "active_employees": active,
         "inactive_employees": total - active,
@@ -210,8 +245,9 @@ def dashboard(day: date | None = None, db: Session = Depends(get_db),
         "on_od_today": att.get("od", 0),
         "late_today": att.get("late", 0), "early_today": att.get("early_departure", 0),
         "pending_approvals": pending,
-        "payroll_status": period.status if period else None,
-        "salary_payable": _m(payable),
+        "payroll_visible": payroll_visible,
+        "payroll_status": period.status if (period and payroll_visible) else None,
+        "salary_payable": _m(payable) if payroll_visible else None,
         "by_department": [{"department": d or "Unassigned", "employees": n}
                           for d, n in dept_rows],
         "by_branch": [{"branch": b, "employees": n} for b, n in branch_rows],
@@ -224,8 +260,11 @@ def list_employees(response: Response, q: str | None = None, department: str | N
                    branch_id: int | None = None, status: str | None = None,
                    page: int | None = Query(None, ge=1),
                    page_size: int = Query(50, ge=1, le=200), db: Session = Depends(get_db),
-                   _=Depends(require("hr:read"))):
+                   user=Depends(require("hr:read"))):
     stmt = select(Employee)
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if scope is not None:
+        stmt = stmt.where(Employee.id.in_(scope or {-1}))
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(Employee.code.ilike(like) | Employee.full_name.ilike(like)
@@ -241,7 +280,7 @@ def list_employees(response: Response, q: str | None = None, department: str | N
     stmt = stmt.order_by(Employee.code)
     if page:
         stmt = stmt.limit(page_size).offset((page - 1) * page_size)
-    return [_employee_dict(db, e) for e in db.scalars(stmt).all()]
+    return [_employee_dict(db, e, user) for e in db.scalars(stmt).all()]
 
 
 @router.post("/employees", status_code=201)
@@ -250,6 +289,7 @@ def create_employee(body: EmployeeIn, db: Session = Depends(get_db),
     if body.manager_id and not db.get(Employee, body.manager_id):
         raise HTTPException(404, "Manager not found")
     data = body.model_dump()
+    _refuse_confidential_write(db, actor, data)
     if data.get("shift_id") is None:
         # New staff go on the general office shift, which is what the late /
         # early-departure calculation needs. An explicit choice still wins.
@@ -266,7 +306,7 @@ def create_employee(body: EmployeeIn, db: Session = Depends(get_db),
     audit(db, actor.id, "employee.create", f"employee:{e.id}",
           {"code": e.code, "full_name": e.full_name})
     db.commit()
-    return _employee_dict(db, e)
+    return _employee_dict(db, e, actor)
 
 
 @router.patch("/employees/{employee_id}")
@@ -276,6 +316,7 @@ def update_employee(employee_id: int, body: EmployeePatch, db: Session = Depends
     if not e:
         raise HTTPException(404, "Employee not found")
     data = body.model_dump(exclude_unset=True)
+    _refuse_confidential_write(db, actor, data)
     if data.get("status") not in (None, "active", "inactive"):
         raise HTTPException(422, "status must be active or inactive")
     if data.get("manager_id"):
@@ -286,14 +327,18 @@ def update_employee(employee_id: int, body: EmployeePatch, db: Session = Depends
     changed = {}
     for k, v in data.items():
         if getattr(e, k) != v:
-            changed[k] = {"old": str(getattr(e, k)) if getattr(e, k) is not None else None,
-                          "new": str(v) if v is not None else None}
+            old = getattr(e, k)
+            changed[k] = {
+                "old": hr_svc.mask_secret(old) if k in hr_svc.CONFIDENTIAL_EMPLOYEE_FIELDS
+                else (str(old) if old is not None else None),
+                "new": hr_svc.mask_secret(v) if k in hr_svc.CONFIDENTIAL_EMPLOYEE_FIELDS
+                else (str(v) if v is not None else None)}
             setattr(e, k, v)
     if changed:
         audit(db, actor.id, "employee.update", f"employee:{e.id}",
               {"code": e.code, **changed})
     db.commit()
-    return _employee_dict(db, e)
+    return _employee_dict(db, e, actor)
 
 
 @router.get("/employees/{employee_id}")
@@ -302,10 +347,10 @@ def get_employee(employee_id: int, db: Session = Depends(get_db),
     e = db.get(Employee, employee_id)
     if not e:
         raise HTTPException(404, "Employee not found")
-    me = hr_svc.employee_for_user(db, user)
-    if not _can(db, user, "hr:write") and (not me or me.id != e.id):
-        raise HTTPException(403, "You can only view your own profile")
-    return _employee_dict(db, e)
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if scope is not None and e.id not in scope:
+        raise HTTPException(403, "That employee is outside your team")
+    return _employee_dict(db, e, user)
 
 
 # --------------------------------------------------------------- config
@@ -566,23 +611,24 @@ def list_attendance(from_date: date | None = None, to_date: date | None = None,
                     employee_id: int | None = None, status: str | None = None,
                     department: str | None = None, db: Session = Depends(get_db),
                     user=Depends(current_user)):
-    # Team attendance needs hr:read; a staff member may still see their own day.
+    # Team attendance needs a manager/HR right; a staff member sees only their
+    # own days, and a manager only their reporting chain.
     perms = _perms(db, user)
     if not is_admin(db, user) and "hr:read" not in perms \
             and "hr:attendance_self" not in perms:
         raise HTTPException(403, "Your role cannot view attendance")
-    me = hr_svc.employee_for_user(db, user)
-    if not _can(db, user, "hr:attendance_manage"):
-        if not me:
-            raise HTTPException(403, "Your login is not linked to an employee record")
-        employee_id = me.id
+    scope = hr_svc.scoped_employee_ids(db, user)
     stmt = select(Attendance)
+    if scope is not None:
+        if employee_id and employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+        stmt = stmt.where(Attendance.employee_id.in_(scope or {-1}))
+    elif employee_id:
+        stmt = stmt.where(Attendance.employee_id == employee_id)
     if from_date:
         stmt = stmt.where(Attendance.date >= from_date)
     if to_date:
         stmt = stmt.where(Attendance.date <= to_date)
-    if employee_id:
-        stmt = stmt.where(Attendance.employee_id == employee_id)
     if status:
         stmt = stmt.where(Attendance.status == status)
     rows = db.scalars(stmt.order_by(Attendance.date.desc(), Attendance.employee_id)).all()
@@ -734,10 +780,10 @@ def list_corrections(status: str | None = None, db: Session = Depends(get_db),
     stmt = select(AttendanceCorrection)
     if status:
         stmt = stmt.where(AttendanceCorrection.status == status)
-    me = hr_svc.employee_for_user(db, user)
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if scope is not None:
+        stmt = stmt.where(AttendanceCorrection.employee_id.in_(scope or {-1}))
     rows = db.scalars(stmt.order_by(AttendanceCorrection.id.desc())).all()
-    if not _can(db, user, "hr:attendance_manage"):
-        rows = [r for r in rows if me and r.employee_id == me.id]
     emps = {e.id: e for e in db.scalars(select(Employee)).all()}
     return [{"id": r.id, "attendance_id": r.attendance_id, "employee": emps[r.employee_id].full_name if r.employee_id in emps else "?",
              "reason": r.reason, "status": r.status, "old_status": r.old_status,
@@ -811,14 +857,16 @@ def leave_balances(employee_id: int | None = None, year: int | None = None,
 @router.get("/leave/applications")
 def list_leave(status: str | None = None, employee_id: int | None = None,
                db: Session = Depends(get_db), user=Depends(require("hr:read"))):
-    me = hr_svc.employee_for_user(db, user)
-    if not _can(db, user, "hr:write", "hr:leave_approve"):
-        employee_id = me.id if me else -1
     stmt = select(LeaveApplication)
+    scope = hr_svc.scoped_employee_ids(db, user)
+    if scope is not None:
+        if employee_id and employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+        stmt = stmt.where(LeaveApplication.employee_id.in_(scope or {-1}))
+    elif employee_id:
+        stmt = stmt.where(LeaveApplication.employee_id == employee_id)
     if status:
         stmt = stmt.where(LeaveApplication.status == status)
-    if employee_id:
-        stmt = stmt.where(LeaveApplication.employee_id == employee_id)
     rows = db.scalars(stmt.order_by(LeaveApplication.id.desc())).all()
     emps = {e.id: e for e in db.scalars(select(Employee)).all()}
     types = {t.id: t for t in db.scalars(select(LeaveType)).all()}
@@ -923,14 +971,16 @@ class ODIn(BaseModel):
 @router.get("/od")
 def list_od(status: str | None = None, employee_id: int | None = None,
             db: Session = Depends(get_db), user=Depends(require("hr:read"))):
-    me = hr_svc.employee_for_user(db, user)
-    if not _can(db, user, "hr:write", "hr:leave_approve"):
-        employee_id = me.id if me else -1
+    scope = hr_svc.scoped_employee_ids(db, user)
     stmt = select(ODRequest)
+    if scope is not None:
+        if employee_id and employee_id not in scope:
+            raise HTTPException(403, "That employee is outside your team")
+        stmt = stmt.where(ODRequest.employee_id.in_(scope or {-1}))
+    elif employee_id:
+        stmt = stmt.where(ODRequest.employee_id == employee_id)
     if status:
         stmt = stmt.where(ODRequest.status == status)
-    if employee_id:
-        stmt = stmt.where(ODRequest.employee_id == employee_id)
     rows = db.scalars(stmt.order_by(ODRequest.id.desc())).all()
     emps = {e.id: e for e in db.scalars(select(Employee)).all()}
     return [{"id": r.id, "employee_id": r.employee_id,
@@ -1002,6 +1052,8 @@ def list_components(db: Session = Depends(get_db), _=Depends(require("hr:payroll
 @router.post("/salary/components", status_code=201)
 def create_component(body: ComponentIn, db: Session = Depends(get_db),
                      actor=Depends(require("hr:write"))):
+    if not _can(db, actor, "hr:confidential", "hr:payroll_prepare"):
+        raise HTTPException(403, "Confidential HR rights are required to change salary data")
     c = SalaryComponent(**body.model_dump())
     db.add(c)
     try:
@@ -1034,6 +1086,8 @@ def list_structures(employee_id: int | None = None, db: Session = Depends(get_db
 @router.post("/salary/structures", status_code=201)
 def create_structure(body: StructureIn, db: Session = Depends(get_db),
                      actor=Depends(require("hr:write"))):
+    if not _can(db, actor, "hr:confidential", "hr:payroll_prepare"):
+        raise HTTPException(403, "Confidential HR rights are required to change salary data")
     emp = db.get(Employee, body.employee_id)
     if not emp:
         raise HTTPException(404, "Employee not found")
