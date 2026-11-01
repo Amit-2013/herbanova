@@ -66,6 +66,12 @@ def _can(db: Session, user, *keys) -> bool:
     return is_admin(db, user) or any(k in p for k in keys)
 
 
+def _require_hr_view(db: Session, user) -> None:
+    """Team-wide readers and self-service staff. Every caller still scopes rows."""
+    if not _can(db, user, "hr:read", "hr:attendance_self"):
+        raise HTTPException(403, "Your role cannot view HR records")
+
+
 def _self_employee(db: Session, user) -> Employee:
     emp = hr_svc.employee_for_user(db, user)
     if not emp:
@@ -1965,7 +1971,8 @@ def _leave_type_dict(t: LeaveType) -> dict:
 
 
 @router.get("/leave/types")
-def leave_types(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
+def leave_types(db: Session = Depends(get_db), user=Depends(current_user)):
+    _require_hr_view(db, user)
     return [_leave_type_dict(t)
             for t in db.scalars(select(LeaveType).order_by(LeaveType.code)).all()]
 
@@ -2007,7 +2014,8 @@ def update_leave_type(type_id: int, body: LeaveTypePatch, db: Session = Depends(
 
 @router.get("/leave/balances")
 def leave_balances(employee_id: int | None = None, year: int | None = None,
-                   db: Session = Depends(get_db), user=Depends(require("hr:read"))):
+                   db: Session = Depends(get_db), user=Depends(current_user)):
+    _require_hr_view(db, user)
     emp = _employee_or_403(db, user, employee_id)
     year = year or date.today().year
     rows = []
@@ -2023,7 +2031,8 @@ def leave_balances(employee_id: int | None = None, year: int | None = None,
 
 @router.get("/leave/applications")
 def list_leave(status: str | None = None, employee_id: int | None = None,
-               db: Session = Depends(get_db), user=Depends(require("hr:read"))):
+               db: Session = Depends(get_db), user=Depends(current_user)):
+    _require_hr_view(db, user)
     stmt = select(LeaveApplication)
     scope = hr_svc.scoped_employee_ids(db, user)
     if scope is not None:
@@ -2304,7 +2313,8 @@ class ODIn(BaseModel):
 
 @router.get("/od")
 def list_od(status: str | None = None, employee_id: int | None = None,
-            db: Session = Depends(get_db), user=Depends(require("hr:read"))):
+            db: Session = Depends(get_db), user=Depends(current_user)):
+    _require_hr_view(db, user)
     scope = hr_svc.scoped_employee_ids(db, user)
     stmt = select(ODRequest)
     if scope is not None:
