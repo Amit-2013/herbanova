@@ -65,12 +65,20 @@ def run_payroll(db: Session, period) -> list[PayrollEntry]:
         present = Decimal(0)
         paid_leave = Decimal(0)
         for a in rows:
+            half_leave = a.leave_portion in ("first_half", "second_half")
             if a.status in PAID_STATUSES:
                 if a.status == "paid_leave":
-                    paid_leave += 1
+                    # A half-day application covers half the day; the other half
+                    # is counted as present, the same default used when a part of
+                    # the month has no attendance row.
+                    paid_leave += Decimal("0.5") if half_leave else 1
+                    if half_leave:
+                        present += Decimal("0.5")
                 else:
                     present += Decimal("0.5") if a.status == "half_day" else 1
             elif a.status == "half_day":
+                present += Decimal("0.5")
+            elif a.status == "unpaid_leave" and half_leave:
                 present += Decimal("0.5")
         if not rows:
             present = working_days

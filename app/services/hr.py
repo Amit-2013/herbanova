@@ -158,17 +158,37 @@ def get_or_create_attendance(db: Session, employee_id: int, day: date) -> Attend
     return row
 
 
+def leave_working_days(db: Session, employee: Employee, first: date,
+                       last: date) -> list[date]:
+    """Leave is counted in working days: weekly offs and holidays are skipped."""
+    offs = weekly_off_days(db, employee)
+    holidays = holidays_for(db, employee, first, last)
+    out, day = [], first
+    while day <= last:
+        if is_working_day(employee, offs, holidays, day):
+            out.append(day)
+        day += timedelta(days=1)
+    return out
+
+
 def apply_attendance_for_leave(db: Session, application: LeaveApplication,
-                               leave_type: LeaveType) -> None:
-    """Approved leave is reflected in attendance without duplicating the leave row."""
-    day = application.date_from
+                               leave_type: LeaveType, employee: Employee) -> None:
+    """Approved leave is reflected in attendance without duplicating the leave row.
+
+    Only working days are touched: a Friday-to-Monday application must not mark
+    the weekend as leave. A half-day application keeps the day's status and
+    records which half was leave.
+    """
     status = "paid_leave" if leave_type.kind == "paid" else "unpaid_leave"
-    while day <= application.date_to:
+    portion = getattr(application, "portion", None) or "full"
+    for day in leave_working_days(db, employee, application.date_from,
+                                  application.date_to):
         row = get_or_create_attendance(db, application.employee_id, day)
         if row.status != "od":
             row.status = status
-            row.remarks = f"Leave {leave_type.code} (application {application.id})"
-        day += timedelta(days=1)
+            row.leave_portion = None if portion == "full" else portion
+            row.remarks = f"Leave {leave_type.code} (application {application.id})" \
+                + ("" if portion == "full" else f", {portion.replace('_', ' ')}")
 
 
 def apply_attendance_for_od(db: Session, od) -> None:
