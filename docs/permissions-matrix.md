@@ -1,10 +1,10 @@
 # Permissions Matrix
 
 **Project:** Herbanova Business Control
-**Stage:** 3 — audit registers
-**Date:** 31 October 2026
+**Stage:** 3 — audit registers, refreshed after the Phase 3 verification
+**Date:** 31 October 2026; role grants and guard counts refreshed 1 November 2026
 **Sources:** `app/core/permissions.py` (`PERMISSIONS`, `BASELINE_ROLE_PERMS`), the live `roles` table (read-only query), `app/core/rbac.py`, and every `require(...)` / `require_admin(...)` / `is_admin(...)` call site under `app/api/`.
-**Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand.
+**Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand. The 1 November refresh adds `accounts:reports` and `email:manage` to the matrices and recounts the literal guards after the HR and Accounts reporting work.
 
 ## How permissions are enforced
 
@@ -26,7 +26,7 @@ Two endpoints add their own administrator checks rather than relying on `require
 
 | Role | Live permissions | Origin | Intended use |
 |---|---:|---|---|
-| `admin` | 42 | baseline + seeded | Administrator. Holds the entire catalogue, including `db:reset`, `user:manage`, `approval:credit_limit`, `invoice:edit_post_billing`, `hr:payroll_approve`. |
+| `admin` | 44 | baseline + seeded | Administrator. Holds the entire catalogue, including `db:reset`, `user:manage`, `approval:credit_limit`, `invoice:edit_post_billing`, `accounts:reports`, `email:manage` and `hr:payroll_approve`. |
 | `sales` | 15 | baseline | Sales desk: leads, sales orders, distributors, notes, challan/e-way, own attendance, read-only accounts. |
 | `inventory` | 12 | baseline | Stores and dispatch: products, stock, purchasing receipts, dispatch, invoice movement, own attendance. |
 | `viewer` | 4 | baseline | Read-only products, stock, sales; own attendance. |
@@ -37,7 +37,7 @@ Two endpoints add their own administrator checks rather than relying on `require
 
 The four **baseline** roles are the frozen parity sets in `app/core/permissions.py:66-110`. The four **live only** roles exist in the development database but not in the baseline constant; users assigned to them must carry a `role_id`, because the string fallback (`ROLE_PERMS.get(user.role, set())`) would otherwise return an empty set. Verified read-only against the `roles` table on 31 October 2026.
 
-The live Administrator set matches the 42-key catalogue exactly: no catalogue key is missing and no unknown key is present.
+The live Administrator set matches the 44-key catalogue exactly: no catalogue key is missing and no unknown key is present.
 
 ## Permission catalogue and role grants
 
@@ -126,6 +126,9 @@ The live Administrator set matches the 42-key catalogue exactly: no catalogue ke
 |---|---|---|---|---|---|---|---|---|
 | `accounts:read` | Y | Y |  |  |  |  |  |  |
 | `accounts:write` | Y |  |  |  |  |  |  |  |
+| `accounts:reports` | Y |  |  |  |  |  |  |  |
+
+`accounts:reports` gates the Accounts dashboard, the `report` and report-pack downloads and the Accounts e-mail block. It is granted only to the Administrator in the live data; `accounts:read` alone does not open them (verified live in `docs/VERIFICATION_REPORT.md` §5).
 
 ### Leads
 
@@ -140,6 +143,9 @@ The live Administrator set matches the 42-key catalogue exactly: no catalogue ke
 | Permission | admin | sales | inventory | viewer | employee | hr_manager | payroll_officer | reporting_manager |
 |---|---|---|---|---|---|---|---|---|
 | `report:export` | Y | Y |  |  |  |  |  |  |
+| `email:manage` | Y |  |  |  |  |  |  |  |
+
+`email:manage` gates recipient and schedule administration and the delivery log. The worker and the test-mode redirect do not depend on the browser. In the current configuration the scheduler is in test mode with no SMTP and no test recipient, so it cannot send to a real address (`docs/VERIFICATION_REPORT.md` §9).
 
 Report **viewing** is not governed by `report:export` alone: each report declares a viewing permission in the report catalogue (`app/services/reports.py`), and `GET /api/reports/{key}` checks it (`app/api/reports.py:83-85`). Export adds the `report:export` check. The catalogue permission per report is listed in `docs/FRONTEND_BACKEND_FIELD_MAPPING.md` §12.
 
@@ -161,37 +167,41 @@ Report **viewing** is not governed by `report:export` alone: each report declare
 
 ## Route groups by permission
 
-Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1 November 2026 after the Phase 2 dashboard routes.
+Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1 November 2026 after the HR upgrade, HR outputs and Accounts reporting. Routes that call `_can(...)` inside the handler (for example the bank file's `hr:confidential` check) are not double-counted here.
 
 | Permission | Routes guarded | Representative surface |
 |---|---:|---|
-| `hr:read` | 13 | HR dashboard, employee master, attendance reads, leave/OD reads, payroll reads |
-| `hr:write` | 11 | Employees, offices, branches, shifts, holidays, salary components/structures, policies |
-| `sales:read` | 11 | Sales orders, invoices, credit/debit notes, distributors, customers, invoice-line expiry history |
-| `user:manage` | 9 | Users, roles, secondary password, employee login link |
-| `hr:payroll_prepare` | 9 | Payroll runs, payslips, exports |
+| `hr:write` | 26 | Employees, HR configuration, leave balances, salary, locks, templates |
+| `hr:read` | 20 | HR dashboard, employee master, profile, attendance/leave reads, outputs |
+| `sales:read` | 12 | Sales orders, invoices, credit/debit notes, distributors, customers, expiry history |
+| `hr:payroll_prepare` | 12 | Payroll runs, register, bank file, statutory summary, payslips |
+| `user:manage` | 10 | Users, roles, secondary password, employee login link |
 | `accounts:read` | 7 | Outstanding, party ledgers, GST register, trial balance, receipts/payments reads |
-| `tax:read` / `note:write` / `hr:attendance_self` / `stock:read` | 6 each | Rate master and slabs; credit/debit notes; own check-in/out and requests; stock, warehouses, dashboard expiry drill-down |
-| `tax:write` / `print:document` / `lead:write` | 5 each | Settings and rates; PDFs; leads |
-| `stock:write` | 4 | Warehouses, POs, goods receipts |
-| `audit:read` | 4 | Audit trail and dashboard activity feed |
-| `supplier:read` / `sales:write` / `lead:read` | 3 each | Suppliers; sales orders; leads |
-| `supplier:write` / `product:write` / `product:read` / `invoice:write` / `invoice:cancel` / `hr:payroll_approve` / `employee:write` / `employee:read` / `distributor:write` / `approval:read` | 2 each | Respective masters and documents |
-| `user:manage` (no-arg form), `supplier:bank` | 1 each | Secondary password; bank-change request |
+| `note:write` / `stock:read` / `hr:attendance_self` / `tax:read` | 6 each | Notes; stock and warehouses; own check-in/out and requests; rate master and slabs |
+| `stock:write` / `lead:write` / `print:document` / `tax:write` | 5 each | Warehouses and POs; leads; PDFs; settings and rates |
+| `audit:read` | 4 | Audit trail and activity feed |
+| `lead:read` / `sales:write` / `supplier:read` | 3 each | Leads; sales orders; suppliers |
+| `accounts:reports` | 2 | Accounts dashboard and report export |
+| `email:manage` | 2 | Scheduled recipients/schedules and delivery administration |
+| `employee:read` / `employee:write` / `approval:read` / `invoice:write` / `invoice:cancel` / `hr:attendance_manage` / `hr:payroll_approve` / `hr:reports` / `distributor:write` / `product:read` / `product:write` / `supplier:write` | 2 each | Respective masters, approvals and HR actions |
+| `accounts:write` / `db:reset` / `credit:manage` / `hr:confidential` / `lead:assign` / `report:export` / `dispatch:write` / `approval:decide` / `supplier:bank` | 1 each | Receipts/payments; reset; credit limits; confidential reads (most use `_can` inside); reassignment; export; dispatch; decisions; bank-change request |
+
+The catalogue has **44** keys. `accounts:reports` and `email:manage` are Administrator-only in the live data; no baseline role carries them.
 
 ## Verification status
 
 | Claim | Status | Evidence |
 |---|---|---|
-| 42 permission keys are defined | VERIFIED | `PERMISSIONS` count, `app/core/permissions.py:15-59` |
-| Live Administrator set equals the catalogue | VERIFIED | read-only `roles` query, 31 Oct 2026 |
+| 44 permission keys are defined | VERIFIED | `PERMISSIONS` count, `app/core/permissions.py` |
+| Live Administrator set equals the catalogue | VERIFIED | read-only `roles` query, 1 November 2026 |
 | Role grants shown above match the live database | VERIFIED | same query; regenerated, not hand-typed |
-| `require` / `require_admin` / forced-password / revocation semantics | VERIFIED (code) | `app/core/rbac.py:27-98` |
-| Administrator-only approval decisions and segregation of duties | VERIFIED (code) | `app/api/approvals.py:177-253` |
-| `db:reset` requires the secondary password | VERIFIED (code) | `app/api/db_reset.py:113`; `app/api/admin.py:35-59` |
+| `require` / `require_admin` / forced-password / revocation semantics | VERIFIED (code) | `app/core/rbac.py` |
+| Administrator-only approval decisions and segregation of duties | VERIFIED (code) | `app/api/approvals.py` |
+| `db:reset` requires the secondary password | VERIFIED (code) | `app/api/db_reset.py`; `app/api/admin.py` |
 | Frozen role parity with the seeded roles | **VERIFIED** | `tests/test_roles_parity.py` — catalogue coverage, admin completeness, baseline subset, seeded-role equality and unknown-key rejection |
 | Authentication, permission denial, the Administrator role gate, immediate DB-role edits, baseline fallback, deactivation and forced password change | **VERIFIED** | `tests/test_authz.py` (7 tests) |
-| Every individual guarded route is exercised | **PARTIAL** | Decision paths are covered by `tests/test_approvals.py` and `tests/test_hr.py`; the new module covers the gate types, not every endpoint |
+| Live role matrix for HR, payroll, accounts reporting and the audit/user surfaces | **VERIFIED** | `docs/VERIFICATION_REPORT.md` §5: admin/admin2 `200`, HR manager `200` on HR and `403` on payroll/bank/audit/users, business roles `403` on HR |
+| Every individual guarded route is exercised | **PARTIAL** | Decision paths are covered by `tests/test_approvals.py`, `tests/test_hr.py` and the Phase 3 live GET sweep (75 routes); the gate-type tests are not repeated for every endpoint |
 
 ## Open items (recorded 31 October 2026)
 
