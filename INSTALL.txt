@@ -18,6 +18,8 @@ Requirements: Python 3.12 or 3.13, PostgreSQL 15+ (running on the server).
      python -m venv .venv
      .\.venv\Scripts\Activate.ps1
      python -m pip install -r requirements.txt
+   To run the test suite, install the test-only packages too:
+     python -m pip install -r requirements-dev.txt
 
 4. Create the database tables:
      python -m alembic upgrade head

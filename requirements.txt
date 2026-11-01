@@ -6,10 +6,14 @@ alembic
 pydantic>=2
 pydantic-settings
 argon2-cffi
+cryptography==50.0.2
 pyjwt
+python-multipart==0.0.33
 slowapi
 pytest
 httpx
 openpyxl
+pillow==13.0.0
 reportlab==5.0.1
+uharfbuzz==0.57.0
 sentry-sdk
