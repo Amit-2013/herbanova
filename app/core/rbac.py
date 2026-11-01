@@ -18,7 +18,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .permissions import BASELINE_ROLE_PERMS
+from .permissions import BASELINE_ROLE_PERMS, effective_permissions
 from .security import read_token_full
 
 # Backwards-compatible name: the frozen baseline sets (also used by seeding).
@@ -29,8 +29,8 @@ ALLOW_WHILE_MUST_CHANGE = {
 }
 
 
-def role_permissions(db: Session, user) -> set[str]:
-    """The user's effective permissions: database role first, baseline fallback."""
+def stored_role_permissions(db: Session, user) -> set[str]:
+    """The role's stored keys, before parent/child gating (used for display only)."""
     role = getattr(user, "role_rel", None)
     if role is None and getattr(user, "role_id", None):
         from ..models.users import Role
@@ -38,6 +38,15 @@ def role_permissions(db: Session, user) -> set[str]:
     if role is not None and role.permissions:
         return set(role.permissions)
     return set(ROLE_PERMS.get(user.role, set()))
+
+
+def role_permissions(db: Session, user) -> set[str]:
+    """The user's effective permissions: parent-gated database role first.
+
+    A child key stored without its parent is not returned, so every route gate,
+    the browser navigation and /api/auth/me see the same fail-closed set.
+    """
+    return effective_permissions(stored_role_permissions(db, user))
 
 
 def current_user(request: Request, db: Session = Depends(get_db)):

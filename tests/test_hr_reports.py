@@ -34,7 +34,7 @@ def _reporter_token(client):
         role = db.scalar(select(Role).where(Role.name == "hr_reporter"))
         if not role:
             role = Role(name="hr_reporter", display_name="HR report reader",
-                        permissions=["hr:reports"])
+                        permissions=["hr:read", "hr:reports"])
             db.add(role)
             db.flush()
         user = db.scalar(select(User).where(User.username == "t_reporter"))

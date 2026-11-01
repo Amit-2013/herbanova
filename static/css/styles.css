@@ -308,6 +308,8 @@ a.btn{display:inline-block;text-decoration:none}
 .permgroup .check{align-items:flex-start;white-space:normal;margin:6px 0}
 .permgroup .check span{display:block}
 .permgroup .check small{display:block;color:var(--mute);font-weight:400}
+.permgroup .check.child{margin-left:22px;border-left:2px solid var(--line);padding-left:10px}
+.permgroup .check input:disabled+span{opacity:.5}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;background:var(--wash);border-radius:4px;padding:1px 5px}
 .note code{background:#fff}
 @media (max-width:900px){.matrix{grid-template-columns:1fr}}

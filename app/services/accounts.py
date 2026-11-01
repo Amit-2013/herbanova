@@ -5,7 +5,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.permissions import PERMISSION_KEYS
+from ..core.permissions import (ADMIN_ONLY_PERMISSIONS, PERMISSION_KEYS,
+                                sanitized_permissions)
 from ..models.core import User
 from ..models.users import Role
 
@@ -34,11 +35,32 @@ def get_role(db: Session, ident) -> Role:
     return role
 
 
-def validate_permissions(perms) -> list[str]:
+def validate_permissions(perms, *, role_name: str | None = None) -> list[str]:
+    """Check, then apply the parent/child rules to a role's stored keys.
+
+    Unknown keys are refused. A child sent without its parent is dropped, which
+    is the server-side half of "unchecking a parent removes its children"; the
+    caller audits the dropped list. An Administrator-only key on any other role
+    is refused outright: silently dropping a money-deciding right would hide a
+    mistake in the caller.
+    """
     unknown = sorted(set(perms or []) - PERMISSION_KEYS)
     if unknown:
         raise HTTPException(422, f"Unknown permission(s): {', '.join(unknown)}")
-    return sorted(set(perms or []))
+    requested = set(perms or [])
+    if (role_name or "").strip().lower() != "admin":
+        forbidden = sorted(requested & ADMIN_ONLY_PERMISSIONS)
+        if forbidden:
+            raise HTTPException(
+                422, "Only the Administrator role can hold: " + ", ".join(forbidden))
+    kept, _dropped = sanitized_permissions(requested)
+    return kept
+
+
+def dropped_permissions(perms) -> list[str]:
+    """The children a permission list loses under the parent/child rules."""
+    _kept, dropped = sanitized_permissions(perms)
+    return dropped
 
 
 def active_user_manage_ids(db: Session) -> set[int]:
