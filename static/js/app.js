@@ -158,7 +158,7 @@ const drawerOpen = () => !$("#drawer").classList.contains("hide");
    screen whose API answers 403. A missing list (older server) means all on. */
 const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "stock",
                       suppliers: "suppliers", sales: "sales", billing: "sales",
-                      customers: "sales", distributors: "sales", geo: "sales",
+                      customers: "sales", geo: "sales",
                       approvals: "approvals", leads: "leads", lost: "leads",
                       followups: "leads", accounts: "accounts", tax: "tax",
                       reports: "reports", compare: "reports", hr: "hr", audit: "audit",
@@ -200,7 +200,6 @@ function enter(u) {
   showView("purchasing", can("stock:read"));
   showView("products", can("product:read"));
   showView("inventory", can("stock:read"));
-  showView("distributors", can("sales:read"));
   showView("geo", can("sales:read"));
   showView("roles", can("user:manage"));
   showView("scheduled", srAllowed());
@@ -362,7 +361,7 @@ async function loadMovements() {
 const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", purchasing: "Purchases",
                 suppliers: "Suppliers", tax: "Tax and discounts",
                 sales: "Sales orders", billing: "Billing", accounts: "Accounting & Finance",
-                approvals: "Approvals", distributors: "Distributors", customers: "Customers",
+                approvals: "Approvals", customers: "Customers and distributors",
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
                 roles: "Roles & Permissions", users: "Logins and employees", audit: "Audit trail",
@@ -374,11 +373,14 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
                    audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
                    products: "product:read", inventory: "stock:read", purchasing: "stock:read",
-                   distributors: "sales:read", sales: "sales:read", billing: "sales:read",
+                   sales: "sales:read", billing: "sales:read",
                    approvals: "approval:read",
                    hr: "hr:read", scheduled: "email:manage"};
 function route() {
-  const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
+  let [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
+  // Customers and distributors are one master. The older address still opens
+  // the screen, so dashboard drill-downs, links and bookmarks keep working.
+  if (v === "distributors") v = "customers";
   // Staff with only self-service attendance still reach the HR page for their own day.
   const allowed = featureOn(v) && (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
     || (v === "compare" && (can("sales:read") || can("stock:read")))
@@ -464,19 +466,6 @@ function renderHead() {
     }
   }
   if (v === "approvals") sub = `${state.approvals.filter(a => a.status === "pending").length} waiting for a decision. The person who raised an order cannot approve it.`;
-  if (v === "distributors") {
-    const active = state.dists.filter(d => d.status === "active").length;
-    const blocked = state.dists.filter(d => d.status === "blocked").length;
-    const incomplete = state.dists.filter(d => d.needs_completion).length;
-    sub = `${plural(state.dists.length, "distributor")}. Active: ${active}, Blocked: ${blocked}${incomplete ? `, needing details: ${incomplete}` : ""}. Credit in use counts orders awaiting approval, approved and dispatched.`;
-    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New distributor</button>`;
-    // The header is rebuilt on every render, so the chosen filter lives in
-    // state and is restored here; reading it from the DOM lost the choice and
-    // crashed on first load, when this screen's header is not the one shown.
-    const fopt = ["all", ...DIST_STATUSES, "incomplete"].map(v =>
-      `<option value="${v}"${state.distFilter === v ? " selected" : ""}>${v === "all" ? "All" : v === "incomplete" ? "Needs completion" : DSTAT[v][1]}</option>`).join("");
-    act += ` <select id="dists-filter" class="ghost" aria-label="Filter distributors by status">${fopt}</select>`;
-  }
   if (v === "leads") {
     const od = state.leads.filter(l => l.follow_up_state === "overdue").length, td = state.leads.filter(l => l.follow_up_state === "today").length;
     sub = `${od} overdue and ${td} due today across the team. Only a lead’s owner or an administrator can change it.`;
@@ -492,8 +481,11 @@ function renderHead() {
     if (can("lead:write")) act = `<button class="btn" data-act="new-lead" type="button">New lead</button>`;
   }
   if (v === "customers") {
-    sub = `${plural(state.dists.length, "customer")} in the distributor master. Open a record to see orders, invoices and outstanding.`;
-    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New customer</button>`;
+    const active = state.dists.filter(d => d.status === "active").length;
+    const blocked = state.dists.filter(d => d.status === "blocked").length;
+    const incomplete = state.dists.filter(d => d.needs_completion).length;
+    sub = `${plural(state.dists.length, "record")} in one customer and distributor master. Active: ${active}, Blocked: ${blocked}${incomplete ? `, needing details: ${incomplete}` : ""}. Credit in use counts orders awaiting approval, approved and dispatched.`;
+    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New customer or distributor</button>`;
   }
   if (v === "hr") {
     const d = state.hr.dashboard;
@@ -551,7 +543,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderApprovals(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -2475,13 +2467,41 @@ function renderFollowups() {
 function renderCustomers() {
   if (!$("#curows")) return;
   const q = ($("#cuq")?.value || "").trim().toLowerCase();
-  const list = state.dists.filter(d => !q || [d.code, d.name, d.gstin, d.territory].some(x => (x || "").toLowerCase().includes(q)));
-  $("#curows").innerHTML = list.map(d => `<tr><td class="strong">${esc(d.code)}</td><td>${esc(d.name)}</td>
-    <td>${esc(d.territory)}</td><td>${esc(d.gstin || "–")}</td><td class="n">${money(d.credit_limit)}</td>
-    <td class="n">${money(d.exposure)}</td><td>${distChip(d.status)}</td>
-    <td class="rowacts"><button class="btn ghost sm" type="button" data-act="edit-dist" data-id="${d.id}">Open</button>
-      <button class="btn ghost sm" type="button" data-act="new-so-dist" data-id="${d.id}">New order</button></td></tr>`).join("");
-  empty($("#cuempty"), !list.length, "No customer matches this search.", "Customers and distributors are one master; records are never deleted.");
+  const filter = state.distFilter;
+  const sel = $("#cuFilter");
+  if (sel && sel.value !== filter) sel.value = filter;
+  const list = state.dists.filter(d => {
+    const wanted = filter === "all" || (filter === "incomplete" ? d.needs_completion : d.status === filter);
+    if (!wanted) return false;
+    return !q || [d.code, d.name, d.gstin, d.territory].some(x => (x || "").toLowerCase().includes(q));
+  });
+  $("#curows").innerHTML = list.map(d => {
+    const lim = Number(d.credit_limit), use = Number(d.exposure);
+    const pct = lim > 0 ? Math.min(100, use / lim * 100) : (use > 0 ? 100 : 0);
+    const actions = [
+      can("distributor:write") ? `<button class="btn ghost sm" type="button" data-act="edit-dist" data-id="${d.id}">Open</button>` : "",
+      can("sales:write") ? `<button class="btn ghost sm" type="button" data-act="new-so-dist" data-id="${d.id}">New order</button>` : "",
+      can("credit:manage") ? `<button class="btn ghost sm" type="button" data-act="change-limit" data-id="${d.id}">Change limit</button>` : ""
+    ].filter(Boolean).join(" ");
+    return `<tr><td class="strong">${esc(d.code)}</td>
+      <td>${esc(d.name)}${d.needs_completion ? ` <span class="chip warn">Needs completion</span>` : ""}<small>${esc(d.territory)} · ${esc(d.gstin || "Unregistered")}</small></td>
+      <td class="n">${money(lim)}</td>
+      <td class="n">${money(use)}<div class="meter use"><i style="width:${pct.toFixed(0)}%"></i></div></td>
+      <td class="n">${money(d.available)}</td>
+      <td>${distChip(d.status)}</td>
+      <td class="rowacts">${actions}</td></tr>`;
+  }).join("");
+  const messages = {
+    incomplete: ["Every record has the details a tax document needs.", ""],
+    active: ["No active customer or distributor matches.", " Select “All” to see the blocked ones."],
+    blocked: ["No customer or distributor is blocked.", " Select “Active” to see the ones that are trading."],
+    draft: ["No record is still a draft.", " A draft record is kept out of new orders until it is made Active."],
+    "pending verification": ["Nothing is awaiting verification.", " A record in this state is kept out of new orders until it is made Active."],
+    inactive: ["No record is inactive.", " An inactive record is kept out of new orders until it is made Active."]
+  };
+  const [title, hint] = messages[filter] || ["No customer or distributor matches this search.",
+    can("distributor:write") ? " Select “New customer or distributor” to add the first one." : ""];
+  empty($("#cuempty"), !list.length, title, hint);
 }
 /* ---------- HR workspace ---------- */
 function hrSetRange(from, to) {
@@ -4524,9 +4544,9 @@ function renderApprovals() {
 }
 
 // One status vocabulary, shared with the API (COR-001). An unknown value must
-// never throw: renderDists runs before renderLeads and renderUsers, so a single
-// bad chip would blank every section after it. Every value the API can store is
-// listed here, so the form can offer them and the chip can name them.
+// never throw: one bad chip in the party master would blank every section
+// rendered after it. Every value the API can store is listed here, so the form
+// can offer them and the chip can name them.
 const DSTAT = {
   active: ["ok", "Active"],
   blocked: ["bad", "Blocked"],
@@ -4544,40 +4564,6 @@ function distChip(status) {
 function distGaps(d) {
   const gaps = (d.completion_missing || []).map(k => DSTAT_MISSING[k] || k);
   return gaps.length ? gaps.join(", ") : "none";
-}
-
-function renderDists() {
-  const filter = state.distFilter;
-  const showed = state.dists.filter(d => {
-    if (filter === "incomplete") return !!d.needs_completion;
-    if (DIST_STATUSES.includes(filter)) return d.status === filter;
-    return true;
-  });
-  $("#drows").innerHTML = showed.map(d => {
-    const lim = Number(d.credit_limit), use = Number(d.exposure);
-    const pct = lim > 0 ? Math.min(100, use / lim * 100) : (use > 0 ? 100 : 0);
-    const actions = [
-      can("distributor:write") ? `<button class="btn ghost sm" type="button" data-act="edit-dist" data-id="${d.id}">Edit</button>` : "",
-      can("credit:manage") ? `<button class="btn ghost sm" type="button" data-act="change-limit" data-id="${d.id}">Change limit</button>` : ""
-    ].join(" ");
-    return `<tr><td class="strong">${esc(d.code)}</td>
-      <td>${esc(d.name)}${d.needs_completion ? ` <span class="chip warn">Needs completion</span>` : ""}<small>${esc(d.territory)}</small></td>
-      <td class="n">${money(lim)}</td>
-      <td class="n">${money(use)}<div class="meter use"><i style="width:${pct.toFixed(0)}%"></i></div></td>
-      <td class="n">${money(d.available)}</td>
-      <td>${distChip(d.status)}</td>
-      <td>${actions}</td></tr>`;
-  }).join("");
-  const messages = {
-    incomplete: ["Every distributor has the details a tax document needs.", ""],
-    active: ["No active distributor matches.", " Select “All” to see the blocked ones."],
-    blocked: ["No distributor is blocked.", " Select “Active” to see the ones that are trading."],
-    draft: ["No distributor is still a draft.", " A draft record is kept out of new orders until it is made Active."],
-    "pending verification": ["Nothing is awaiting verification.", " A record in this state is kept out of new orders until it is made Active."],
-    inactive: ["No distributor is inactive.", " An inactive record is kept out of new orders until it is made Active."]
-  };
-  const [title, hint] = messages[filter] || ["No distributors yet.", can("distributor:write") ? " Select “New distributor” to add the first one." : ""];
-  empty($("#dempty"), !showed.length, title, hint);
 }
 
 /* --- new sales order --- */
@@ -6999,13 +6985,12 @@ $("#swh").addEventListener("change", renderStock);
 $("#sin").addEventListener("change", renderStock);
 $("#ltype").addEventListener("change", renderLedger);
 ["audAction", "audActor", "audFrom", "audTo"].forEach(id => $("#" + id).addEventListener("change", loadAudit));
-// The distributor filter is rebuilt with the header on every render, so it is
-// handled by delegation. Without this the choice did nothing until the screen
-// was reloaded, which is why the All/Active/Blocked filter looked broken.
+// The party master's status filter sits in the page toolbar, so it survives a
+// re-render; only the chosen value has to be kept in state.
 document.addEventListener("change", e => {
-  if (e.target.id !== "dists-filter") return;
+  if (e.target.id !== "cuFilter") return;
   state.distFilter = e.target.value;
-  renderDists();   // the header's own copy of the select keeps the chosen value
+  renderCustomers();
 });
 // The receipt drawer's warehouse choice shows the capacity it is going into.
 document.addEventListener("change", e => {

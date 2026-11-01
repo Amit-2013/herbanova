@@ -68,20 +68,19 @@ If you leave a shared machine, sign out. Closing the tab does not clear the cook
 
 ## 1.5 What you will see
 
-The sidebar has 20 entries. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
+The sidebar has 19 entries. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
 
 | Sidebar entry | Usually requires | What it is for |
 |---|---|---|
 | Overview | Any signed-in user | Counts and work queues drawn from the whole database |
 | Leads / Lost leads / Today's follow-ups | `lead:read` for the list; `lead:write` to work it | Enquiry pipeline |
-| Customers | `sales:read` (the entry is always listed; without it the list is empty) | Customer records linked to distributors |
+| Customers & distributors | `sales:read` (the entry is always listed; without it the list is empty) | The single buyer master: search, status filter, credit limit, exposure and exposure meter. `distributor:write`, `sales:write` and `credit:manage` add the Open, New order and Change limit buttons |
 | Sales orders | `sales:read`; `sales:write` to create | The order-to-dispatch workflow |
 | Billing | `sales:read` | Issued invoices, notes and movement details |
 | Purchases | `stock:read`; `stock:write` to create | Purchase orders and goods receipts |
 | Products | `product:read`; `product:write` to edit | Product master and tax fields |
 | Inventory | `stock:read` | Warehouses, batches, stock and movement ledger |
 | Suppliers | `supplier:read` | Supplier master and bank-change requests |
-| Distributors | `sales:read`; `distributor:write` to edit | Distributor master, credit limit and exposure |
 | Approvals | `approval:read` | Credit-limit, sales-order, post-billing and HR requests |
 | Accounting & Finance | `accounts:read` | Outstanding, party ledgers, GST register, trial balance |
 | Reports | Per-report permission; `report:export` to download | The single reports page |

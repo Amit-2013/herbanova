@@ -185,6 +185,14 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | R-95 | Administrator-only permissions remain restricted to Administrators | BRIEF (new) | `ADMIN_ONLY_PERMISSIONS`; locked editor inputs; `validate_permissions`; admin keep-check | `test_permission_tree.py`; `test_roles_parity.py` | MET |
 | R-96 | The same rules extend to future modules | BRIEF (new) | Catalogue/parent-map completeness tests; feature registration test | `test_permission_tree.py`, `test_feature_switches.py` | MET |
 
+### 4.10 Screen consolidation
+
+| ID | Requirement | Source | Implementation | Evidence | Status |
+|---|---|---|---|---|---|
+| R-97 | Customers and Distributors are one screen, not two lists of the same records | BRIEF (new) | `#/customers` → `v-customers` (`static/index.html`, `renderCustomers` in `app.js`); the old list and its duplicate `renderDists` are removed | Browser check 1 Nov 2026: 19 sidebar entries, 7 columns, one action set | MET |
+| R-98 | The merged screen keeps every capability of both pages: search, status filter, tax identity, credit figures, open, new order, change limit | BRIEF (new) | Toolbar search + status select; name cell shows territory and GSTIN; credit limit / in use with meter / available; actions gated by `distributor:write`, `sales:write`, `credit:manage` | Browser check as Administrator, `sales` and `viewer`; `#/distributors` alias opens the same view | MET |
+| R-99 | Existing links to the old address keep working | BRIEF (new) | `route()` maps `#/distributors` to the customers view | Browser check 1 Nov 2026: hash `#/distributors` renders the merged screen with the correct nav highlight | MET |
+
 ## 5. Gaps, blockers and open items
 
 | ID | Item | Effect | Owner / next step |

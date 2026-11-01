@@ -425,6 +425,7 @@ and captured after the data had loaded.
 | Roles & Permissions `#/roles` | captured, reviewed | — | — | — |
 | Logins and employees `#/users` | captured, reviewed | — | — | — |
 | Settings → Email and SMTP | captured, reviewed | — | — | — |
+| Customers & distributors `#/customers` | captured, reviewed | — | — | — |
 
 Findings from the visual review:
 
@@ -441,6 +442,25 @@ Findings from the visual review:
   missing button and the refusal agree.
 - Screenshots contain development demo records, so they were kept in the local
   scratch folder (`%TEMP%\hr_qa\p3`) and are **not committed** to the repository.
+
+### 10.1 Customers and distributors: merged screen (executed 1 November 2026)
+
+The Customers and Distributors pages were two tables over the same rows
+(`state.dists`). They are now one screen at `#/customers`, and `#/distributors`
+resolves to it in `route()`.
+
+| Check | Result |
+|---|---|
+| Sidebar | 19 entries; one **Customers & distributors** link; no separate **Distributors** link |
+| Table | 7 columns (Code, Customer / distributor, Credit limit, In use with meter, Available, Status, actions); 6 demo records |
+| Search | `MUMBAI` narrowed the list to `DEMO-DIST-02`; clearing restored all six |
+| Status filter | `blocked` showed only `DEMO-DIST-01`; `all` restored six |
+| Action gating (Administrator) | `Open`, `New order`, `Change limit` on every row; header button **New customer or distributor** |
+| Action gating (`sales`) | `Open` and `New order` only — the role holds `distributor:write` and `sales:write`, not `credit:manage` |
+| Action gating (`viewer`) | No row buttons and no header button; the list and the credit figures still render |
+| Drawers | `Open` shows **Edit DEMO-DIST-02** with the code read-only; `New order` opens a sales order with the clicked distributor selected |
+| Alias | `#/distributors` rendered the same screen, title **Customers and distributors**, with the customers nav item highlighted |
+| Layout | The table scrolls inside its container (849 px content in 709 px) with no page-level horizontal overflow |
 
 ---
 

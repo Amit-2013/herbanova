@@ -71,7 +71,7 @@
         <a class="nav" href="#/leads" data-v="leads" id="navLeads">Leads<span class="count hide" id="ldCount"></span></a>
         <a class="nav" href="#/lost" data-v="lost">Lost leads</a>
         <a class="nav" href="#/followups" data-v="followups">Today's follow-ups</a>
-        <a class="nav" href="#/customers" data-v="customers">Customers</a>
+        <a class="nav" href="#/customers" data-v="customers">Customers &amp; distributors</a>
         <a class="nav" href="#/sales" data-v="sales">Sales orders<span class="count hide" id="soCount"></span></a>
         <a class="nav hide" href="#/billing" data-v="billing" id="navBilling">Billing</a>
         <a class="nav" href="#/approvals" data-v="approvals">Approvals<span class="count hide" id="apCount"></span></a>
@@ -82,7 +82,6 @@
         <a class="nav" href="#/products" data-v="products">Products</a>
         <a class="nav" href="#/inventory" data-v="inventory">Inventory</a>
         <a class="nav hide" href="#/suppliers" data-v="suppliers" id="navSuppliers">Suppliers</a>
-        <a class="nav" href="#/distributors" data-v="distributors">Distributors</a>
       </div>
       <div class="nav-group">
         <p class="nav-grp">Finance and insight</p>
@@ -738,16 +737,6 @@
       </div>
     </section>
 
-    <!-- Distributors -->
-    <section id="v-distributors" class="view hide">
-      <div class="panel flush">
-        <div class="tw"><table>
-          <thead><tr><th>Code</th><th>Distributor</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th class="n">Available (₹)</th><th></th></tr></thead>
-          <tbody id="drows"></tbody>
-        </table></div>
-        <div class="empty hide" id="dempty"></div>
-      </div>
-    </section>
     <!-- Tax and discounts (Module Phase 3) -->
     <section id="v-tax" class="view hide">
       <div class="panel flush">
@@ -868,14 +857,25 @@
       </div>
     </section>
 
-    <!-- Customers (same master as distributors) -->
+    <!-- Customers and distributors: one master, one list.
+         A distributor is the buyer record; the old #/distributors address opens
+         this same screen so links and bookmarks keep working. -->
     <section id="v-customers" class="view hide">
       <div class="panel flush">
         <div class="toolbar">
-          <input id="cuq" type="search" placeholder="Search customer code, name, GSTIN or territory" aria-label="Search customers">
+          <input id="cuq" type="search" placeholder="Search code, name, GSTIN or territory" aria-label="Search customers and distributors">
+          <select id="cuFilter" aria-label="Filter by status">
+            <option value="all">All</option>
+            <option value="incomplete">Needs completion</option>
+            <option value="active">Active</option>
+            <option value="draft">Draft</option>
+            <option value="pending verification">Pending verification</option>
+            <option value="blocked">Blocked</option>
+            <option value="inactive">Inactive</option>
+          </select>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>Code</th><th>Customer</th><th>Territory</th><th>GSTIN</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Code</th><th>Customer / distributor</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th class="n">Available (₹)</th><th>Status</th><th></th></tr></thead>
           <tbody id="curows"></tbody>
         </table></div>
         <div class="empty hide" id="cuempty"></div>
