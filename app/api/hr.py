@@ -2349,6 +2349,11 @@ def create_od(body: ODIn, db: Session = Depends(get_db),
 
 
 # --------------------------------------------------------------- salary config
+STATUTORY_HEADS = (("pf", "Provident fund"), ("esi", "Employee state insurance"),
+                   ("pt", "Professional tax"), ("tds", "Tax deducted at source"))
+STATUTORY_HEAD_KEYS = tuple(key for key, _ in STATUTORY_HEADS)
+
+
 class ComponentIn(BaseModel):
     code: str = Field(min_length=1, max_length=20)
     name: str = Field(min_length=2, max_length=80)
@@ -2357,7 +2362,26 @@ class ComponentIn(BaseModel):
     default_rate: Decimal = Field(default=0, ge=0)
     taxable: bool = True
     statutory: bool = False
+    statutory_head: Literal[*STATUTORY_HEAD_KEYS] | None = None
     sort_order: int = 0
+
+    @model_validator(mode="after")
+    def head_needs_statutory(self):
+        if self.statutory_head and not self.statutory:
+            raise ValueError("a statutory head needs statutory = true")
+        return self
+
+
+class ComponentPatch(BaseModel):
+    """Only the fields sent are changed; sending statutory_head: null clears it."""
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    calc_type: Literal["fixed", "percent_basic", "percent_gross"] | None = None
+    default_rate: Decimal | None = Field(default=None, ge=0)
+    taxable: bool | None = None
+    statutory: bool | None = None
+    statutory_head: Literal[*STATUTORY_HEAD_KEYS] | None = None
+    active: bool | None = None
+    sort_order: int | None = None
 
 
 class StructureLineIn(BaseModel):
@@ -2377,8 +2401,45 @@ class StructureIn(BaseModel):
 def list_components(db: Session = Depends(get_db), _=Depends(require("hr:payroll_prepare"))):
     return [{"id": c.id, "code": c.code, "name": c.name, "kind": c.kind,
              "calc_type": c.calc_type, "default_rate": c.default_rate, "taxable": c.taxable,
-             "statutory": c.statutory, "active": c.active, "sort_order": c.sort_order}
+             "statutory": c.statutory, "statutory_head": c.statutory_head,
+             "active": c.active, "sort_order": c.sort_order}
             for c in db.scalars(select(SalaryComponent).order_by(SalaryComponent.sort_order)).all()]
+
+
+def _component_audit(c) -> dict:
+    return {"code": c.code, "name": c.name, "kind": c.kind, "calc_type": c.calc_type,
+            "default_rate": str(c.default_rate), "taxable": c.taxable,
+            "statutory": c.statutory, "statutory_head": c.statutory_head,
+            "active": c.active, "sort_order": c.sort_order}
+
+
+@router.patch("/salary/components/{component_id}")
+def update_component(component_id: int, body: ComponentPatch, db: Session = Depends(get_db),
+                     actor=Depends(require("hr:write"))):
+    """Change a payroll rule. Every field is optional; nothing is inferred.
+
+    The rate itself lives in default_rate (or on each structure line), so this
+    endpoint never invents a statutory percentage.
+    """
+    if not _can(db, actor, "hr:confidential", "hr:payroll_prepare"):
+        raise HTTPException(403, "Confidential HR rights are required to change salary data")
+    c = db.get(SalaryComponent, component_id)
+    if not c:
+        raise HTTPException(404, "Salary component not found")
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(422, "Nothing to change")
+    before = _component_audit(c)
+    for key, value in data.items():
+        setattr(c, key, value)
+    if c.statutory_head and not c.statutory:
+        raise HTTPException(422, "A statutory head needs statutory = true")
+    if c.kind == "earning" and c.statutory_head:
+        raise HTTPException(422, "Statutory heads apply to deductions only")
+    audit(db, actor.id, "hr.salary_component.update", f"component:{c.id}",
+          {"before": before, "after": _component_audit(c)})
+    db.commit()
+    return {"id": c.id, **_component_audit(c)}
 
 
 @router.post("/salary/components", status_code=201)
@@ -2386,6 +2447,8 @@ def create_component(body: ComponentIn, db: Session = Depends(get_db),
                      actor=Depends(require("hr:write"))):
     if not _can(db, actor, "hr:confidential", "hr:payroll_prepare"):
         raise HTTPException(403, "Confidential HR rights are required to change salary data")
+    if body.kind == "earning" and body.statutory_head:
+        raise HTTPException(422, "Statutory heads apply to deductions only")
     c = SalaryComponent(**body.model_dump())
     db.add(c)
     try:
@@ -2624,6 +2687,279 @@ def salary_slip(entry_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Payroll entry not found")
     emp = db.get(Employee, entry.employee_id)
     period = db.get(PayrollPeriod, entry.period_id)
+    body = build_slip(entry, emp, period)
+    return Response(content=body, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="salary-slip-{emp.code}-{period.year}-{period.month:02d}.pdf"',
+        "Cache-Control": "no-store"})
+
+
+# ------------------------------------------------------- statutory, bank, recon
+RELEASED_PAYROLL_STATUSES = ("processed", "paid")
+
+
+def _payroll_components(db: Session) -> dict[int, SalaryComponent]:
+    return {c.id: c for c in db.scalars(select(SalaryComponent)).all()}
+
+
+def _bank_rows(period, employees: dict[int, Employee]):
+    """Payable rows and skipped rows for the bank file.
+
+    A skipped reason names the missing field, never its value: the audit trail
+    and the preview must not contain account numbers.
+    """
+    rows, skipped = [], []
+    for entry in sorted(period.entries, key=lambda e: employees[e.employee_id].code
+                        if e.employee_id in employees else ""):
+        emp = employees.get(entry.employee_id)
+        if emp is None:
+            skipped.append({"entry_id": entry.id, "employee_code": "",
+                            "employee": "?", "reason": "Employee record is missing"})
+            continue
+        if Decimal(entry.net or 0) <= 0:
+            skipped.append({"entry_id": entry.id, "employee_code": emp.code,
+                            "employee": emp.full_name, "reason": "Net payable is zero"})
+        elif not emp.bank_account_no or not emp.bank_ifsc:
+            skipped.append({"entry_id": entry.id, "employee_code": emp.code,
+                            "employee": emp.full_name,
+                            "reason": "Bank account or IFSC is not recorded"})
+        else:
+            rows.append({"entry_id": entry.id, "employee": emp, "net": entry.net})
+    return rows, skipped
+
+
+def _payroll_check(key: str, label: str, report_value, source_label: str, source_value,
+                   unit: str = "amount") -> dict:
+    if unit == "amount":
+        ok = abs(Decimal(report_value or 0) - Decimal(source_value or 0)) < Decimal("0.005")
+        report_value, source_value = _m(report_value), _m(source_value)
+    else:
+        ok = report_value == source_value
+    return {"key": key, "label": label, "report_value": report_value,
+            "source_label": source_label, "source_value": source_value,
+            "unit": unit, "ok": bool(ok)}
+
+
+@router.get("/payroll/periods/{period_id}/statutory")
+def statutory_summary(period_id: int, db: Session = Depends(get_db),
+                      _=Depends(require("hr:payroll_prepare"))):
+    """PF / ESI / PT / TDS totals grouped by each component's configured head.
+
+    Nothing is computed here: a component's amount is whatever payroll put on
+    the entry line, and its head is whatever the Administrator configured. A
+    head with no component is returned as a gap, not as zero.
+    """
+    p = db.get(PayrollPeriod, period_id)
+    if not p:
+        raise HTTPException(404, "Payroll period not found")
+    comps = _payroll_components(db)
+    emps = {e.id: e for e in db.scalars(select(Employee)).all()}
+    grouped: dict[str, list[dict]] = {head: [] for head in STATUTORY_HEAD_KEYS}
+    unmapped: list[dict] = []
+    other: list[dict] = []
+    for entry in p.entries:
+        emp = emps.get(entry.employee_id)
+        for line in entry.lines:
+            if line.kind != "deduction":
+                continue
+            comp = comps.get(line.component_id) if line.component_id else None
+            row = {"entry_id": entry.id,
+                   "employee_code": emp.code if emp else "",
+                   "employee": emp.full_name if emp else "?",
+                   "component": comp.name if comp else line.name,
+                   "component_code": comp.code if comp else None,
+                   "amount": _m(line.amount)}
+            if comp is not None and comp.statutory and comp.statutory_head in grouped:
+                grouped[comp.statutory_head].append(row)
+            elif comp is not None and comp.statutory:
+                unmapped.append(row)
+            else:
+                other.append(row)
+
+    gaps: list[str] = []
+    heads = []
+    for head, label in STATUTORY_HEADS:
+        configured = [c for c in comps.values()
+                      if c.statutory and c.statutory_head == head and c.active]
+        inactive = [c for c in comps.values()
+                    if c.statutory and c.statutory_head == head and not c.active]
+        lines = grouped[head]
+        heads.append({"head": head, "label": label, "configured": bool(configured),
+                      "components": [c.code for c in configured],
+                      "amount": _m(sum((Decimal(l["amount"]) for l in lines), Decimal(0))),
+                      "employees": len({l["entry_id"] for l in lines}),
+                      "lines": lines})
+        if not configured:
+            gaps.append(f"No active salary component is configured as {label}"
+                        + ("; the existing one is inactive." if inactive
+                           else "; the summary cannot be produced."))
+    if unmapped:
+        codes = sorted({r["component_code"] for r in unmapped if r["component_code"]})
+        gaps.append("Statutory component(s) with no statutory head: "
+                    + ", ".join(codes) + ". Their amounts are excluded from every summary.")
+
+    def total(rows: list[dict]) -> str:
+        return _m(sum((Decimal(r["amount"]) for r in rows), Decimal(0)))
+
+    return {"period_id": p.id, "year": p.year, "month": p.month, "status": p.status,
+            "gross": _m(sum((e.gross for e in p.entries), Decimal(0))),
+            "deductions": _m(sum((e.deductions for e in p.entries), Decimal(0))),
+            "net": _m(sum((e.net for e in p.entries), Decimal(0))),
+            "heads": heads,
+            "unmapped_statutory": {"amount": total(unmapped), "lines": unmapped},
+            "other_deductions": {"amount": total(other), "lines": other},
+            "gaps": gaps}
+
+
+@router.get("/payroll/periods/{period_id}/bank-file")
+def payroll_bank_file(period_id: int, format: Literal["csv", "json"] = "csv",
+                      db: Session = Depends(get_db),
+                      user=Depends(require("hr:payroll_prepare"))):
+    """The salary upload file for the bank.
+
+    Full account numbers leave the server only through this endpoint, only to a
+    holder of hr:confidential, and only after the payroll has been approved.
+    The JSON preview masks them. Every generation is audited by row counts.
+    """
+    if not _can(db, user, "hr:confidential"):
+        raise HTTPException(403, "Confidential HR rights are required to export bank details")
+    p = db.get(PayrollPeriod, period_id)
+    if not p:
+        raise HTTPException(404, "Payroll period not found")
+    if p.status in ("draft", "under_review"):
+        raise HTTPException(409, "Approve the payroll before generating a bank file")
+    emps = {e.id: e for e in db.scalars(select(Employee)).all()}
+    rows, skipped = _bank_rows(p, emps)
+    total = sum((Decimal(r["net"] or 0) for r in rows), Decimal(0))
+    audit(db, user.id, "hr.payroll.bank_file", f"payroll:{p.id}",
+          {"year": p.year, "month": p.month, "rows": len(rows),
+           "skipped": len(skipped), "total": str(total), "format": format})
+    db.commit()
+    if format == "json":
+        return {"period_id": p.id, "year": p.year, "month": p.month,
+                "rows": [{"employee_code": r["employee"].code,
+                          "employee": r["employee"].full_name,
+                          "bank_name": r["employee"].bank_name,
+                          "ifsc": r["employee"].bank_ifsc,
+                          "account_masked": hr_svc.mask_secret(r["employee"].bank_account_no),
+                          "amount": _m(r["net"])} for r in rows],
+                "skipped": skipped, "total": _m(total), "count": len(rows)}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["employee_code", "beneficiary_name", "bank_name", "ifsc",
+                     "account_number", "amount", "narration", "reference"])
+    narration = f"Salary {p.year}-{p.month:02d}"
+    for row in rows:
+        emp = row["employee"]
+        writer.writerow([emp.code, emp.full_name, emp.bank_name or "", emp.bank_ifsc or "",
+                         emp.bank_account_no or "", f"{Decimal(row['net']):.2f}", narration,
+                         f"PAY-{p.year}{p.month:02d}-{emp.code}"])
+    return Response(content=out.getvalue(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="bank-file-{p.year}-{p.month:02d}.csv"',
+        "Cache-Control": "no-store"})
+
+
+@router.get("/payroll/periods/{period_id}/reconciliation")
+def payroll_reconciliation(period_id: int, db: Session = Depends(get_db),
+                           _=Depends(require("hr:payroll_prepare"))):
+    """Prove the register, the entry lines and the bank file agree."""
+    p = db.get(PayrollPeriod, period_id)
+    if not p:
+        raise HTTPException(404, "Payroll period not found")
+    comps = _payroll_components(db)
+    emps = {e.id: e for e in db.scalars(select(Employee)).all()}
+    gross = sum((Decimal(e.gross or 0) for e in p.entries), Decimal(0))
+    deductions = sum((Decimal(e.deductions or 0) for e in p.entries), Decimal(0))
+    net = sum((Decimal(e.net or 0) for e in p.entries), Decimal(0))
+    earning_lines = Decimal(0)
+    deduction_lines = Decimal(0)
+    by_head = {head: Decimal(0) for head in STATUTORY_HEAD_KEYS}
+    unmapped = Decimal(0)
+    other = Decimal(0)
+    for entry in p.entries:
+        for line in entry.lines:
+            amount = Decimal(line.amount or 0)
+            if line.kind == "earning":
+                earning_lines += amount
+                continue
+            deduction_lines += amount
+            comp = comps.get(line.component_id) if line.component_id else None
+            if comp is not None and comp.statutory and comp.statutory_head in by_head:
+                by_head[comp.statutory_head] += amount
+            elif comp is not None and comp.statutory:
+                unmapped += amount
+            else:
+                other += amount
+
+    rows, skipped = _bank_rows(p, emps)
+    by_entry = {e.id: e for e in p.entries}
+    bank_total = sum((Decimal(r["net"] or 0) for r in rows), Decimal(0))
+    held_total = sum((Decimal(by_entry[s["entry_id"]].net or 0) for s in skipped),
+                     Decimal(0))
+    checks = [
+        _payroll_check("entries", "Employee entries", len(p.entries),
+                       "Distinct employees on entry lines",
+                       len({e.employee_id for e in p.entries}), unit="records"),
+        _payroll_check("gross", "Gross earnings on the register", gross,
+                       "Sum of earning lines", earning_lines),
+        _payroll_check("deductions", "Deductions on the register", deductions,
+                       "Sum of deduction lines", deduction_lines),
+        _payroll_check("net", "Net payable on the register", net,
+                       "Gross minus deductions", gross - deductions),
+        _payroll_check("bank_file", "Net payable on the register", net,
+                       "Bank file plus amounts held back", bank_total + held_total),
+        _payroll_check("statutory", "Deductions on the register", deductions,
+                       "Statutory heads plus other deductions",
+                       sum(by_head.values(), Decimal(0)) + unmapped + other),
+    ]
+    gaps = []
+    if skipped:
+        gaps.append(f"{len(skipped)} employee(s) are held back from the bank file: "
+                    + ", ".join(f"{s['employee_code']} ({s['reason']})" for s in skipped))
+    unheaded = sorted(c.code for c in comps.values()
+                      if c.statutory and c.statutory_head is None)
+    if unheaded:
+        gaps.append("Statutory components with no statutory head: " + ", ".join(unheaded))
+    return {"period_id": p.id, "year": p.year, "month": p.month, "status": p.status,
+            "gross": _m(gross), "deductions": _m(deductions), "net": _m(net),
+            "checks": checks, "reconciled": all(c["ok"] for c in checks),
+            "heads": {h: _m(v) for h, v in by_head.items()},
+            "unmapped_statutory": _m(unmapped), "other_deductions": _m(other),
+            "bank_file": {"rows": len(rows), "skipped": len(skipped),
+                          "total": _m(bank_total), "held_back": _m(held_total)},
+            "gaps": gaps,
+            "accounts_note": "Payroll is not posted to an accounts ledger: the project has "
+                             "no expense or journal table (GAP-A01 and GAP-A08 in the "
+                             "Accounts module). The bank file total is the figure Accounts "
+                             "can match against the bank statement; no ledger balance "
+                             "exists to reconcile it to."}
+
+
+@router.get("/me/payslips")
+def my_payslips(db: Session = Depends(get_db), user=Depends(current_user)):
+    """Released payslips for the signed-in employee. Nobody else's are listed."""
+    emp = hr_svc.employee_for_user(db, user)
+    if not emp:
+        return []
+    rows = db.execute(
+        select(PayrollEntry, PayrollPeriod)
+        .join(PayrollPeriod, PayrollEntry.period_id == PayrollPeriod.id)
+        .where(PayrollEntry.employee_id == emp.id,
+               PayrollPeriod.status.in_(RELEASED_PAYROLL_STATUSES))
+        .order_by(PayrollPeriod.year.desc(), PayrollPeriod.month.desc())).all()
+    return [{"entry_id": e.id, "period_id": per.id, "year": per.year, "month": per.month,
+             "gross": _m(e.gross), "deductions": _m(e.deductions), "net": _m(e.net),
+             "status": e.status} for e, per in rows]
+
+
+@router.get("/me/payslips/{entry_id}")
+def my_payslip(entry_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    emp = _self_employee(db, user)
+    entry = db.get(PayrollEntry, entry_id)
+    if not entry or entry.employee_id != emp.id:
+        raise HTTPException(404, "Payslip not found")
+    period = db.get(PayrollPeriod, entry.period_id)
+    if period.status not in RELEASED_PAYROLL_STATUSES:
+        raise HTTPException(409, "This payslip has not been released yet")
     body = build_slip(entry, emp, period)
     return Response(content=body, media_type="application/pdf", headers={
         "Content-Disposition": f'attachment; filename="salary-slip-{emp.code}-{period.year}-{period.month:02d}.pdf"',
