@@ -12,7 +12,7 @@ permission change takes effect immediately on the next request.
 """
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, String, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..core.db import Base
@@ -53,6 +53,10 @@ class Employee(Base):
     employment_type: Mapped[str | None] = mapped_column(String(30))
     work_schedule: Mapped[str | None] = mapped_column(String(80))
     date_of_exit: Mapped[date | None] = mapped_column(Date)
+    probation_end_date: Mapped[date | None] = mapped_column(Date)
+    confirmation_date: Mapped[date | None] = mapped_column(Date)
+    notice_period_days: Mapped[int | None] = mapped_column(Integer)
+    exit_reason: Mapped[str | None] = mapped_column(String(200))
     photo_path: Mapped[str | None] = mapped_column(String(300))
     address: Mapped[str | None] = mapped_column(String(300))
     emergency_name: Mapped[str | None] = mapped_column(String(120))

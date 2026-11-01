@@ -10,7 +10,7 @@ from datetime import date as DateType  # the OD and attendance classes have a co
 from decimal import Decimal
 
 from sqlalchemy import (Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer,
-                        JSON, Numeric, String, Time, UniqueConstraint, func)
+                        JSON, Numeric, String, Text, Time, UniqueConstraint, func)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..core.db import Base
@@ -123,6 +123,7 @@ class Attendance(Base):
     late_minutes: Mapped[int] = mapped_column(Integer, default=0)
     early_minutes: Mapped[int] = mapped_column(Integer, default=0)
     worked_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    overtime_minutes: Mapped[int] = mapped_column(Integer, default=0)
     remarks: Mapped[str | None] = mapped_column(String(300))
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -164,6 +165,9 @@ class LeaveType(Base):
     requires_document: Mapped[bool] = mapped_column(Boolean, default=False)
     default_days: Mapped[Decimal] = mapped_column(Numeric(6, 1), default=0)
     carry_forward: Mapped[bool] = mapped_column(Boolean, default=False)
+    encashable: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_carry_forward: Mapped[Decimal] = mapped_column(Numeric(6, 1), default=0)
+    half_day_allowed: Mapped[bool] = mapped_column(Boolean, default=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -188,6 +192,8 @@ class LeaveApplication(Base):
         CheckConstraint("status IN ('pending','approved','rejected','cancelled')",
                         name="ck_hr_leave_status"),
         CheckConstraint("date_to >= date_from", name="ck_hr_leave_dates"),
+        CheckConstraint("portion IN ('full','first_half','second_half')",
+                        name="ck_hr_leave_portion"),
         Index("ix_hr_leave_applications_employee", "employee_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -196,6 +202,7 @@ class LeaveApplication(Base):
     date_from: Mapped[date] = mapped_column(Date)
     date_to: Mapped[date] = mapped_column(Date)
     days: Mapped[Decimal] = mapped_column(Numeric(6, 1))
+    portion: Mapped[str] = mapped_column(String(12), default="full")
     reason: Mapped[str] = mapped_column(String(300))
     document: Mapped[str | None] = mapped_column(String(300))
     status: Mapped[str] = mapped_column(String(20), default="pending")
@@ -264,6 +271,10 @@ class SalaryComponent(Base):
     default_rate: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=0)
     taxable: Mapped[bool] = mapped_column(Boolean, default=True)
     statutory: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Which statutory summary a component belongs to, when it is statutory:
+    # pf, esi, pt or tds. No rate is defined here; the rate lives in default_rate
+    # (or in the structure line) and is configured by the Administrator.
+    statutory_head: Mapped[str | None] = mapped_column(String(20))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -365,3 +376,147 @@ class PayrollCorrection(Base):
     decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------------------------------------------------- documents and assets
+class EmployeeDocument(Base):
+    """A paper or scan held for an employee. The number is confidential and is
+    masked in API responses unless the caller holds hr:confidential."""
+    __tablename__ = "hr_employee_documents"
+    __table_args__ = (
+        CheckConstraint("status IN ('active','expired','replaced')",
+                        name="ck_hr_document_status"),
+        Index("ix_hr_employee_documents_employee", "employee_id"),
+        Index("ix_hr_employee_documents_expiry", "expires_on"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    doc_type: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(120))
+    number: Mapped[str | None] = mapped_column(String(60))
+    issued_on: Mapped[date | None] = mapped_column(Date)
+    expires_on: Mapped[date | None] = mapped_column(Date)
+    file_path: Mapped[str | None] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 onupdate=func.now())
+
+
+class EmployeeAsset(Base):
+    __tablename__ = "hr_employee_assets"
+    __table_args__ = (Index("ix_hr_employee_assets_employee", "employee_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    asset_type: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(120))
+    serial_no: Mapped[str | None] = mapped_column(String(80))
+    issued_on: Mapped[date] = mapped_column(Date)
+    returned_on: Mapped[date | None] = mapped_column(Date)
+    condition_note: Mapped[str | None] = mapped_column(String(200))
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --------------------------------------------------------------- notifications
+class HRNotification(Base):
+    __tablename__ = "hr_notifications"
+    __table_args__ = (
+        Index("ix_hr_notifications_user", "user_id"),
+        Index("ix_hr_notifications_read", "read_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(30))
+    title: Mapped[str] = mapped_column(String(160))
+    body: Mapped[str] = mapped_column(String(500))
+    link: Mapped[str | None] = mapped_column(String(200))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Announcement(Base):
+    __tablename__ = "hr_announcements"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(160))
+    body: Mapped[str] = mapped_column(String(1000))
+    published_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+# ------------------------------------------------------------ letters, locks
+class LetterTemplate(Base):
+    __tablename__ = "hr_letter_templates"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_hr_letter_template_code"),
+        CheckConstraint("kind IN ('offer','appointment','experience','relieving')",
+                        name="ck_hr_letter_kind"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(30))
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(20))
+    # Placeholders: {employee_name} {code} {designation} {department} {joining_date}
+    # {exit_date} {company_name} {company_address} {today}
+    body: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 onupdate=func.now())
+
+
+class PeriodLock(Base):
+    """One lock per scope and month. Unlocking keeps the row and records who
+    unlocked it and why; re-locking updates the same row."""
+    __tablename__ = "hr_period_locks"
+    __table_args__ = (
+        UniqueConstraint("scope", "year", "month", name="uq_hr_period_lock"),
+        CheckConstraint("scope IN ('attendance','payroll')", name="ck_hr_period_lock_scope"),
+        CheckConstraint("month BETWEEN 1 AND 12", name="ck_hr_period_lock_month"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(12))
+    year: Mapped[int] = mapped_column(Integer)
+    month: Mapped[int] = mapped_column(Integer)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    locked_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reason: Mapped[str] = mapped_column(String(300))
+    unlocked_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unlock_reason: Mapped[str | None] = mapped_column(String(300))
+
+
+# -------------------------------------------------------- saved views, imports
+class SavedFilter(Base):
+    __tablename__ = "hr_saved_filters"
+    __table_args__ = (UniqueConstraint("user_id", "view", "name", name="uq_hr_saved_filter"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    view: Mapped[str] = mapped_column(String(30))
+    name: Mapped[str] = mapped_column(String(60))
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ImportBatch(Base):
+    __tablename__ = "hr_import_batches"
+    __table_args__ = (
+        CheckConstraint("status IN ('committed','undone')", name="ck_hr_import_status"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default="employee")
+    filename: Mapped[str] = mapped_column(String(200))
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    created_rows: Mapped[int] = mapped_column(Integer, default=0)
+    error_rows: Mapped[int] = mapped_column(Integer, default=0)
+    created_ids: Mapped[list] = mapped_column(JSON, default=list)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="committed")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    undone_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
