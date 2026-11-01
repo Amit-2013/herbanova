@@ -266,7 +266,10 @@ def test_hr_decision_flag_follows_the_permission(client, world):
         "code": f"SL{uuid4().hex[:3].upper()}", "name": "Sick leave (flag test)",
         "kind": "paid", "default_days": "10"})
     assert created.status_code == 201, created.text
+    # Leave is counted in working days, so pick a weekday rather than a weekend.
     start = date.today() + timedelta(days=20)
+    while start.weekday() >= 5:
+        start += timedelta(days=1)
 
     hr = client.as_user("hr_manager")
     applied = hr.post("/api/hr/leave/applications", json={

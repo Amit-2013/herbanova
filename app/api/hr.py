@@ -1576,7 +1576,7 @@ def list_attendance(from_date: date | None = None, to_date: date | None = None,
              "office_id": r.office_id, "source": r.source, "geofence_result": r.geofence_result,
              "late_minutes": r.late_minutes, "early_minutes": r.early_minutes,
              "worked_minutes": r.worked_minutes, "overtime_minutes": r.overtime_minutes,
-             "remarks": r.remarks} for r in rows]
+             "leave_portion": r.leave_portion, "remarks": r.remarks} for r in rows]
 
 
 @router.get("/attendance/monthly")
@@ -1646,7 +1646,11 @@ def monthly_attendance(year: int, month: int, employee_id: int | None = None,
                 counts["present_days"] += 0.5
                 counts["half_days"] += 1
             elif status in ("paid_leave", "unpaid_leave"):
-                counts["leave_days"] += 1
+                if row.leave_portion in ("first_half", "second_half"):
+                    counts["leave_days"] += 0.5
+                    counts["present_days"] += 0.5
+                else:
+                    counts["leave_days"] += 1
             elif status == "od":
                 counts["od_days"] += 1
             elif status == "absent":
@@ -1662,6 +1666,7 @@ def monthly_attendance(year: int, month: int, employee_id: int | None = None,
             counts["overtime_minutes"] += row.overtime_minutes or 0
             counts["worked_minutes"] += row.worked_minutes or 0
             calendar.append({"date": day, "status": status,
+                             "leave_portion": row.leave_portion,
                              "check_in": row.check_in, "check_out": row.check_out,
                              "worked_minutes": row.worked_minutes,
                              "overtime_minutes": row.overtime_minutes,
@@ -1905,14 +1910,29 @@ class LeaveTypeIn(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     kind: Literal["paid", "unpaid"] = "paid"
     requires_document: bool = False
-    default_days: Decimal = Field(default=0, ge=0)
+    default_days: Decimal = Field(default=Decimal(0), ge=0)
     carry_forward: bool = False
+    encashable: bool = False
+    max_carry_forward: Decimal = Field(default=Decimal(0), ge=0)
+    half_day_allowed: bool = True
+
+
+class LeaveTypePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    requires_document: bool | None = None
+    default_days: Decimal | None = Field(default=None, ge=0)
+    carry_forward: bool | None = None
+    encashable: bool | None = None
+    max_carry_forward: Decimal | None = Field(default=None, ge=0)
+    half_day_allowed: bool | None = None
+    active: bool | None = None
 
 
 class LeaveIn(BaseModel):
     leave_type_id: int
     date_from: date
     date_to: date
+    portion: Literal["full", "first_half", "second_half"] = "full"
     reason: str = Field(min_length=3, max_length=300)
     document: str | None = Field(default=None, max_length=300)
     employee_id: int | None = None
@@ -1921,14 +1941,30 @@ class LeaveIn(BaseModel):
     def dates(self):
         if self.date_to < self.date_from:
             raise ValueError("end date cannot be before start date")
+        if self.portion != "full" and self.date_from != self.date_to:
+            raise ValueError("a half-day application must be for a single date")
+        if (self.date_to - self.date_from).days > 90:
+            raise ValueError("a single application cannot exceed 90 days")
         return self
+
+
+def _leave_type_audit(t: LeaveType) -> dict:
+    # The audit column is JSON; Decimals are stored as strings, as money is.
+    return {k: (str(v) if isinstance(v, Decimal) else v)
+            for k, v in _leave_type_dict(t).items()}
+
+
+def _leave_type_dict(t: LeaveType) -> dict:
+    return {"id": t.id, "code": t.code, "name": t.name, "kind": t.kind,
+            "requires_document": t.requires_document, "default_days": t.default_days,
+            "carry_forward": t.carry_forward, "encashable": t.encashable,
+            "max_carry_forward": t.max_carry_forward,
+            "half_day_allowed": t.half_day_allowed, "active": t.active}
 
 
 @router.get("/leave/types")
 def leave_types(db: Session = Depends(get_db), _=Depends(require("hr:read"))):
-    return [{"id": t.id, "code": t.code, "name": t.name, "kind": t.kind,
-             "requires_document": t.requires_document, "default_days": t.default_days,
-             "carry_forward": t.carry_forward, "active": t.active}
+    return [_leave_type_dict(t)
             for t in db.scalars(select(LeaveType).order_by(LeaveType.code)).all()]
 
 
@@ -1944,6 +1980,27 @@ def create_leave_type(body: LeaveTypeIn, db: Session = Depends(get_db),
     audit(db, actor.id, "hr.leave_type.create", f"leave_type:{t.id}", {"code": t.code})
     db.commit()
     return {"id": t.id, "code": t.code, "name": t.name}
+
+
+@router.patch("/leave/types/{type_id}")
+def update_leave_type(type_id: int, body: LeaveTypePatch, db: Session = Depends(get_db),
+                      actor=Depends(require("hr:write"))):
+    """The Administrator's leave rules: carry-forward cap, encashment, half days."""
+    t = db.get(LeaveType, type_id)
+    if not t:
+        raise HTTPException(404, "Leave type not found")
+    before = _leave_type_audit(t)
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(422, "No changes were supplied")
+    if changes.get("max_carry_forward") is not None and not (changes.get("carry_forward", t.carry_forward)):
+        raise HTTPException(422, "A carry-forward cap needs carry_forward enabled")
+    for key, value in changes.items():
+        setattr(t, key, value)
+    audit(db, actor.id, "hr.leave_type.update", f"leave_type:{t.id}",
+          {"code": t.code, "before": before, "after": _leave_type_audit(t)})
+    db.commit()
+    return _leave_type_dict(t)
 
 
 @router.get("/leave/balances")
@@ -1982,9 +2039,11 @@ def list_leave(status: str | None = None, employee_id: int | None = None,
              "employee": emps[r.employee_id].full_name if r.employee_id in emps else "?",
              "employee_code": emps[r.employee_id].code if r.employee_id in emps else "",
              "leave_type": types[r.leave_type_id].name if r.leave_type_id in types else "?",
+             "leave_type_code": types[r.leave_type_id].code if r.leave_type_id in types else "",
              "date_from": r.date_from, "date_to": r.date_to, "days": r.days,
-             "reason": r.reason, "status": r.status, "remarks": r.remarks,
-             "created_at": r.created_at, "decided_at": r.decided_at} for r in rows]
+             "portion": r.portion, "reason": r.reason, "status": r.status,
+             "remarks": r.remarks, "created_at": r.created_at,
+             "decided_at": r.decided_at} for r in rows]
 
 
 @router.post("/leave/applications", status_code=201)
@@ -1996,7 +2055,15 @@ def apply_leave(body: LeaveIn, db: Session = Depends(get_db),
         raise HTTPException(404, "Leave type not found")
     if lt.requires_document and not body.document:
         raise HTTPException(422, "This leave type needs a supporting document")
-    days = Decimal((body.date_to - body.date_from).days + 1)
+    if body.date_from.year != body.date_to.year:
+        raise HTTPException(422, "A leave application must stay within one calendar year; "
+                                 "balances are kept per year")
+    if body.portion != "full" and not lt.half_day_allowed:
+        raise HTTPException(422, f"{lt.code} does not allow half days")
+    working = hr_svc.leave_working_days(db, emp, body.date_from, body.date_to)
+    if not working:
+        raise HTTPException(422, "The selected dates contain no working days")
+    days = Decimal(len(working)) if body.portion == "full" else Decimal("0.5")
     overlap = db.scalar(select(LeaveApplication).where(
         LeaveApplication.employee_id == emp.id,
         LeaveApplication.status.in_(("pending", "approved")),
@@ -2005,11 +2072,12 @@ def apply_leave(body: LeaveIn, db: Session = Depends(get_db),
     if overlap:
         raise HTTPException(409, "This leave overlaps an existing application")
     bal = hr_svc.leave_balance(db, emp.id, lt.id, body.date_from.year)
-    if lt.kind == "paid" and bal.entitled + bal.carried - bal.used - bal.pending < days:
-        raise HTTPException(422, f"Only {bal.entitled + bal.carried - bal.used - bal.pending} "
-                                 f"day(s) of {lt.code} are available")
+    balance_before = bal.entitled + bal.carried - bal.used - bal.pending
+    if lt.kind == "paid" and balance_before < days:
+        raise HTTPException(422, f"Only {balance_before} day(s) of {lt.code} are available")
     app = LeaveApplication(employee_id=emp.id, leave_type_id=lt.id, date_from=body.date_from,
-                           date_to=body.date_to, days=days, reason=body.reason.strip(),
+                           date_to=body.date_to, days=days, portion=body.portion,
+                           reason=body.reason.strip(),
                            document=body.document, created_by=user.id)
     db.add(app)
     db.flush()
@@ -2017,15 +2085,19 @@ def apply_leave(body: LeaveIn, db: Session = Depends(get_db),
     hr_svc.request_approval(
         db, record_type="hr_leave", record_id=app.id, requested_by=user.id,
         reasons=["leave"], detail={"employee_id": emp.id, "leave_type": lt.code,
-                                   "days": str(days), "reason": app.reason},
+                                   "days": str(days), "portion": body.portion,
+                                   "reason": app.reason},
         document_number=f"LV-{app.id:05d}",
         subject=f"{emp.full_name}: {lt.name}",
         requested_dates=f"{body.date_from} to {body.date_to}",
         approver_role="reporting_manager")
     audit(db, user.id, "hr.leave.apply", f"leave:{app.id}",
-          {"employee": emp.code, "leave_type": lt.code, "days": str(days)})
+          {"employee": emp.code, "leave_type": lt.code, "days": str(days),
+           "portion": body.portion, "working_days": [str(d) for d in working]})
     db.commit()
-    return {"id": app.id, "status": app.status, "days": app.days}
+    return {"id": app.id, "status": app.status, "days": app.days,
+            "portion": app.portion, "balance_before": balance_before,
+            "balance_after": balance_before - days}
 
 
 @router.post("/leave/applications/{application_id}/cancel")
@@ -2051,6 +2123,158 @@ def cancel_leave(application_id: int, db: Session = Depends(get_db),
     audit(db, user.id, "hr.leave.cancel", f"leave:{app.id}", {"employee_id": app.employee_id})
     db.commit()
     return {"id": app.id, "status": app.status}
+
+
+class BalanceAdjustIn(BaseModel):
+    employee_id: int
+    leave_type_id: int
+    year: int = Field(ge=2000, le=2100)
+    entitled: Decimal | None = Field(default=None, ge=0, le=365)
+    used: Decimal | None = Field(default=None, ge=0, le=365)
+    carried: Decimal | None = Field(default=None, ge=0, le=365)
+    reason: str = Field(min_length=5, max_length=300)
+
+    @model_validator(mode="after")
+    def one_change(self):
+        if all(getattr(self, key) is None for key in ("entitled", "used", "carried")):
+            raise ValueError("Supply at least one of entitled, used or carried")
+        return self
+
+
+def _balance_dict(bal: LeaveBalance, t: LeaveType) -> dict:
+    return {"employee_id": bal.employee_id, "leave_type_id": t.id, "code": t.code,
+            "name": t.name, "year": bal.year, "entitled": bal.entitled, "used": bal.used,
+            "pending": bal.pending, "carried": bal.carried,
+            "available": bal.entitled + bal.carried - bal.used - bal.pending}
+
+
+@router.post("/leave/balances/adjust")
+def adjust_leave_balance(body: BalanceAdjustIn, db: Session = Depends(get_db),
+                         actor=Depends(require("hr:write"))):
+    """An audited correction to one person's entitlement or usage.
+
+    `pending` is not editable: it belongs to applications awaiting a decision
+    and changes only through those decisions.
+    """
+    emp = db.get(Employee, body.employee_id)
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+    lt = db.get(LeaveType, body.leave_type_id)
+    if not lt:
+        raise HTTPException(404, "Leave type not found")
+    bal = hr_svc.leave_balance(db, emp.id, lt.id, body.year)
+    before = _balance_dict(bal, lt)
+    for key in ("entitled", "used", "carried"):
+        value = getattr(body, key)
+        if value is not None:
+            setattr(bal, key, value)
+    db.flush()
+    audit(db, actor.id, "hr.leave_balance.adjust",
+          f"leave_balance:{emp.id}:{lt.id}:{body.year}",
+          {"employee": emp.code, "leave_type": lt.code, "year": body.year,
+           "before": {k: str(v) for k, v in before.items()
+                      if k in ("entitled", "used", "pending", "carried")},
+           "after": {k: str(getattr(bal, k))
+                     for k in ("entitled", "used", "pending", "carried")},
+           "reason": body.reason.strip()})
+    db.commit()
+    return _balance_dict(bal, lt)
+
+
+@router.get("/leave/calendar")
+def leave_calendar(year: int, month: int, department: str | None = None,
+                   db: Session = Depends(get_db), user=Depends(require("hr:read"))):
+    """Pending and approved leave for a month, scoped to the viewer's team."""
+    if not 1 <= month <= 12:
+        raise HTTPException(422, "month must be between 1 and 12")
+    first, last = date(year, month, 1), date(year, month, monthrange(year, month)[1])
+    scope = hr_svc.scoped_employee_ids(db, user)
+    stmt = select(Employee).where(Employee.status == "active")
+    if scope is not None:
+        stmt = stmt.where(Employee.id.in_(scope or {-1}))
+    if department:
+        stmt = stmt.where(Employee.department == department)
+    employees = list(db.scalars(stmt.order_by(Employee.code)).all())
+    if len(employees) > 400:
+        raise HTTPException(422, "More than 400 employees match; filter by department")
+    ids = [e.id for e in employees]
+    apps = db.scalars(select(LeaveApplication).where(
+        LeaveApplication.employee_id.in_(ids or [-1]),
+        LeaveApplication.status.in_(("pending", "approved")),
+        LeaveApplication.date_from <= last, LeaveApplication.date_to >= first)
+        .order_by(LeaveApplication.date_from, LeaveApplication.employee_id)).all()
+    types = {t.id: t for t in db.scalars(select(LeaveType)).all()}
+    holidays = db.scalars(select(Holiday).where(
+        Holiday.date >= first, Holiday.date <= last).order_by(Holiday.date)).all()
+    by_id = {e.id: e for e in employees}
+    return {
+        "year": year, "month": month,
+        "employees": [{"employee_id": e.id, "code": e.code, "name": e.full_name,
+                       "department": e.department} for e in employees],
+        "entries": [{"id": a.id, "employee_id": a.employee_id,
+                     "employee": by_id[a.employee_id].full_name,
+                     "leave_type": types[a.leave_type_id].name
+                     if a.leave_type_id in types else "?",
+                     "leave_type_code": types[a.leave_type_id].code
+                     if a.leave_type_id in types else "",
+                     "date_from": a.date_from, "date_to": a.date_to, "days": a.days,
+                     "portion": a.portion, "status": a.status} for a in apps],
+        "holidays": [{"id": h.id, "date": h.date, "name": h.name,
+                      "branch_id": h.branch_id, "location_id": h.location_id}
+                     for h in holidays],
+    }
+
+
+class CarryForwardIn(BaseModel):
+    from_year: int = Field(ge=2000, le=2099)
+    dry_run: bool = True
+
+
+@router.post("/leave/carry-forward")
+def carry_forward(body: CarryForwardIn, db: Session = Depends(get_db),
+                  actor=Depends(require("hr:write"))):
+    """Apply each leave type's carry-forward cap to the following year.
+
+    Unused days are entitled + carried - used - pending, floored at zero and
+    capped by the type's max_carry_forward. A dry run returns the same figures
+    without writing anything.
+    """
+    next_year = body.from_year + 1
+    types = {t.id: t for t in db.scalars(select(LeaveType).where(
+        LeaveType.carry_forward.is_(True), LeaveType.active.is_(True))).all()}
+    if not types:
+        return {"from_year": body.from_year, "to_year": next_year,
+                "dry_run": body.dry_run, "rows": [], "total_carried_days": 0,
+                "note": "No active leave type has carry-forward enabled."}
+    balances = db.scalars(select(LeaveBalance).where(
+        LeaveBalance.year == body.from_year,
+        LeaveBalance.leave_type_id.in_(list(types)))).all()
+    rows = []
+    total = Decimal(0)
+    for bal in balances:
+        emp = db.get(Employee, bal.employee_id)
+        if not emp or emp.status != "active":
+            continue
+        lt = types[bal.leave_type_id]
+        unused = max(Decimal(0), bal.entitled + bal.carried - bal.used - bal.pending)
+        carry = min(unused, lt.max_carry_forward or Decimal(0))
+        total += carry
+        if not body.dry_run:
+            following = hr_svc.leave_balance(db, bal.employee_id, bal.leave_type_id,
+                                             next_year)
+            following.carried = carry
+        rows.append({"employee_id": emp.id, "employee": emp.full_name, "code": emp.code,
+                     "leave_type": lt.name, "leave_type_code": lt.code,
+                     "unused_days": unused, "max_carry_forward": lt.max_carry_forward,
+                     "carried": carry})
+    if not body.dry_run:
+        db.flush()
+        audit(db, actor.id, "hr.leave.carry_forward", f"leave_carry:{body.from_year}",
+              {"from_year": body.from_year, "to_year": next_year,
+               "rows": len(rows), "total_carried_days": str(total)})
+        db.commit()
+    return {"from_year": body.from_year, "to_year": next_year,
+            "dry_run": body.dry_run, "rows": rows, "total_carried_days": total}
 
 
 # --------------------------------------------------------------- on duty

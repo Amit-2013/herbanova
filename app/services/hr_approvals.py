@@ -117,7 +117,8 @@ def _leave(db: Session, ar: ApprovalRequest, body, user):
             bal.pending -= app.days
         bal.used += app.days
         app.status = "approved"
-        hr_svc.apply_attendance_for_leave(db, app, lt)
+        emp = db.get(Employee, app.employee_id)
+        hr_svc.apply_attendance_for_leave(db, app, lt, emp)
     else:
         bal.pending = max(0, bal.pending - app.days)
         app.status = "rejected"

@@ -105,6 +105,9 @@ class Attendance(Base):
                         name="ck_hr_attendance_source"),
         CheckConstraint("geofence_result IN ('inside','outside','unavailable','manual','na')",
                         name="ck_hr_geofence_result"),
+        CheckConstraint("leave_portion IS NULL OR leave_portion IN "
+                        "('full','first_half','second_half')",
+                        name="ck_hr_attendance_leave_portion"),
         # Explicit names = the names the migration created (schema parity).
         Index("ix_hr_attendance_employee", "employee_id"),
         Index("ix_hr_attendance_date", "date"),
@@ -124,6 +127,8 @@ class Attendance(Base):
     early_minutes: Mapped[int] = mapped_column(Integer, default=0)
     worked_minutes: Mapped[int] = mapped_column(Integer, default=0)
     overtime_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    # Null = the day is not a partial leave. Set for half-day leave rows.
+    leave_portion: Mapped[str | None] = mapped_column(String(12))
     remarks: Mapped[str | None] = mapped_column(String(300))
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
