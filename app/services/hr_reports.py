@@ -16,7 +16,6 @@ from xml.sax.saxutils import escape
 from fastapi import HTTPException
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (Paragraph, SimpleDocTemplate, Spacer, Table,
                                 TableStyle)
@@ -28,6 +27,7 @@ from ..models.hr import (Attendance, Branch, Department, EmployeeDocument,
                          LeaveBalance, LeaveType, PayrollEntry, PayrollPeriod, WorkLocation)
 from ..models.users import Employee
 from . import hr as hr_svc
+from . import pdf_fonts
 
 CENT = Decimal("0.01")
 ONE_DP = Decimal("0.1")
@@ -449,11 +449,10 @@ def to_pdf(report: dict) -> bytes:
                             leftMargin=12 * mm, rightMargin=12 * mm,
                             topMargin=12 * mm, bottomMargin=12 * mm,
                             title=report["title"])
-    styles = getSampleStyleSheet()
-    small = ParagraphStyle("cell", parent=styles["Normal"], fontSize=7.5, leading=9)
-    small_head = ParagraphStyle("cellhead", parent=small, fontName="Helvetica-Bold")
-    story = [Paragraph(escape(report["title"]), styles["Title"]),
-             Paragraph(escape(_summary_line(report)), styles["Normal"])]
+    small = pdf_fonts.cell_style(7.5)
+    small_head = pdf_fonts.cell_style(7.5, bold=True)
+    story = [Paragraph(escape(report["title"]), pdf_fonts.style("Title")),
+             Paragraph(escape(_summary_line(report)), pdf_fonts.style("Normal"))]
     filters = ", ".join(f"{k}: {v}" for k, v in report["filters"].items())
     if filters:
         story.append(Paragraph(escape(filters), small))
@@ -463,7 +462,7 @@ def to_pdf(report: dict) -> bytes:
         data.append([Paragraph(escape(str(row.get(c["key"], ""))), small)
                      for c in report["columns"]])
     if len(data) == 1:
-        story.append(Paragraph("No data yet.", styles["Normal"]))
+        story.append(Paragraph("No data yet.", pdf_fonts.style("Normal")))
     else:
         width = (doc.width) / len(report["columns"])
         table = Table(data, colWidths=[width] * len(report["columns"]), repeatRows=1)
