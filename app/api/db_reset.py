@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
-from app.core.rbac import require
+from app.core.rbac import require_admin
 from app.core.security import verify_secondary_password
 from app.models.core import User
 from app.services.audit import audit
@@ -110,7 +110,7 @@ def _clear_business_data(db: Session) -> list[tuple[str, int]]:
 
 @router.post("/api/db/reset", response_model=ResetResponse, summary="Wipe all business data")
 def reset_db(req: ResetRequest, db: Session = Depends(get_db),
-             actor=Depends(require("db:reset"))):
+             actor=Depends(require_admin("db:reset"))):
     admin = db.get(User, actor.id)
     if admin is None or not admin.is_active:
         raise HTTPException(status_code=403, detail="The acting administrator account is not active.")

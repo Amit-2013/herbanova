@@ -62,6 +62,113 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
 
 PERMISSION_KEYS = set(PERMISSIONS)
 
+# ---------------------------------------------------------------- parent / child
+# A module's read permission is its parent. A child is never usable without its
+# parent, and a role edit that clears a parent drops the children with it. The
+# map is deliberately explicit: a permission added to PERMISSIONS without an
+# entry here fails `tests/test_permission_tree.py`, so the tree cannot drift.
+#
+# A `None` parent is a top-level module gate. `accounts:reports` and
+# `hr:attendance_self` are top-level on purpose: the Accounts reports and the
+# self-service HR screens are reachable without the wider read permission.
+PERMISSION_PARENT: dict[str, str | None] = {
+    "user:manage": None,
+    "employee:read": None,
+    "employee:write": "employee:read",
+    "audit:read": None,
+    "db:reset": "user:manage",
+    "product:read": None,
+    "product:write": "product:read",
+    "stock:read": None,
+    "stock:write": "stock:read",
+    "supplier:read": None,
+    "supplier:write": "supplier:read",
+    "supplier:bank": "supplier:read",
+    "tax:read": None,
+    "tax:write": "tax:read",
+    "sales:read": None,
+    "sales:write": "sales:read",
+    "distributor:write": "sales:read",
+    "credit:manage": "sales:read",
+    "dispatch:write": "sales:read",
+    "invoice:write": "sales:read",
+    "invoice:cancel": "sales:read",
+    "invoice:edit_post_billing": "sales:read",
+    "note:write": "sales:read",
+    "print:document": "sales:read",
+    "approval:read": None,
+    "approval:decide": "approval:read",
+    "approval:credit_limit": "approval:read",
+    "accounts:read": None,
+    "accounts:write": "accounts:read",
+    "accounts:reports": None,
+    "lead:read": None,
+    "lead:write": "lead:read",
+    "lead:assign": "lead:read",
+    "report:export": None,
+    "email:manage": None,
+    "hr:read": None,
+    "hr:write": "hr:read",
+    "hr:attendance_self": None,
+    "hr:attendance_manage": "hr:read",
+    "hr:leave_approve": "hr:read",
+    "hr:payroll_prepare": "hr:read",
+    "hr:payroll_approve": "hr:read",
+    "hr:confidential": "hr:read",
+    "hr:reports": "hr:read",
+}
+
+# These rights decide on money or on the security of the system itself. The
+# server already checks the Administrator role at the route; this set makes the
+# same rule apply when a role is created or edited, so a custom role can never
+# carry one.
+ADMIN_ONLY_PERMISSIONS: frozenset[str] = frozenset({
+    "approval:credit_limit",
+    "invoice:edit_post_billing",
+    "email:manage",
+    "db:reset",
+})
+
+
+def parent_of(key: str) -> str | None:
+    return PERMISSION_PARENT.get(key)
+
+
+def is_admin_only(key: str) -> bool:
+    return key in ADMIN_ONLY_PERMISSIONS
+
+
+def permission_allowed(key: str, granted: set[str] | frozenset[str]) -> bool:
+    """A key is usable only when it and its parent are both granted."""
+    if key not in granted:
+        return False
+    parent = parent_of(key)
+    return parent is None or parent in granted
+
+
+def effective_permissions(granted) -> set[str]:
+    """The subset of stored keys a request may actually use.
+
+    Stored data can be older than the rule: a role that carries a child but not
+    its parent keeps the record but loses the child's authority until the
+    parent is granted. This is the fail-closed behaviour the rule requires.
+    """
+    keys = set(granted or ())
+    return {key for key in keys if permission_allowed(key, keys)}
+
+
+def sanitized_permissions(requested) -> tuple[list[str], list[str]]:
+    """Drop children whose parent is absent; return (kept, dropped).
+
+    Only explicit selections survive. Nothing is implied by a parent, so this
+    removes exactly the orphans and never adds a key the caller did not send.
+    """
+    keys = {key for key in (requested or ()) if key in PERMISSION_KEYS}
+    dropped = {key for key in keys if not permission_allowed(key, keys)}
+    kept = keys - dropped
+    return sorted(kept), sorted(dropped)
+
+
 # Frozen baseline sets (the original ROLE_PERMS). DO NOT EDIT to "fix" a role:
 # changes belong in a documented role-permission update with tests, because
 # these values also define seeded-role parity (AUD-015 / AUD-024).

@@ -5392,11 +5392,39 @@ async function toggleUser(id, active) {
   if (res.ok) loadAll();
 }
 
+const PERM_ITEMS = () => state.permCatalog.flatMap(g => g.items);
+const PERM_CHILDREN = () => {
+  const map = {};
+  PERM_ITEMS().forEach(i => { if (i.parent) (map[i.parent] = map[i.parent] || []).push(i.key); });
+  return map;
+};
+
 function roleForm(roleId) {
   const role = roleId ? state.roles.find(r => r.id === Number(roleId)) : null;
-  const matrix = state.permCatalog.map(g => `<div class="permgroup"><b>${esc(g.module)}</b>${g.items.map(i =>
-    `<label class="check"><input type="checkbox" name="perm" value="${esc(i.key)}" ${role && role.permissions.includes(i.key) ? "checked" : ""}> <span>${esc(i.key)}<small>${esc(i.description)}</small></span></label>`).join("")}</div>`).join("");
-  openDrawer(role ? `Edit role: ${role.name}` : "New role", role ? "Built-in roles keep their name; permissions can be adjusted. The last active administrator cannot lose user:manage." : "Custom roles are enforced by the server exactly like the built-in ones.", `
+  const isAdminRole = !!role && (role.name || "").toLowerCase() === "admin";
+  const stored = new Set(role ? role.permissions : []);
+  const children = PERM_CHILDREN();
+  // A child is offered only when its parent is already held. It is never
+  // checked by the parent: the Administrator chooses each child explicitly.
+  const usable = i => !i.parent || stored.has(i.parent);
+  const matrix = state.permCatalog.map(g => {
+    const items = [...g.items].sort((a, b) =>
+      (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || a.key.localeCompare(b.key));
+    return `<div class="permgroup"><b>${esc(g.module)}</b>${items.map(i => {
+      const lockedAdmin = i.admin_only && !isAdminRole;
+      const checked = stored.has(i.key) && usable(i) && !lockedAdmin;
+      const disabled = (i.parent && !stored.has(i.parent)) || lockedAdmin;
+      const note = lockedAdmin ? "Administrator only"
+        : (i.parent ? `Needs ${i.parent}` : `Controls ${(children[i.key] || []).length || "no"} child permission${(children[i.key] || []).length === 1 ? "" : "s"}`);
+      return `<label class="check${i.parent ? " child" : ""}"${lockedAdmin ? ' title="Only the Administrator role can hold this permission"' : ""}>
+        <input type="checkbox" name="perm" value="${esc(i.key)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}
+          data-perm="${esc(i.key)}"${lockedAdmin ? ' data-locked="1"' : ""}${i.parent ? ` data-parent="${esc(i.parent)}"` : ""}
+          ${!i.parent ? `data-controls="${esc((children[i.key] || []).join(","))}"` : ""}>
+        <span>${esc(i.key)}<small>${esc(i.description)} · ${esc(note)}</small></span></label>`;
+    }).join("")}</div>`;
+  }).join("");
+  openDrawer(role ? `Edit role: ${role.name}` : "New role",
+    "Parent checked: its children become selectable. Children are granted only when you tick them. Unchecking a parent removes its children. Administrator-only rights stay with the Administrator.", `
     <form id="roleForm" data-id="${role ? role.id : ""}" novalidate>
       ${role ? "" : `<label for="nr-name">Role name</label><input id="nr-name" name="name" autocomplete="off" placeholder="e.g. accounts">`}
       <label for="nr-label">Display name</label><input id="nr-label" name="display_name" autocomplete="off" value="${role ? esc(role.display_name) : ""}" placeholder="e.g. Accounts">
@@ -5404,6 +5432,16 @@ function roleForm(roleId) {
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">${role ? "Save permissions" : "Create role"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`, true);
+}
+
+function syncPermissionTree(form) {
+  $$('input[name="perm"][data-parent]', form).forEach(child => {
+    if (child.dataset.locked) return;
+    const parent = $('input[name="perm"][data-perm="' + CSS.escape(child.dataset.parent) + '"]', form);
+    const on = !!(parent && parent.checked);
+    if (!on) child.checked = false;
+    child.disabled = !on;
+  });
 }
 async function saveRole(form) {
   const perms = $$('input[name="perm"]:checked', form).map(x => x.value);
@@ -6610,6 +6648,9 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("change", e => {
   if (e.target.closest("#poForm")) syncPoLines();
+  if (e.target.closest("#roleForm") && e.target.name === "perm") {
+    syncPermissionTree(e.target.closest("form"));
+  }
   if (e.target.id === "rpCategory") { state.rpCategory = e.target.value; drawRpTabs(); }
   if (e.target.id === "dashFrom" || e.target.id === "dashTo") {
     applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
