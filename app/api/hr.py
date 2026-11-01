@@ -37,6 +37,7 @@ from ..models.hr import (Announcement, Attendance, AttendanceCorrection, Branch,
 from ..models.users import Employee
 from ..services import hr as hr_svc
 from ..services import hr_notify
+from ..services import hr_reports
 from ..services import payroll as payroll_svc
 from ..services.audit import audit
 from ..services.salary_slip import build_slip
@@ -3106,3 +3107,41 @@ def patch_announcement(announcement_id: int, body: AnnouncementPatch,
     audit(db, actor.id, "hr.announcement.update", f"announcement:{row.id}", changes)
     db.commit()
     return _announcement_row(row)
+
+
+# ------------------------------------------------------------------ reports
+@router.get("/reports")
+def hr_report_catalog(db: Session = Depends(get_db), user=Depends(require("hr:reports"))):
+    """The reports this role may open. Confidential cost is flagged separately."""
+    confidential = is_admin(db, user) or bool(
+        role_permissions(db, user) & {"hr:confidential", "hr:payroll_prepare"})
+    return [{"key": key, "title": title,
+             "confidential": key == "department-cost",
+             "available": key != "department-cost" or confidential}
+            for key, title in hr_reports.REPORTS]
+
+
+@router.get("/reports/{report}")
+def hr_report(report: str, from_date: date | None = None, to_date: date | None = None,
+              year: int | None = None, month: int | None = None,
+              days: int = Query(60, ge=1, le=365),
+              fmt: Literal["json", "csv", "pdf"] = Query("json", alias="format"),
+              db: Session = Depends(get_db), user=Depends(require("hr:reports"))):
+    """One HR report as JSON, CSV or PDF. Gaps are returned, never filled with zeroes."""
+    built = hr_reports.build_report(db, report, user, from_date=from_date,
+                                    to_date=to_date, year=year, month=month, days=days)
+    if fmt == "json":
+        return built
+    if fmt == "csv":
+        body = hr_reports.to_csv(built)
+        media_type, extension = "text/csv; charset=utf-8", "csv"
+    else:
+        body = hr_reports.to_pdf(built)
+        media_type, extension = "application/pdf", "pdf"
+    audit(db, user.id, "hr.report.export", f"hr:report:{report}",
+          {"format": fmt, "rows": len(built["rows"]), "filters": built["filters"]})
+    db.commit()
+    filename = f"hr-{report}-{hr_svc.business_today().isoformat()}.{extension}"
+    return Response(content=body, media_type=media_type, headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store"})
