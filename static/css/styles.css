@@ -52,6 +52,8 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 .btn.ghost{background:#fff;color:var(--ink);border-color:var(--line)}
 .btn.ghost:hover{background:var(--wash);border-color:#bccabf}
 .btn.sm{padding:5px 12px;min-height:32px;font-size:13px}
+.btn.danger{background:var(--bad);border-color:var(--bad)}
+.btn.danger:hover{background:#932a20;border-color:#932a20}
 .btn.block{width:100%;margin-top:20px}
 .link-btn{border:0;background:none;padding:0;color:var(--moss);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-color:#9fc2ae}
 .link-btn:hover{color:var(--moss-d);text-decoration-color:currentColor}
