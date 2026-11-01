@@ -199,7 +199,7 @@ def test_department_cost_needs_confidential_rights_and_exports_csv_and_pdf(clien
     assert csv_response.status_code == 200
     assert csv_response.headers["content-type"].startswith("text/csv")
     assert "hr-department-cost-" in csv_response.headers["content-disposition"]
-    lines = csv_response.text.strip().splitlines()
+    lines = csv_response.content.decode("utf-8-sig").strip().splitlines()
     assert lines[0] == "Department,Employees,Gross,Deductions,Net"
     assert any(line.startswith("Reports test dept,1,30000.00,3600.00,26400.00")
                for line in lines[1:])

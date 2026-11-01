@@ -213,6 +213,64 @@ def _num(value):
     return value
 
 
+# Column kinds the exporters and screens already understand. Exporters must
+# never receive a kind they do not handle: a numeric column written as text is
+# a spreadsheet that cannot be summed.
+MONEY_KEYS = {
+    "adjusted", "amount", "cess", "cess_total", "cgst", "cgst_total", "credit",
+    "credit_limit", "debit", "deductions", "discount_total", "grand_total",
+    "gross", "gross_total", "igst", "igst_total", "net", "outstanding", "paid",
+    "received", "received_value", "sgst", "sgst_total", "tax_total",
+    "taxable", "taxable_value", "total",
+}
+QTY_KEYS = {
+    "capacity_units", "carried", "days", "entitled", "free_units",
+    "lop_days", "on_hand", "paid_leave_days", "payable_days", "pending",
+    "present_days", "qty", "quantity", "turnaround_hours", "used",
+    "used_units", "working_days",
+}
+INT_KEYS = {
+    "batch_count", "batches", "early_minutes", "invoice_count",
+    "late_minutes", "month", "payment_terms_days", "worked_minutes", "year",
+}
+PCT_KEYS = {"utilisation_pct"}
+
+# The payroll register is read by people, not by the database: its headers say
+# what the column means and which ones are money.
+PAYROLL_LABELS = {
+    "payroll_entry_id": "Entry ID",
+    "period_id": "Period ID",
+    "year": "Year",
+    "month": "Month",
+    "employee_id": "Employee ID",
+    "code": "Employee code",
+    "full_name": "Name",
+    "department": "Department",
+    "branch_id": "Branch ID",
+    "working_days": "Working days",
+    "payable_days": "Payable days",
+    "present_days": "Present days",
+    "paid_leave_days": "Paid leave days",
+    "lop_days": "LOP days",
+    "gross": "Gross (₹)",
+    "deductions": "Deductions (₹)",
+    "net": "Net (₹)",
+    "status": "Status",
+}
+
+
+def _column_type(key):
+    if key in MONEY_KEYS:
+        return "money"
+    if key in QTY_KEYS:
+        return "qty"
+    if key in INT_KEYS:
+        return "int"
+    if key in PCT_KEYS:
+        return "pct"
+    return "text"
+
+
 def _columns(rows, preferred=None):
     keys = list(preferred or [])
     for row in rows:
@@ -223,31 +281,25 @@ def _columns(rows, preferred=None):
         {
             "key": key,
             "label": key.replace("_", " ").strip().title(),
-            "type": "number" if key in {
-                "amount", "gross", "deductions", "net", "qty", "quantity",
-                "on_hand", "late_minutes", "worked_minutes", "days",
-                "entitled", "used", "pending", "carried", "outstanding",
-                "received", "paid", "taxable_value", "tax_total", "grand_total",
-                "cgst_total", "sgst_total", "igst_total", "cess_total",
-                "gross_total", "discount_total", "received_value",
-                "taxable", "cgst", "sgst", "igst", "total", "amount",
-                "capacity_units", "used_units", "free_units", "utilisation_pct",
-                "batches",
-            } else "text",
+            "type": _column_type(key),
         }
         for key in keys
     ]
 
 
-def _table(key, title, rows, preferred=None, totals=None):
+def _table(key, title, rows, preferred=None, totals=None, labels=None):
     clean_rows = [
         {k: _iso(v) for k, v in row.items()}
         for row in rows
     ]
+    columns = _columns(clean_rows, preferred)
+    if labels:
+        for column in columns:
+            column["label"] = labels.get(column["key"], column["label"])
     return {
         "key": key,
         "title": title,
-        "columns": _columns(clean_rows, preferred),
+        "columns": columns,
         "rows": clean_rows,
         "totals": totals,
     }
@@ -677,7 +729,8 @@ def build(
     if key in ("hr_payroll", "hr_payroll_deductions"):
         rows = _payroll_rows(db, filters, date_from, date_to)
         if key == "hr_payroll":
-            table = _table("payroll", "Payroll Register", rows)
+            table = _table("payroll", "Payroll Register", rows,
+                           labels=PAYROLL_LABELS)
         else:
             details = []
             entry_ids = [r["payroll_entry_id"] for r in rows]
