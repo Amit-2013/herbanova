@@ -30,6 +30,8 @@ const state = {user: null, perms: new Set(), features: null, featureFlags: [], m
                      cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0}},
                sr: {status: null, schedules: [], recipients: [], deliveries: [],
                     tab: "schedules", logStatus: "", logPack: ""},
+               email: {settings: null, messages: [], loading: false, loaded: false,
+                       error: null},
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
                dashFrom: "", dashTo: "", dashPreset: "month", dashDateError: "", dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
@@ -172,6 +174,7 @@ function enter(u) {
   state.dashLoading = true;
   state.dashError = null;
   state.expiry = {bucket: "all", loading: false, data: null};
+  state.email = {settings: null, messages: [], loading: false, loaded: false, error: null};
   state.chart = {index: -1, off: {}};
   closePalette();
   $("#mustChange").classList.add("hide");
@@ -3680,8 +3683,167 @@ async function renderHrSelf() {
 }
 function renderSettings() {
   if (!$("#setEmprows")) return;
+  const panel = $("#emailPanel");
+  if (panel) {
+    const showEmail = srAllowed() && featureOn("scheduled");
+    panel.classList.toggle("hide", !showEmail);
+    if (showEmail && !state.email.loaded && !state.email.loading) loadEmailSettings();
+    if (showEmail) renderEmailSettings();
+  }
   $("#setEmprows").innerHTML = state.employees.slice(0, 50).map(e => `<tr><td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
     <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td><td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td></tr>`).join("");
+}
+
+/* ---------- SMTP settings and the test composer ---------- */
+async function loadEmailSettings(force) {
+  if (!(srAllowed() && featureOn("scheduled")) || state.email.loading) return;
+  if (state.email.loaded && !force) { renderEmailSettings(); return; }
+  state.email.loading = true;
+  state.email.error = null;
+  if (!state.email.settings && $("#emBody")) $("#emBody").innerHTML = `<p class="muted">Loading email settings…</p>`;
+  const [s, m] = await Promise.all([api("/api/email-settings"),
+    api("/api/email-settings/test-messages?limit=20")]);
+  state.email.loading = false;
+  if (!s.ok) {
+    state.email.error = detail(s.body);
+    if ($("#emBody") && !$("#emailSettingsForm")) $("#emBody").innerHTML = `<p class="err">${esc(state.email.error)}</p>`;
+    return;
+  }
+  state.email.settings = s.body;
+  state.email.messages = m.ok ? m.body : [];
+  state.email.loaded = true;
+  renderEmailSettings();
+}
+
+function emailTypeLabel(key) {
+  const t = state.email.settings && state.email.settings.message_types.find(x => x.key === key);
+  return t ? t.label : key;
+}
+
+function applyEmailType(force) {
+  const cfg = state.email.settings, sel = $("#em-type");
+  if (!cfg || !sel) return;
+  const meta = cfg.message_types.find(t => t.key === sel.value);
+  if (!meta) return;
+  if (force || !$("#em-subject").value.trim()) $("#em-subject").value = meta.subject;
+  if (force || !$("#em-body").value.trim()) $("#em-body").value = meta.body;
+}
+
+function renderEmailSettings() {
+  const cfg = state.email.settings;
+  if (!cfg) return;
+  if ($("#emailSettingsForm")) { renderEmailOutbox(); return; }
+  const status = $("#emStatus");
+  if (status) status.innerHTML = [
+    `<span class="chip ${cfg.smtp_ready ? "ok" : "warn"}">${cfg.smtp_ready ? "SMTP configured" : "SMTP not configured"}</span>`,
+    `<span class="chip ${cfg.enabled ? "ok" : "off"}">${cfg.enabled ? "Sending enabled" : "Sending off"}</span>`,
+    `<span class="chip ${cfg.mode === "live" ? "warn" : "ok"}">${cfg.mode === "live" ? "Live mode" : "Test mode"}</span>`,
+    `<span class="chip ${cfg.password_set ? "ok" : "off"}">${cfg.password_set ? "Password stored" : "No password"}</span>`,
+    cfg.password_unreadable ? '<span class="chip bad">Saved password cannot be read: enter it again</span>' : ""
+  ].join(" ");
+  const typeOpts = cfg.message_types.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join("");
+  $("#emBody").innerHTML = `
+    ${cfg.stored ? "" : '<div class="note">No settings have been saved here yet, so the deployment environment is in use. Saving this form overrides it.</div>'}
+    <form id="emailSettingsForm" novalidate>
+      <div class="row2"><div><label for="em-host">SMTP host</label><input id="em-host" name="host" value="${esc(cfg.host)}" placeholder="smtp.example.com" autocomplete="off"></div>
+      <div><label for="em-port">Port</label><input id="em-port" name="port" type="number" min="1" max="65535" value="${Number(cfg.port) || 587}"></div></div>
+      <div class="row2"><div><label for="em-security">Connection security</label><select id="em-security" name="security">
+          <option value="none"${cfg.security === "none" ? " selected" : ""}>None</option>
+          <option value="starttls"${cfg.security === "starttls" ? " selected" : ""}>STARTTLS</option>
+          <option value="ssl"${cfg.security === "ssl" ? " selected" : ""}>SSL/TLS</option></select></div>
+        <div><label for="em-enabled">Sending</label><select id="em-enabled" name="enabled">
+          <option value="0"${cfg.enabled ? "" : " selected"}>Switched off</option>
+          <option value="1"${cfg.enabled ? " selected" : ""}>Enabled</option></select></div></div>
+      <div class="row2"><div><label for="em-mode">Delivery mode</label><select id="em-mode" name="mode">
+          <option value="test"${cfg.mode === "test" ? " selected" : ""}>Test mode: every message is a test</option>
+          <option value="live"${cfg.live_allowed ? "" : " disabled"}${cfg.mode === "live" ? " selected" : ""}>Live mode (deployment approval required)</option></select></div><div></div></div>
+      <label for="em-user">SMTP username</label><input id="em-user" name="username" value="${esc(cfg.username)}" autocomplete="off">
+      <label for="em-pass">SMTP password</label><input id="em-pass" name="password" type="password" autocomplete="new-password"
+        placeholder="${cfg.password_set ? "Stored: leave blank to keep it" : "Not set"}">
+      <p class="sub" style="margin:6px 0 0">The password is stored encrypted and never shown again.
+        <label style="display:inline;margin:0"><input id="em-clear" type="checkbox" style="width:auto;margin:0 4px 0 8px">Remove the saved password</label></p>
+      <div class="row2"><div><label for="em-from">From address</label><input id="em-from" name="from_address" type="email" value="${esc(cfg.from_address)}" placeholder="reports@example.com"></div>
+        <div><label for="em-reply">Reply-To</label><input id="em-reply" name="reply_to" type="email" value="${esc(cfg.reply_to)}" placeholder="Optional"></div></div>
+      <div class="row2"><div><label for="em-test-to">Default test To</label><input id="em-test-to" name="test_to" value="${esc(cfg.test_to)}" placeholder="Administrator address"></div>
+        <div><label for="em-test-cc">Default test CC</label><input id="em-test-cc" name="test_cc" value="${esc(cfg.test_cc)}" placeholder="Optional"></div></div>
+      <div class="note">Messages are always test messages: the subject carries [TEST], and only the addresses above are used.
+        Live delivery also needs the deployment to be approved for it; until then the server keeps test mode.
+        ${cfg.live_allowed ? "" : "Live mode is not approved for this deployment."}</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save SMTP settings</button>
+        <button class="btn ghost" type="button" data-act="email-reload">Reload</button></div>
+    </form>
+    <h3 style="margin-top:22px">Send a test email</h3>
+    <form id="emailTestForm" novalidate>
+      <div class="row2"><div><label for="em-type">Message type</label><select id="em-type" name="message_type">${typeOpts}</select></div>
+        <div><label for="em-deliver">What happens</label><select id="em-deliver" name="deliver">
+          <option value="0">Dry run: save only, no SMTP</option>
+          <option value="1">Deliver through SMTP</option></select></div></div>
+      <div class="row2"><div><label for="em-to">To</label><input id="em-to" name="to" value="${esc(cfg.test_to || cfg.suggested_to)}" placeholder="name@example.com"></div>
+        <div><label for="em-cc">CC</label><input id="em-cc" name="cc" value="${esc(cfg.test_cc)}" placeholder="Optional"></div></div>
+      <label for="em-subject">Subject</label><input id="em-subject" name="subject" maxlength="250" autocomplete="off">
+      <label for="em-body">Message body</label><textarea id="em-body" name="body" rows="5"></textarea>
+      <div class="note">A dry run stores the exact message below and opens no connection. Switching to “Deliver” uses the saved SMTP settings.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Send test email</button></div>
+    </form>
+    <h3 style="margin-top:22px">Recent test messages</h3>
+    <div class="tw"><table>
+      <thead><tr><th>When</th><th>Type</th><th>To</th><th>Subject</th><th>How</th><th>Status</th><th>Error</th></tr></thead>
+      <tbody id="emOutRows"></tbody>
+    </table></div>
+    <div class="empty hide" id="emOutEmpty"></div>`;
+  applyEmailType(false);
+  renderEmailOutbox();
+}
+
+function renderEmailOutbox() {
+  const body = $("#emOutRows");
+  if (!body) return;
+  body.innerHTML = state.email.messages.map(m => `<tr>
+    <td>${esc(fmtStamp(m.created_at))}</td><td>${esc(emailTypeLabel(m.message_type))}</td>
+    <td>${esc(m.to)}${m.cc ? `<small>CC ${esc(m.cc)}</small>` : ""}</td>
+    <td>${esc(m.subject)}</td><td>${m.mode === "smtp" ? "SMTP" : "Dry run"}</td>
+    <td><span class="chip ${m.status === "sent" ? "ok" : m.status === "captured" ? "warn" : "bad"}">${esc(m.status)}</span></td>
+    <td>${m.error ? esc(m.error) : "–"}</td></tr>`).join("");
+  empty($("#emOutEmpty"), !state.email.messages.length, "No test email has been sent yet.", "");
+}
+
+async function saveEmailSettings(f) {
+  const err = $(".err", f), btn = $("button[type=submit]", f);
+  err.textContent = "";
+  btn.disabled = true;
+  const res = await api("/api/email-settings", {method: "PUT", body: {
+    enabled: $("#em-enabled").value === "1", mode: $("#em-mode") ? $("#em-mode").value : "test",
+    host: $("#em-host").value.trim(), port: Number($("#em-port").value) || 0,
+    security: $("#em-security").value, username: $("#em-user").value.trim(),
+    password: $("#em-pass").value || null, clear_password: $("#em-clear").checked,
+    from_address: $("#em-from").value.trim(), reply_to: $("#em-reply").value.trim(),
+    test_to: $("#em-test-to").value.trim(), test_cc: $("#em-test-cc").value.trim()}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  state.email.settings = res.body;
+  $("#emBody").innerHTML = "";
+  renderEmailSettings();
+  toast(res, "SMTP settings saved");
+}
+
+async function sendEmailTest(f) {
+  const err = $(".err", f), btn = $("button[type=submit]", f);
+  err.textContent = "";
+  btn.disabled = true;
+  const res = await api("/api/email-settings/test", {method: "POST", body: {
+    message_type: $("#em-type").value, to: $("#em-to").value.trim(),
+    cc: $("#em-cc").value.trim(), subject: $("#em-subject").value.trim(),
+    body: $("#em-body").value, deliver: $("#em-deliver").value === "1"}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  const made = res.body;
+  state.email.messages = [made, ...state.email.messages].slice(0, 20);
+  renderEmailOutbox();
+  toast(res, made.status === "sent" ? "Test email sent"
+    : made.status === "captured" ? "Dry run saved; no email was sent"
+    : `Not sent: ${made.error || "SMTP refused the message"}`);
 }
 
 function renderProducts() {
@@ -6575,6 +6737,7 @@ document.addEventListener("click", e => {
     else if (act === "sr-recipient-edit") recipientForm(a.dataset.id);
     else if (act === "sr-recipient-delete") srRecipientDelete(a.dataset.id);
     else if (act === "sr-refresh-log") loadDeliveries();
+    else if (act === "email-reload") loadEmailSettings(true);
     return;
   }
   const tab = e.target.closest("[data-tab]");
@@ -6678,6 +6841,8 @@ document.addEventListener("submit", e => {
   else if (f.id === "hrLetForm") saveHrLetterTemplate(f);
   else if (f.id === "srForm") saveSchedule(f);
   else if (f.id === "srRecipientForm") saveRecipient(f);
+  else if (f.id === "emailSettingsForm") saveEmailSettings(f);
+  else if (f.id === "emailTestForm") sendEmailTest(f);
 });
 document.addEventListener("input", e => {
   if (e.target.closest("#poForm")) syncPoLines();
@@ -6695,6 +6860,7 @@ document.addEventListener("change", e => {
     syncPermissionTree(e.target.closest("form"));
   }
   if (e.target.id === "rpCategory") { state.rpCategory = e.target.value; drawRpTabs(); }
+  if (e.target.id === "em-type") applyEmailType(true);
   if (e.target.id === "dashFrom" || e.target.id === "dashTo") {
     applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
   }

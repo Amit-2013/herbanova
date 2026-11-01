@@ -10,9 +10,6 @@ returned by the API or written to the delivery log. TLS is used when configured.
 """
 from __future__ import annotations
 
-import re
-import smtplib
-import ssl
 from email.message import EmailMessage
 from email.utils import formatdate
 from html import escape
@@ -20,28 +17,26 @@ from html import escape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.config import settings
 from ..models.core import User
 from ..models.email import EmailRecipient
 from ..models.users import Employee, Role
-
-ADDRESS_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+from . import email_config
 
 
 class MailError(RuntimeError):
     pass
 
 
-def valid_address(address: str | None) -> bool:
-    return bool(address and ADDRESS_RE.match(address.strip()))
+valid_address = email_config.valid_address
 
 
-def live_mode() -> bool:
-    return settings.email_mode.strip().lower() == "live"
+def live_mode(db: Session | None = None) -> bool:
+    """Live delivery needs both the deployment gate and the saved setting."""
+    return email_config.effective(db).mode == "live"
 
 
-def smtp_ready() -> bool:
-    return bool(settings.smtp_host and settings.smtp_from)
+def smtp_ready(db: Session | None = None) -> bool:
+    return email_config.effective(db).smtp_ready
 
 
 def administrator_emails(db: Session) -> list[str]:
@@ -55,8 +50,9 @@ def administrator_emails(db: Session) -> list[str]:
 
 
 def test_recipient(db: Session) -> str | None:
-    if valid_address(settings.email_test_recipient):
-        return settings.email_test_recipient.strip().lower()
+    configured = email_config.effective(db).test_to
+    if valid_address(configured):
+        return configured.strip().lower()
     admins = administrator_emails(db)
     return admins[0] if admins else None
 
@@ -94,7 +90,8 @@ def resolve(db: Session, schedule, *, force_test: bool = False,
     """
     people = _schedule_people(db, schedule)
     real_count = sum(len(v) for v in people.values())
-    if force_test or not live_mode() or not settings.email_send_enabled:
+    cfg = email_config.effective(db)
+    if force_test or not live_mode(db) or not cfg.enabled:
         address = test_address if valid_address(test_address) else test_recipient(db)
         if not address:
             raise MailError(
@@ -111,12 +108,12 @@ def resolve(db: Session, schedule, *, force_test: bool = False,
     return {**people, "real_count": real_count, "redirected": False, "test_address": None}
 
 
-def _message(rendered: dict, people: dict) -> EmailMessage:
+def _message(rendered: dict, people: dict, cfg) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = rendered["subject"]
-    msg["From"] = settings.smtp_from
-    if settings.smtp_reply_to:
-        msg["Reply-To"] = settings.smtp_reply_to
+    msg["From"] = cfg.from_address
+    if cfg.reply_to:
+        msg["Reply-To"] = cfg.reply_to
     msg["To"] = ", ".join(people["to"])
     if people.get("cc"):
         msg["Cc"] = ", ".join(people["cc"])
@@ -137,31 +134,18 @@ def _message(rendered: dict, people: dict) -> EmailMessage:
 
 def send(db: Session, schedule, rendered: dict, people: dict) -> dict:
     """Send one message. Raises MailError; never prints or logs a secret."""
-    if not settings.email_send_enabled:
+    cfg = email_config.effective(db)
+    if not cfg.enabled:
         raise MailError("Sending is disabled (EMAIL_SEND_ENABLED is false).")
-    if not smtp_ready():
+    if not cfg.smtp_ready:
         raise MailError("SMTP is not configured (SMTP_HOST and SMTP_FROM are required).")
-    msg = _message(rendered, people)
-    size = len(msg.as_bytes())
-    context = ssl.create_default_context()
+    msg = _message(rendered, people, cfg)
     try:
-        if settings.smtp_ssl:
-            server = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port,
-                                      timeout=30, context=context)
-        else:
-            server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30)
-        with server:
-            server.ehlo()
-            if settings.smtp_starttls and not settings.smtp_ssl:
-                server.starttls(context=context)
-                server.ehlo()
-            if settings.smtp_user:
-                server.login(settings.smtp_user, settings.smtp_password)
-            server.send_message(msg)
-    except (smtplib.SMTPException, OSError) as exc:
+        size = email_config.deliver(cfg, msg)
+    except email_config.EmailConfigError as exc:
         # The exception text can echo the server banner, which may contain the
         # host but never the password; keep the message short and factual.
-        raise MailError(f"SMTP delivery failed: {type(exc).__name__}: {exc}") from exc
+        raise MailError(str(exc)) from exc
     return {"size": size, "to": len(people["to"]), "cc": len(people.get("cc") or []),
             "bcc": len(people.get("bcc") or [])}
 
@@ -175,11 +159,12 @@ def send_note(db: Session, addresses: list[str], subject: str, text: str,
     [TEST] subject. Callers pass False only for a pack whose recipients the
     Administrator has configured.
     """
-    if not settings.email_send_enabled:
+    cfg = email_config.effective(db)
+    if not cfg.enabled:
         raise MailError("Sending is disabled (EMAIL_SEND_ENABLED is false).")
-    if not smtp_ready():
+    if not cfg.smtp_ready:
         raise MailError("SMTP is not configured (SMTP_HOST and SMTP_FROM are required).")
-    if force_test or not live_mode():
+    if force_test or not live_mode(db):
         address = test_recipient(db)
         if not address:
             raise MailError("Test mode: no Administrator email is configured. "

@@ -9,8 +9,8 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from .core.config import settings
 from .core.features import FEATURE_BY_KEY, feature_for_path, is_public_exception
 from .core.limiter import limiter
-from .api import (accounts, admin, approvals, audit, auth, credit_notes, dashboard, debit_notes, db_reset, distributors, email_reports, employees,
-                  features, hr, inventory, invoices, leads, modules, printing, products, purchase_orders,
+from .api import (accounts, admin, approvals, audit, auth, credit_notes, dashboard, debit_notes, db_reset, distributors, email_reports, email_settings,
+                  employees, features, hr, inventory, invoices, leads, modules, printing, products, purchase_orders,
                   reports, roles, sales_orders, suppliers, tax, users)
 
 app = FastAPI(title="HERBANOVA Business Control System")
@@ -88,6 +88,7 @@ app.include_router(leads.router)
 app.include_router(reports.router)
 app.include_router(email_reports.router)
 app.include_router(email_reports.public_router)
+app.include_router(email_settings.router)
 
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles

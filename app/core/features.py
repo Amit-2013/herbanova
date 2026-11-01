@@ -114,7 +114,7 @@ FEATURES: tuple[Feature, ...] = (
         "Scheduled email recipients, schedules and the delivery log.",
         views=("scheduled",),
         permissions=("email:manage",),
-        api_prefixes=("/api/email-reports",)),
+        api_prefixes=("/api/email-reports", "/api/email-settings")),
     Feature(
         "users", "Users and rights",
         "Logins, roles, permissions, the employee master and feature availability.",

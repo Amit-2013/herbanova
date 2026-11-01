@@ -37,10 +37,11 @@ requirements resolve, the server runs, and all 230 tests pass.
 
 ```
 python -m pytest -q
-230 passed, 467 warnings in 41.82s
+261 passed, 479 warnings in 48.14s
 ```
 
-A JUnit XML run was also captured (`230 tests, 0 failures, 0 errors, 0 skipped`).
+A JUnit XML run was also captured (`230 tests, 0 failures, 0 errors, 0 skipped`)
+before the permission and SMTP work; the counts below are the current collection.
 Counts by file:
 
 | Area | File | Passed |
@@ -60,6 +61,8 @@ Counts by file:
 | Scheduled e-mail API | `test_email_api.py` | 12 |
 | Scheduled e-mail content | `test_email_reports.py` | 17 |
 | Schedule arithmetic | `test_email_schedules.py` | 24 |
+| SMTP settings and test composer | `test_email_settings.py` | 10 |
+| Feature switches | `test_feature_switches.py` | 10 |
 | HR core | `test_hr.py` | 8 |
 | HR attendance | `test_hr_attendance.py` | 6 |
 | HR dashboard | `test_hr_dashboard.py` | 5 |
@@ -73,13 +76,14 @@ Counts by file:
 | HR reports | `test_hr_reports.py` | 5 |
 | HR security | `test_hr_security.py` | 7 |
 | Module register | `test_module_status.py` | 4 |
+| Permission tree | `test_permission_tree.py` | 11 |
 | Products | `test_products.py` | 4 |
 | Purchase orders | `test_purchase_orders.py` | 4 |
 | Report reconciliation | `test_report_reconciliation.py` | 12 |
 | Reports | `test_reports.py` | 8 |
 | Role parity | `test_roles_parity.py` | 7 |
 | Smoke | `test_smoke.py` | 1 |
-| **Total** | | **230** |
+| **Total** | | **261** |
 
 Notable security assertions that passed inside `test_hr_security.py` and
 `test_roles_parity.py`:
@@ -351,8 +355,31 @@ HR pack.
 
 **Not verified live:** there is no `email_schedules` row and no `email_deliveries`
 row in this development database. The worker was not started and no actual send
-record was produced. Delivery behaviour is verified by the tests above, not by a
-live delivery record.
+record was produced for a scheduled pack. Delivery behaviour is verified by the
+tests above, not by a live delivery record.
+
+### 9.1 SMTP settings and test composer (executed)
+
+The new panel was exercised in the browser against a throwaway listener on
+`127.0.0.1:2525`. Every address used was synthetic (`admin@example.test`,
+`audit@example.test`, `qa.to@example.test`, `qa.cc@example.test`); no real inbox
+was contacted.
+
+| Step | Action | Observed |
+|---|---|---|
+| 1 | Saved host `127.0.0.1`, port 2525, security None, sending Enabled, From `reports@example.test`, test To/CC | Status chips: SMTP configured, Sending enabled, Test mode, No password |
+| 2 | Sent an `hr_notice` test with Deliver | Outbox row `[TEST] HR announcement`, mode SMTP, status sent; sink received one message with matching Subject, From, To, Cc and body marker |
+| 3 | Sent a `custom` test with dry run | Outbox row `[TEST] Dry run check`, mode Dry run, status captured; sink message count stayed 1 |
+| 4 | Read back GET `/api/email-settings` | `password_set` boolean only; no password field in the JSON |
+| 5 | Migration on the development database (after a `pg_dump` backup) | head `0017_email_settings`; both tables present; 0 settings rows before the UI save |
+| 6 | Test-database round trip | downgrade removed both tables, upgrade recreated them |
+
+The saved verification rows were deleted afterwards (counts returned to 0/0), so
+the development installation is back on the environment defaults. The append-only
+audit rows from the two sends were left in place, as required for an audit trail.
+
+**Still not verified:** a real send to an approved external mailbox, and a
+scheduled pack sent by the worker. Both wait on owner approval (§14).
 
 ---
 
@@ -509,7 +536,7 @@ for the next step rather than silently fixed:
 
 ## 15. Verdict
 
-- The application boots, serves and passes its full suite: **230/230**.
+- The application boots, serves and passes its full suite: **261/261**.
 - The schema migrates from empty to `0015_statutory_heads` and back, and matches
   the models.
 - All 75 parameterless GET routes, 26 central reports, 7 HR reports and the
