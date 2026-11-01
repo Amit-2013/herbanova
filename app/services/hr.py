@@ -283,6 +283,8 @@ def request_approval(db: Session, *, record_type: str, record_id: int, requested
         pending_approver_role=approver_role)
     db.add(ar)
     db.flush()
+    from . import hr_notify
+    hr_notify.notify_request(db, ar, employee_id=(detail or {}).get("employee_id"))
     return ar
 
 
