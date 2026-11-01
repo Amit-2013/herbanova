@@ -38,7 +38,8 @@ const state = {user: null, perms: new Set(), modules: null, dashboard: null, pro
                      sort: {key: "sales", dir: "desc"}, selected: null},
                expiry: {bucket: "all", loading: false, data: null},
                palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
-               hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: []}};
+               hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: [],
+                    from: "", to: "", error: null, profile: null}};
 state.rp.filters = {employee_id: "", department: "", branch_id: ""};
 state.rp.opts = null;
 
@@ -132,6 +133,7 @@ function openDrawer(title, sub, html, wide = false) {
   $("#dtitle").textContent = title;
   $("#dsub").textContent = sub || "";
   $("#dbody").innerHTML = html;
+  $("#drawer").classList.remove("hr-wide");
   $("#drawer").classList.toggle("wide", wide);
   $("#scrim").classList.remove("hide");
   $("#drawer").classList.remove("hide");
@@ -2451,40 +2453,468 @@ function renderCustomers() {
       <button class="btn ghost sm" type="button" data-act="new-so-dist" data-id="${d.id}">New order</button></td></tr>`).join("");
   empty($("#cuempty"), !list.length, "No customer matches this search.", "Customers and distributors are one master; records are never deleted.");
 }
+/* ---------- HR workspace ---------- */
+function hrSetRange(from, to) {
+  state.hr.from = from;
+  state.hr.to = to;
+}
+function hrInitRange() {
+  if (!state.hr.from || !state.hr.to) {
+    const w = dashWindow("month");
+    hrSetRange(w.from, w.to);
+  }
+}
+async function openHr() {
+  hrInitRange();
+  if (!can("hr:read")) {
+    state.hr.dashboard = null;
+    renderHr();
+    return;
+  }
+  const [d, e] = await Promise.all([
+    api(`/api/hr/dashboard?from_date=${encodeURIComponent(state.hr.from)}&to_date=${encodeURIComponent(state.hr.to)}`),
+    api("/api/hr/employees?page_size=200&sort=name")]);
+  state.hr.dashboard = d.ok ? d.body : null;
+  state.hr.error = d.ok ? null : detail(d.body);
+  state.hr.employees = e.ok ? e.body : [];
+  if (state.view === "hr") { renderHead(); renderHr(); }
+}
+function setHrRangePreset(key) {
+  const w = dashWindow(key === "30" ? "30d" : "month");
+  hrSetRange(w.from, w.to);
+  $$("[data-hrr]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.hrr === key)));
+  $("#hrDateError").classList.add("hide");
+  openHr();
+}
+function applyHrRange() {
+  const from = $("#hrFrom").value, to = $("#hrTo").value, err = $("#hrDateError");
+  err.classList.add("hide");
+  if (!from || !to) { err.textContent = "Choose both dates."; err.classList.remove("hide"); return; }
+  if (to < from) { err.textContent = "The end date cannot be before the start date."; err.classList.remove("hide"); return; }
+  $$("[data-hrr]").forEach(b => b.setAttribute("aria-pressed", "false"));
+  hrSetRange(from, to);
+  openHr();
+}
+function exportHr() {
+  const q = new URLSearchParams();
+  const search = ($("#hrq").value || "").trim();
+  if (search) q.set("q", search);
+  if ($("#hrStatus").value) q.set("status", $("#hrStatus").value);
+  if ($("#hrDept").value) q.set("department", $("#hrDept").value);
+  const s = q.toString();
+  location.href = "/api/hr/employees/export.csv" + (s ? "?" + s : "");
+}
+function hrKpi(label, value, note, opts = {}) {
+  const gap = opts.gap ? `<span class="chip off">No data yet</span>` : "";
+  return `<div class="kpi${opts.gap ? " cmp-card-gap" : ""}">
+    <span class="kpi-label">${esc(label)}${gap}</span>
+    <span class="kpi-value">${esc(value)}</span>
+    <span class="kpi-note">${esc(note)}</span></div>`;
+}
+function hrNumber(value) {
+  return value == null ? "No data yet" : qty(value);
+}
+function renderHrKpis(d) {
+  const att = d.needs_attention || {};
+  const stale = (att.stale_approvals && att.stale_approvals.count) || 0;
+  const tiles = [
+    hrKpi("On the rolls", hrNumber(d.active_employees),
+      `${hrNumber(d.inactive_employees)} inactive · ${hrNumber(d.total_employees)} records`),
+    hrKpi("Present today", hrNumber(d.present_today),
+      `${hrNumber(d.late_today)} late · ${hrNumber(d.early_today)} early departure`),
+    hrKpi("Not in today", hrNumber((d.absent_today || 0) + (d.on_leave_today || 0) + (d.on_od_today || 0)),
+      `${hrNumber(d.absent_today)} absent · ${hrNumber(d.on_leave_today)} leave · ${hrNumber(d.on_od_today)} on duty`),
+    hrKpi("Joiners this month", hrNumber(d.new_joiners_month),
+      `${hrNumber(d.exits_month)} exits this month; ${hrNumber(d.exits_in_range)} in the chosen range`),
+    hrKpi("Approvals waiting", hrNumber(d.pending_approvals),
+      `${hrNumber(d.pending_leave)} leave; ${stale} older than three days`),
+    hrKpi("Probation ending", hrNumber(d.probation_ending_soon),
+      "Within 30 days. Confirm or extend on the profile."),
+    hrKpi("Documents expiring", hrNumber(d.documents_expiring),
+      "Within 60 days.")];
+  if (d.payroll_visible) {
+    tiles.push(d.payroll_status
+      ? hrKpi("Salary payable this month", `₹ ${money(d.salary_payable)}`,
+              `Payroll period is ${d.payroll_status}. Costs stay off the HR email.`)
+      : hrKpi("Salary payable this month", "", "No payroll period exists for this month yet.", {gap: true}));
+  }
+  $("#hrKpis").innerHTML = tiles.join("");
+}
+function renderHrAttention(d) {
+  const a = d.needs_attention || {};
+  const rows = [];
+  if (a.missing_punches && a.missing_punches.count) {
+    rows.push(`<li><a class="att-item att-warn" href="#/hr" data-act="hr-attention" data-kind="punches">
+      <span class="att-body"><b>Missing punches</b><span>${a.missing_punches.count} attendance row(s) have no check-in or check-out.</span></span>
+      <span class="att-go">View</span></a></li>`);
+  }
+  if (a.negative_leave && a.negative_leave.count) {
+    rows.push(`<li><a class="att-item att-bad" href="#/hr" data-act="hr-attention" data-kind="leave">
+      <span class="att-body"><b>Leave balance below zero</b><span>${a.negative_leave.count} balance(s) are over-used this year.</span></span>
+      <span class="att-go">View</span></a></li>`);
+  }
+  if (a.stale_approvals && a.stale_approvals.count) {
+    rows.push(`<li><a class="att-item att-warn" href="#/approvals">
+      <span class="att-body"><b>Approvals older than three days</b><span>${a.stale_approvals.count} request(s) have waited too long.</span></span>
+      <span class="att-go">Open</span></a></li>`);
+  }
+  if (a.incomplete_records && a.incomplete_records.count) {
+    rows.push(`<li><a class="att-item att-off" href="#/hr" data-act="hr-attention" data-kind="records">
+      <span class="att-body"><b>Incomplete employee records</b><span>${a.incomplete_records.count} active record(s) are missing a field.</span></span>
+      <span class="att-go">View</span></a></li>`);
+  }
+  $("#hrAttentionNote").textContent = rows.length ? `${rows.length} group(s)` : "All clear";
+  $("#hrAttention").innerHTML = rows.length ? rows.join("")
+    : `<li><div class="att-empty">Nothing needs attention in this range.</div></li>`;
+}
+function hrTrendChart(points) {
+  const last = points.slice(-31);
+  if (!last.length) return `<p class="gap-note">No data yet: no attendance rows in this range.</p>`;
+  const totals = last.map(p => (p.present || 0) + (p.absent || 0) + (p.leave || 0) + (p.od || 0));
+  const max = Math.max(1, ...totals);
+  const segs = [
+    ["present", "pr", p => p.present || 0, "moss"],
+    ["leave", "lv", p => p.leave || 0, "turmeric"],
+    ["on duty", "od", p => p.od || 0, "info"],
+    ["absent", "ab", p => p.absent || 0, "bad"]];
+  const cols = last.map((p, i) => {
+    const bars = segs.map(([name, cls, val]) => {
+      const n = val(p);
+      return n ? `<span class="hr-seg ${cls}" style="height:${(n / max) * 100}%"></span>` : "";
+    }).join("");
+    const dayLabel = i % 7 === 0 || i === last.length - 1
+      ? p.date.slice(8) : "";
+    const label = `${p.date}: ${p.present || 0} present, ${p.absent || 0} absent, ` +
+      `${p.leave || 0} leave, ${p.od || 0} on duty`;
+    return `<div class="hr-col" title="${esc(label)}">
+      <div class="hr-stack" role="img" aria-label="${esc(label)}">${bars}</div>
+      <span class="hr-date">${esc(dayLabel)}</span></div>`;
+  }).join("");
+  const legend = `<div class="hr-legend">
+    <span><i class="pr"></i>Present</span><span><i class="lv"></i>Leave</span>
+    <span><i class="od"></i>On duty</span><span><i class="ab"></i>Absent</span></div>`;
+  return `<div class="hr-trend">${cols}</div>${legend}`;
+}
+function renderHrTrend(d) {
+  const trend = d.attendance_trend || [];
+  const anyRows = trend.some(p => (p.present || 0) + (p.absent || 0) + (p.leave || 0) + (p.od || 0));
+  $("#hrTrend").innerHTML = anyRows ? hrTrendChart(trend)
+    : `<p class="gap-note">No data yet: no attendance rows between ${esc(fmtDate(d.from_date))} and ${esc(fmtDate(d.to_date))}.</p>`;
+  $("#hrTrendNote").textContent = `${fmtDate(d.from_date)} – ${fmtDate(d.to_date)}`;
+  const mix = d.leave_by_type || [];
+  $("#hrLeaveMix").innerHTML = `<h3 class="hr-sub">Approved leave by type</h3>` + (mix.length
+    ? `<div class="tw"><table class="hr-mini"><thead><tr><th>Type</th><th class="n">Days</th><th class="n">Applications</th></tr></thead><tbody>
+        ${mix.map(x => `<tr><td>${esc(x.name)}<small>${esc(x.code)}</small></td><td class="n">${qty(x.days)}</td><td class="n">${x.applications}</td></tr>`).join("")}
+      </tbody></table></div>`
+    : `<p class="gap-note">No data yet: no approved leave in this range.</p>`);
+}
+function renderHrCalendar(d) {
+  const rows = [];
+  (d.birthdays || []).forEach(x => rows.push([x.date, `<b>${esc(x.full_name)}</b>`, `turns ${x.turning}`, "birthday"]));
+  (d.anniversaries || []).forEach(x => rows.push([x.date, `<b>${esc(x.full_name)}</b>`, `${x.years} year(s)`, "anniversary"]));
+  (d.holidays || []).forEach(x => rows.push([x.date, `<b>${esc(x.name)}</b>`, "holiday", "holiday"]));
+  rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  $("#hrCalendar").innerHTML = rows.length
+    ? `<ul class="hr-list">${rows.slice(0, 12).map(([date, name, what, kind]) =>
+        `<li><span class="hr-list-when">${esc(fmtDate(date))}<small>${esc(what)}</small></span>
+          <span class="hr-list-who">${name}</span><span class="chip ${kind === "holiday" ? "warn" : "ok"}">${esc(kind)}</span></li>`).join("")}</ul>`
+    : `<p class="gap-note">No birthdays, work anniversaries or holidays in the next 30 days.</p>`;
+}
+function renderHrShape(d) {
+  const depts = (d.by_department || []).slice().sort((a, b) => b.employees - a.employees);
+  const total = depts.reduce((s, x) => s + x.employees, 0) || 1;
+  const bars = depts.map(x => `<div class="hr-bar-row">
+    <span class="hr-bar-label">${esc(x.department)}</span>
+    <span class="hr-bar-track"><i style="width:${Math.round(x.employees / total * 100)}%"></i></span>
+    <b>${x.employees}</b></div>`).join("");
+  const branches = (d.by_branch || []).map(x =>
+    `<li><span>${esc(x.branch)}</span><b>${x.employees}</b></li>`).join("");
+  $("#hrShape").innerHTML = (depts.length
+    ? `<div class="hr-bars">${bars}</div>`
+    : `<p class="gap-note">No data yet: no active employees are assigned to a department.</p>`)
+    + (branches ? `<h3 class="hr-sub">By branch</h3><ul class="hr-split">${branches}</ul>`
+      : `<p class="gap-note">No branch has active employees yet.</p>`);
+}
+function renderHrDirectory() {
+  const q = ($("#hrq").value || "").trim().toLowerCase();
+  const status = $("#hrStatus").value;
+  const dept = $("#hrDept").value;
+  const all = state.hr.employees || [];
+  const list = all.filter(e => (!q || [e.code, e.full_name, e.department, e.designation]
+      .some(x => (x || "").toLowerCase().includes(q)))
+    && (!status || e.status === status)
+    && (!dept || (e.department || "Unassigned") === dept));
+  $("#hrrows").innerHTML = list.map(e => `<tr>
+    <td class="strong">${esc(e.full_name)}<small>${esc(e.code)}</small></td>
+    <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td>
+    <td>${esc(fmtDate(e.joining_date))}</td>
+    <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td>
+    <td class="rowacts"><button class="btn ghost sm" type="button" data-act="hr-profile" data-id="${e.id}">Open</button></td></tr>`).join("");
+  $("#hrDirNote").textContent = all.length === 200
+    ? `Showing the first 200 employees; narrow the search to see the rest. ${list.length} match.`
+    : `${list.length} of ${plural(all.length, "employee")}.`;
+  empty($("#hrempty"), !list.length, all.length ? "No employee matches these filters." : "No employees yet.",
+    all.length ? "Clear the search, status or department filter." : "Add the first employee with “New employee”.");
+}
+function fillHrDepartments(d) {
+  const sel = $("#hrDept"), keep = sel.value;
+  const names = new Set((d.by_department || []).map(x => x.department));
+  (state.hr.employees || []).forEach(e => names.add(e.department || "Unassigned"));
+  sel.innerHTML = `<option value="">All departments</option>` +
+    [...names].sort().map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  sel.value = [...names].includes(keep) ? keep : "";
+}
 function renderHr() {
-  if (!$("#hrrows")) return;
-  // Staff without hr:read get their own attendance, not the company directory.
+  if (!$("#hrKpis")) return;
   const wholeTeam = can("hr:read");
-  $("#hrStats").classList.toggle("hide", !wholeTeam);
-  $("#hrDirectory").classList.toggle("hide", !wholeTeam);
-  ["hr-employees", "hr-leave", "hr-od"].forEach(a =>
-    $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !wholeTeam)));
+  ["#hrDateTools", "#hrKpis", "#hrDirectory"].forEach(s => $(s).classList.toggle("hide", !wholeTeam));
+  $("#hrExport").classList.toggle("hide", !wholeTeam);
+  $("#hrImport").classList.toggle("hide", !can("hr:write"));
+  $("#hrAdd").classList.toggle("hide", !can("hr:write"));
+  // Staff get the self-service panel instead of the team task grid.
+  $("#hrTasks").classList.toggle("hide", !wholeTeam);
   // Payroll is a closed book: the API needs hr:payroll_prepare to even list a period.
   $$('#v-hr [data-act="hr-payroll"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:payroll_prepare"))));
-  // Shift policy is an HR/administrator setting, not something every reader edits.
-  $$('#v-hr [data-act="hr-shifts"]').forEach(b =>
-    b.classList.toggle("hide", !(wholeTeam && can("hr:write"))));
-  if (!wholeTeam) return;
+  // Shift, notices and locks are HR/administrator settings, not reader controls.
+  ["hr-shifts", "hr-notices", "hr-locks"].forEach(a =>
+    $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !(wholeTeam && can("hr:write")))));
+  $$('#v-hr [data-act="hr-reports"]').forEach(b =>
+    b.classList.toggle("hide", !(wholeTeam && can("hr:reports"))));
+  // The leave calendar is a whole-team view; staff see only their own leave.
+  $$('#v-hr [data-act="hr-calendar"]').forEach(b => b.classList.toggle("hide", !wholeTeam));
+  $$("#v-hr .hr-team-only").forEach(el => el.classList.toggle("hide", !wholeTeam));
+  $("#hrSelf").classList.toggle("hide", wholeTeam || !can("hr:attendance_self"));
+  if (!wholeTeam) {
+    $("#hrRangeNote").textContent = "Your own attendance, leave and payslips.";
+    if (can("hr:attendance_self")) renderHrSelf();
+    return;
+  }
+  refreshHrUnread();
   const d = state.hr.dashboard || {};
-  $("#hrStats").innerHTML = [
-    ["Employees", d.total_employees ?? state.hr.employees.length],
-    ["Active", d.active_employees ?? "–"],
-    ["Present today", d.present_today ?? "–"],
-    ["Absent / leave / OD", d.absent_today != null ? `${d.absent_today} / ${d.on_leave_today} / ${d.on_od_today}` : "–"],
-    ["Pending HR approvals", d.pending_approvals ?? "–"],
-    ["Salary payable", d.salary_payable != null ? "₹ " + money(d.salary_payable) : "–"]
-  ].map(([k, v]) => `<div class="stat"><span class="k">${esc(k)}</span><span class="v">${esc(String(v))}</span></div>`).join("");
-  $("#hrrows").innerHTML = state.hr.employees.map(e => `<tr><td class="strong">${esc(e.full_name)}<small>${esc(e.code)}</small></td>
-    <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td>
-    <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td></tr>`).join("");
-  empty($("#hrempty"), !state.hr.employees.length, "No employees yet.", "Add the first employee from the employee master.");
+  if (!d.from_date) {
+    $("#hrKpis").innerHTML = "";
+    $("#hrAttention").innerHTML = `<li><div class="att-empty">${esc(state.hr.error || "The HR figures did not load. Refresh to try again.")}</div></li>`;
+    $("#hrTrend").innerHTML = "";
+    $("#hrCalendar").innerHTML = "";
+    $("#hrShape").innerHTML = "";
+    renderHrDirectory();
+    return;
+  }
+  $("#hrFrom").value = state.hr.from;
+  $("#hrTo").value = state.hr.to;
+  $("#hrRangeNote").textContent = `${fmtDate(d.from_date)} – ${fmtDate(d.to_date)} · today ${fmtDate(d.date)}`;
+  fillHrDepartments(d);
+  renderHrKpis(d);
+  renderHrAttention(d);
+  renderHrTrend(d);
+  renderHrCalendar(d);
+  renderHrShape(d);
+  renderHrDirectory();
 }
-async function openHr() {
-  const [d, e] = await Promise.all([api("/api/hr/dashboard"), api("/api/hr/employees")]);
-  state.hr.dashboard = d.ok ? d.body : null;
-  state.hr.employees = e.ok ? e.body : [];
-  if (state.view === "hr") { renderHead(); renderHr(); }
+function hrAttention(kind) {
+  const a = (state.hr.dashboard && state.hr.dashboard.needs_attention) || {};
+  const block = a[kind] || {rows: [], count: 0};
+  let rows = "";
+  if (kind === "records") {
+    rows = (block.rows || []).map(x => `<tr><td class="strong">${esc(x.full_name)}<small>${esc(x.code)}</small></td>
+      <td>${esc((x.missing || []).join(", "))}</td>
+      <td><button class="btn ghost sm" type="button" data-act="hr-edit-emp" data-id="${x.employee_id}">Complete</button></td></tr>`).join("");
+  } else if (kind === "punches") {
+    rows = (block.rows || []).map(x => `<tr><td>${esc(x.employee)}</td><td>${esc(fmtDate(x.date))}</td>
+      <td></td></tr>`).join("");
+  } else {
+    rows = (block.rows || []).map(x => `<tr><td>${esc(x.employee)}</td><td>${esc(String(x.year))}</td></tr>`).join("");
+  }
+  const title = kind === "records" ? "Incomplete employee records"
+    : kind === "punches" ? "Attendance missing a punch" : "Leave balances below zero";
+  openDrawer(title, `${block.count || 0} item(s). Showing up to 20; the count is complete.`, `
+    <div class="tw"><table><thead><tr><th>Employee</th><th>${kind === "records" ? "Missing" : kind === "punches" ? "Date" : "Year"}</th><th></th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="3" class="empty-row">Nothing here now.</td></tr>'}</tbody></table></div>`, true);
+}
+/* ---------- employee profile ---------- */
+async function hrProfile(id) {
+  const [r, bal, br, off, sh] = await Promise.all([
+    api(`/api/hr/employees/${id}/profile`),
+    api(`/api/hr/leave/balances?employee_id=${id}`),
+    api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts")]);
+  if (!r.ok) { toast(r, "Employee not loaded"); return; }
+  const names = rows => Object.fromEntries((rows && rows.ok ? rows.body : []).map(x => [x.id, x.name]));
+  state.hr.profile = {...r.body,
+    balances: bal.ok ? bal.body.balances : [],
+    balanceYear: bal.ok ? bal.body.year : null,
+    branchNames: names(br), officeNames: names(off), shiftNames: names(sh)};
+  hrProfileDrawer("overview");
+}
+function hrProfileValue(value) {
+  return value == null || value === "" ? "—" : esc(value);
+}
+function hrProfileOverview(p) {
+  const e = p.employee;
+  const row = (label, value) => `<dt>${esc(label)}</dt><dd>${hrProfileValue(value)}</dd>`;
+  const branch = p.branchNames[e.branch_id], office = p.officeNames[e.office_id];
+  const shift = p.shiftNames[e.shift_id];
+  const dept = e.department || "Unassigned";
+  const personal = [
+    row("Status", e.status), row("Department", dept), row("Designation", e.designation),
+    row("Employment type", e.employment_type), row("Joined", fmtDate(e.joining_date)),
+    row("Probation ends", e.probation_end_date ? fmtDate(e.probation_end_date) : "—"),
+    row("Confirmed", e.confirmation_date ? fmtDate(e.confirmation_date) : "—"),
+    row("Branch", branch), row("Office", office), row("Shift", shift),
+    row("Phone", e.phone), row("Email", e.email),
+    row("Date of birth", e.date_of_birth ? fmtDate(e.date_of_birth) : "—"),
+    row("Address", e.address), row("Emergency contact", [e.emergency_name, e.emergency_phone].filter(Boolean).join(" · "))];
+  if (e.date_of_exit) personal.push(row("Exited on", fmtDate(e.date_of_exit)), row("Exit reason", e.exit_reason));
+  const confidential = p.can_edit_confidential ? `
+    <h3 class="hr-sub">Bank and statutory numbers</h3>
+    <dl class="dl">
+      ${row("Bank", e.bank_name)}${row("Account", e.bank_account_no)}${row("IFSC", e.bank_ifsc)}
+      ${row("PAN", e.pan)}${row("UAN", e.uan)}${row("ESI number", e.esi_no)}
+    </dl>`
+    : `<p class="gap-note">Bank, PAN and statutory numbers are hidden for your role. The server masks them rather than sending them to the browser.</p>`;
+  const bals = p.balances || [];
+  const balances = `<h3 class="hr-sub">Leave balances ${p.balanceYear ? `in ${p.balanceYear}` : ""}</h3>` +
+    (bals.length ? `<div class="tw"><table class="hr-mini"><thead><tr><th>Type</th><th class="n">Entitled</th><th class="n">Carried</th><th class="n">Used</th><th class="n">Pending</th><th class="n">Available</th></tr></thead><tbody>
+      ${bals.map(x => `<tr><td>${esc(x.name)}</td><td class="n">${qty(x.entitled)}</td><td class="n">${qty(x.carried)}</td><td class="n">${qty(x.used)}</td><td class="n">${qty(x.pending)}</td><td class="n strong">${qty(x.available)}</td></tr>`).join("")}
+      </tbody></table></div>`
+    : `<p class="gap-note">No data yet: no leave types are configured.</p>`);
+  return `<dl class="dl">${personal.join("")}</dl>${confidential}${balances}`;
+}
+function hrProfileDocuments(p) {
+  const canEdit = p.can_edit;
+  return `<div class="actions" style="margin-top:0">
+      ${canEdit ? `<button class="btn" type="button" data-act="hr-doc-new" data-id="${p.employee.id}">Add a document</button>` : ""}</div>
+    <div class="tw"><table><thead><tr><th>Document</th><th>Number</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>
+      ${(p.documents || []).map(x => {
+        const days = x.expires_on ? daysUntil(x.expires_on) : null;
+        return `<tr><td class="strong">${esc(x.title)}<small>${esc(x.doc_type)}</small></td>
+          <td>${x.number ? esc(x.number) + (x.number_masked ? ' <span class="chip off">masked</span>' : "") : "—"}</td>
+          <td>${x.expires_on ? esc(fmtDate(x.expires_on)) + (days != null && days < 30 ? ` <span class="chip warn">${days < 0 ? "expired" : days + " days"}</span>` : "") : "—"}</td>
+          <td><span class="chip ${x.status === "active" ? "ok" : "off"}">${esc(x.status)}</span></td>
+          <td class="rowacts">${canEdit ? `<button class="btn ghost sm" type="button" data-act="hr-doc-edit" data-id="${x.id}">Edit</button>` : ""}</td></tr>`;
+      }).join("") || '<tr><td colspan="5" class="empty-row">No documents recorded.</td></tr>'}
+    </tbody></table></div>
+    <p class="note">Documents are never deleted. When one is replaced, mark it replaced so the history stays intact.</p>`;
+}
+function hrProfileAssets(p) {
+  const canEdit = p.can_edit;
+  return `<div class="actions" style="margin-top:0">
+      ${canEdit ? `<button class="btn" type="button" data-act="hr-asset-new" data-id="${p.employee.id}">Issue an asset</button>` : ""}</div>
+    <div class="tw"><table><thead><tr><th>Asset</th><th>Serial</th><th>Issued</th><th>Returned</th><th>Condition</th><th></th></tr></thead><tbody>
+      ${(p.assets || []).map(x => `<tr><td class="strong">${esc(x.name)}<small>${esc(x.asset_type)}</small></td>
+        <td>${esc(x.serial_no || "—")}</td><td>${esc(fmtDate(x.issued_on))}</td>
+        <td>${x.returned_on ? esc(fmtDate(x.returned_on)) : '<span class="chip warn">in use</span>'}</td>
+        <td>${esc(x.condition_note || "—")}</td>
+        <td class="rowacts">${canEdit && !x.returned_on ? `<button class="btn ghost sm" type="button" data-act="hr-asset-return" data-id="${x.id}">Return</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No assets issued.</td></tr>'}
+    </tbody></table></div>`;
+}
+function hrProfileHistory(p) {
+  return `<div class="tw"><table><thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Changes</th></tr></thead><tbody>
+    ${(p.history || []).map(x => `<tr><td>${esc(fmtStamp(x.at))}</td><td>${esc(x.action)}</td><td>${esc(x.actor)}</td>
+      <td><code>${esc(JSON.stringify(x.changes || {}))}</code></td></tr>`).join("") || '<tr><td colspan="4" class="empty-row">No changes recorded yet.</td></tr>'}
+    </tbody></table></div>`;
+}
+function hrProfileDrawer(tab) {
+  const p = state.hr.profile;
+  if (!p) return;
+  const e = p.employee;
+  const tabs = [["overview", "Overview"], ["documents", `Documents (${(p.documents || []).length})`],
+                ["assets", `Assets (${(p.assets || []).length})`], ["history", "History"]];
+  const body = tab === "documents" ? hrProfileDocuments(p)
+    : tab === "assets" ? hrProfileAssets(p)
+    : tab === "history" ? hrProfileHistory(p) : hrProfileOverview(p);
+  openDrawer(`${e.full_name} · ${e.code}`,
+    `${e.designation || "No designation"} · ${e.department || "No department"} · ${e.status}`, `
+    <div class="seg compact hr-tabs" role="group" aria-label="Profile section">
+      ${tabs.map(([k, label]) => `<button type="button" data-hrp="${k}" aria-pressed="${k === tab}">${esc(label)}</button>`).join("")}
+    </div>
+    <div id="hrProfileBody">${body}</div>
+    <div class="actions">
+      ${p.can_edit ? `<button class="btn" type="button" data-act="hr-edit-emp" data-id="${e.id}">Edit employee</button>` : ""}
+      <button class="btn ghost" type="button" data-act="close">Close</button></div>`, true);
+}
+function hrDocForm(employeeId, docId) {
+  const p = state.hr.profile;
+  const x = docId ? (p.documents || []).find(d => d.id === Number(docId)) : null;
+  openDrawer(x ? "Edit document" : "Add a document",
+    "A number is stored masked for readers without confidential rights. Documents are never deleted.", `
+    <form id="hrDocForm" data-id="${x ? x.id : ""}" data-emp="${employeeId}" novalidate>
+      <div class="row2"><div><label>Type</label><input name="doc_type" value="${esc(x ? x.doc_type : "")}" placeholder="licence, contract, ID" autocomplete="off"></div>
+      <div><label>Title</label><input name="title" value="${esc(x ? x.title : "")}" autocomplete="off"></div></div>
+      <label>Number</label><input name="number" value="${esc(x && x.number ? x.number : "")}" autocomplete="off">
+      <div class="row2"><div><label>Issued on</label><input name="issued_on" type="date" value="${x && x.issued_on ? x.issued_on : ""}"></div>
+      <div><label>Expires on</label><input name="expires_on" type="date" value="${x && x.expires_on ? x.expires_on : ""}"></div></div>
+      <label>Status</label><select name="status"><option value="active"${!x || x.status === "active" ? " selected" : ""}>Active</option>
+        <option value="expired"${x && x.status === "expired" ? " selected" : ""}>Expired</option>
+        <option value="replaced"${x && x.status === "replaced" ? " selected" : ""}>Replaced</option></select>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save document</button><button class="btn ghost" type="button" data-act="hr-profile-tab" data-tab="documents">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrDoc(form) {
+  const f = form.elements, err = $(".err", form), emp = form.dataset.emp, id = form.dataset.id;
+  err.textContent = "";
+  if (!f.doc_type.value.trim() || !f.title.value.trim()) { err.textContent = "Give the document a type and a title."; return; }
+  if (f.issued_on.value && f.expires_on.value && f.expires_on.value < f.issued_on.value) {
+    err.textContent = "The expiry cannot be before the issue date."; return;
+  }
+  const body = {doc_type: f.doc_type.value.trim(), title: f.title.value.trim(),
+    number: f.number.value.trim() || null, issued_on: f.issued_on.value || null,
+    expires_on: f.expires_on.value || null, status: f.status.value};
+  const res = await api(id ? `/api/hr/employees/${emp}/documents/${id}` : `/api/hr/employees/${emp}/documents`,
+    {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? "Document saved" : "Document not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrProfile(emp);
+  hrProfileDrawer("documents");
+}
+function hrAssetForm(employeeId) {
+  openDrawer("Issue an asset", "Returned assets stay on the record; the issue date is kept.", `
+    <form id="hrAssetForm" data-emp="${employeeId}" novalidate>
+      <div class="row2"><div><label>Type</label><input name="asset_type" placeholder="Laptop, phone, vehicle" autocomplete="off"></div>
+      <div><label>Name</label><input name="name" autocomplete="off"></div></div>
+      <div class="row2"><div><label>Serial number</label><input name="serial_no" autocomplete="off"></div>
+      <div><label>Issued on</label><input name="issued_on" type="date" value="${isoDay(0)}"></div></div>
+      <label>Condition note</label><input name="condition_note" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Record the issue</button><button class="btn ghost" type="button" data-act="hr-profile-tab" data-tab="assets">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrAsset(form) {
+  const f = form.elements, err = $(".err", form), emp = form.dataset.emp;
+  err.textContent = "";
+  if (!f.asset_type.value.trim() || !f.name.value.trim()) { err.textContent = "Give the asset a type and a name."; return; }
+  if (!f.issued_on.value) { err.textContent = "Choose the issue date."; return; }
+  const res = await api(`/api/hr/employees/${emp}/assets`, {method: "POST", body: {
+    asset_type: f.asset_type.value.trim(), name: f.name.value.trim(),
+    serial_no: f.serial_no.value.trim() || null, issued_on: f.issued_on.value,
+    condition_note: f.condition_note.value.trim() || null}});
+  toast(res, res.ok ? "Asset issued" : "Asset not recorded");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrProfile(emp);
+  hrProfileDrawer("assets");
+}
+function hrAssetReturnForm(assetId) {
+  const p = state.hr.profile, x = (p.assets || []).find(a => a.id === Number(assetId));
+  if (!p || !x) return;
+  openDrawer(`Return ${x.name}`, "The asset stays in the employee's history as returned.", `
+    <form id="hrAssetReturnForm" data-id="${x.id}" data-emp="${p.employee.id}" novalidate>
+      <label>Returned on</label><input name="returned_on" type="date" value="${isoDay(0)}">
+      <label>Condition note</label><input name="condition_note" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Record the return</button><button class="btn ghost" type="button" data-act="hr-profile-tab" data-tab="assets">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrAssetReturn(form) {
+  const f = form.elements, err = $(".err", form), emp = form.dataset.emp;
+  err.textContent = "";
+  if (!f.returned_on.value) { err.textContent = "Choose the return date."; return; }
+  const res = await api(`/api/hr/assets/${form.dataset.id}/return`, {method: "POST", body: {
+    returned_on: f.returned_on.value, condition_note: f.condition_note.value.trim() || null}});
+  toast(res, res.ok ? "Asset returned" : "Return not recorded");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrProfile(emp);
+  hrProfileDrawer("assets");
 }
 async function hrEmployees() {
   const [e, b, o, s] = await Promise.all([api("/api/hr/employees"), api("/api/hr/branches"),
@@ -2640,11 +3070,12 @@ async function saveHrLeave(form) {
   hrLeave();
 }
 async function hrOd() {
-  const [a, e] = await Promise.all([api("/api/hr/od"), api("/api/hr/employees")]);
+  const [a, e] = await Promise.all([api("/api/hr/od"),
+    can("hr:read") ? api("/api/hr/employees?page_size=200") : Promise.resolve({ok: false, body: []})]);
   const rows = a.ok ? a.body : [], emps = e.ok ? e.body : [];
   openDrawer("On duty (OD)", "Approved OD is reflected in attendance and payroll.", `
     <form id="hrOdForm" novalidate><h3>New OD request</h3>
-      <div class="row2"><div><label>Employee</label><select name="employee_id">${emps.map(x => `<option value="${x.id}">${esc(x.full_name)} (${esc(x.code)})</option>`).join("")}</select></div>
+      <div class="row2">${emps.length ? `<div><label>Employee</label><select name="employee_id">${emps.map(x => `<option value="${x.id}">${esc(x.full_name)} (${esc(x.code)})</option>`).join("")}</select></div>` : ""}
       <div><label>Date</label><input name="date" type="date" value="${isoDay(0)}"></div></div>
       <div class="row2"><div><label>Visit type</label><input name="visit_type" placeholder="Customer visit / Field work" autocomplete="off"></div>
       <div><label>Destination</label><input name="destination" autocomplete="off"></div></div>
@@ -2654,7 +3085,8 @@ async function hrOd() {
       ${rows.map(x => `<tr><td>${esc(x.employee)}</td><td>${esc(fmtDate(x.date))}</td><td>${esc(x.visit_type)}</td><td>${esc(x.purpose)}</td><td>${esc(x.status)}</td><td>${esc(x.decision_remarks || "–")}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No OD requests.</td></tr>'}</tbody></table></div>`, true);
 }
 async function saveHrOd(form) {
-  const f = form.elements, err = $(".err", form), body = {employee_id: Number(f.employee_id.value), date: f.date.value, visit_type: f.visit_type.value.trim(), purpose: f.purpose.value.trim(), destination: f.destination.value.trim() || null};
+  const f = form.elements, err = $(".err", form), body = {date: f.date.value, visit_type: f.visit_type.value.trim(), purpose: f.purpose.value.trim(), destination: f.destination.value.trim() || null};
+  if (f.employee_id) body.employee_id = Number(f.employee_id.value);
   err.textContent = "";
   if (!body.visit_type || !body.purpose) { err.textContent = "Visit type and purpose are required."; return; }
   const res = await api("/api/hr/od", {method: "POST", body});
@@ -2702,6 +3134,399 @@ async function hrPayrollAction(act, id) {
   toast(res, res.ok ? "Payroll updated" : "Payroll not updated");
   if (!res.ok) return;
   await hrPayroll();
+}
+
+/* ---------- HR: monthly attendance ---------- */
+const HR_MX = {
+  present: ["P", "ok", "Present"], late: ["L", "warn", "Late"],
+  early_departure: ["E", "warn", "Early departure"],
+  half_day: ["H", "warn", "Half day"], paid_leave: ["L", "lev", "Paid leave"],
+  unpaid_leave: ["U", "lev", "Unpaid leave"], od: ["O", "od", "On duty"],
+  absent: ["A", "bad", "Absent"], weekly_off: ["W", "off", "Weekly off"],
+  holiday: ["F", "off", "Holiday"], correction_pending: ["C", "warn", "Correction pending"]
+};
+function hrMxCell(c) {
+  const [code, cls, label] = HR_MX[c.status] || ["·", "none", "Not recorded"];
+  const bits = [fmtDate(c.date), label];
+  if (c.check_in) bits.push(`in ${fmtStamp(c.check_in)}`);
+  if (c.check_out) bits.push(`out ${fmtStamp(c.check_out)}`);
+  if (c.worked_minutes) bits.push(`${Math.floor(c.worked_minutes / 60)}h ${c.worked_minutes % 60}m`);
+  if (c.late_minutes) bits.push(`${c.late_minutes} min late`);
+  return `<td class="hr-mx-c ${cls}" title="${esc(bits.join(" · "))}">${code}</td>`;
+}
+async function hrMonthly() {
+  const now = new Date();
+  const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const month = ($("#hrMxMonth") && $("#hrMxMonth").value) || state.hr.mxMonth || fallback;
+  state.hr.mxMonth = month;
+  state.hr.mxDept = ($("#hrMxDept") && $("#hrMxDept").value) || state.hr.mxDept || "";
+  const depts = [...new Set((state.hr.employees || []).map(e => e.department).filter(Boolean))].sort();
+  openDrawer("Monthly attendance", "A blank day was not recorded. It is a gap, not an absence.", `
+    <div class="toolbar">
+      <label class="hr-field">Month <input id="hrMxMonth" type="month" value="${esc(state.hr.mxMonth)}"></label>
+      <label class="hr-field">Department <select id="hrMxDept"><option value="">All departments</option>
+        ${depts.map(d => `<option value="${esc(d)}"${d === state.hr.mxDept ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+      <button class="btn ghost" type="button" data-act="hr-monthly-refresh">Refresh</button>
+    </div>
+    <div class="hr-legend"><span class="hr-lg ok">P</span> present
+      <span class="hr-lg warn">L</span> late <span class="hr-lg warn">H</span> half day
+      <span class="hr-lg lev">L / U</span> leave <span class="hr-lg od">O</span> on duty
+      <span class="hr-lg bad">A</span> absent <span class="hr-lg off">W / F</span> weekly off / holiday
+      <span class="hr-lg none">·</span> not recorded</div>
+    <div id="hrMxBody" aria-live="polite"><p class="muted">Loading…</p></div>`, true);
+  $("#drawer").classList.add("hr-wide");
+  await loadHrMx();
+}
+async function loadHrMx() {
+  const box = $("#hrMxBody");
+  if (!box) return;
+  const [y, m] = (state.hr.mxMonth || "").split("-").map(Number);
+  if (!y || !m) { box.innerHTML = `<p class="muted">Choose a month.</p>`; return; }
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  const q = new URLSearchParams({year: y, month: m});
+  if (state.hr.mxDept) q.set("department", state.hr.mxDept);
+  const r = await api(`/api/hr/attendance/monthly?${q}`);
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  if (!d.employees.length) {
+    box.innerHTML = `<div class="empty">No active employee matches this month and department.</div>`;
+    return;
+  }
+  const head = d.days.map(day => `<th class="hr-mx-d" scope="col">${Number(day.slice(8, 10))}</th>`).join("");
+  const rows = d.employees.map(e => `<tr><th scope="row" class="hr-mx-name">${esc(e.name)}<small>${esc(e.code)}</small></th>
+    ${e.calendar.map(hrMxCell).join("")}
+    <td class="n">${qty(e.summary.present_days)}</td><td class="n">${qty(e.summary.leave_days)}</td>
+    <td class="n">${e.summary.absent_days}</td><td class="n">${e.summary.missing_days}</td></tr>`).join("");
+  const t = d.totals;
+  box.innerHTML = `<div class="tw hr-mx-wrap"><table class="hr-mx">
+      <thead><tr><th scope="col">Employee</th>${head}<th class="n">Present</th><th class="n">Leave</th><th class="n">Absent</th><th class="n">Not recorded</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr><th scope="row">All ${d.employees.length} employee(s)</th><td colspan="${d.days.length}"></td>
+        <td class="n">${qty(t.present_days)}</td><td class="n">${qty(t.leave_days)}</td>
+        <td class="n">${t.absent_days}</td><td class="n">${t.missing_days}</td></tr></tfoot>
+    </table></div>
+    <p class="note">${t.missing_days} employee-day(s) have no attendance row. HR reports count them as gaps until they are recorded.</p>`;
+}
+
+/* ---------- HR: leave calendar ---------- */
+async function hrCalendar() {
+  const now = new Date();
+  const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const month = ($("#hrCalMonth") && $("#hrCalMonth").value) || state.hr.calMonth || fallback;
+  state.hr.calMonth = month;
+  state.hr.calDept = ($("#hrCalDept") && $("#hrCalDept").value) || state.hr.calDept || "";
+  const depts = [...new Set((state.hr.employees || []).map(e => e.department).filter(Boolean))].sort();
+  openDrawer("Leave calendar", "Approved and pending leave for the month, with holidays. Nothing here is deducted until an application is approved.", `
+    <div class="toolbar">
+      <label class="hr-field">Month <input id="hrCalMonth" type="month" value="${esc(state.hr.calMonth)}"></label>
+      <label class="hr-field">Department <select id="hrCalDept"><option value="">All departments</option>
+        ${depts.map(d => `<option value="${esc(d)}"${d === state.hr.calDept ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+      <button class="btn ghost" type="button" data-act="hr-calendar-refresh">Refresh</button>
+    </div>
+    <div id="hrCalBody" aria-live="polite"><p class="muted">Loading…</p></div>`, true);
+  await loadHrCal();
+}
+async function loadHrCal() {
+  const box = $("#hrCalBody");
+  if (!box) return;
+  const [y, m] = (state.hr.calMonth || "").split("-").map(Number);
+  if (!y || !m) { box.innerHTML = `<p class="muted">Choose a month.</p>`; return; }
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  const q = new URLSearchParams({year: y, month: m});
+  if (state.hr.calDept) q.set("department", state.hr.calDept);
+  const r = await api(`/api/hr/leave/calendar?${q}`);
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  const daysIn = new Date(y, m, 0).getDate();
+  const firstDow = new Date(y, m - 1, 1).getDay();
+  const holidays = {};
+  d.holidays.forEach(h => { holidays[h.date] = h.name; });
+  const pad = n => String(n).padStart(2, "0");
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push('<div class="hr-cal-cell blank"></div>');
+  for (let day = 1; day <= daysIn; day++) {
+    const iso = `${y}-${pad(m)}-${pad(day)}`;
+    const dow = new Date(y, m - 1, day).getDay();
+    const on = d.entries.filter(e => e.date_from <= iso && e.date_to >= iso);
+    const approved = on.filter(e => e.status === "approved");
+    const pending = on.filter(e => e.status === "pending");
+    const names = approved.slice(0, 3).map(e => `<span class="hr-cal-chip">${esc(e.employee)}</span>`).join("");
+    cells.push(`<div class="hr-cal-cell${dow === 0 || dow === 6 ? " wknd" : ""}${holidays[iso] ? " hol" : ""}">
+      <div class="hr-cal-n">${day}${holidays[iso] ? `<span class="hr-cal-tag">${esc(holidays[iso])}</span>` : ""}</div>
+      <div class="hr-cal-list">${names}
+        ${approved.length > 3 ? `<span class="muted">+${approved.length - 3} more</span>` : ""}
+        ${pending.length ? `<span class="hr-cal-chip pend">${pending.length} pending</span>` : ""}</div></div>`);
+  }
+  const entries = d.entries.map(e => `<tr><td class="strong">${esc(e.employee)}</td><td>${esc(e.leave_type)}</td>
+    <td>${esc(fmtDate(e.date_from))} – ${esc(fmtDate(e.date_to))}</td><td class="n">${qty(e.days)}</td>
+    <td><span class="chip ${e.status === "approved" ? "ok" : "warn"}">${esc(e.status)}</span></td></tr>`).join("");
+  box.innerHTML = `<div class="hr-cal-grid" role="grid" aria-label="Leave calendar ${esc(state.hr.calMonth)}">
+      ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(x => `<div class="hr-cal-head" role="columnheader">${x}</div>`).join("")}
+      ${cells.join("")}</div>
+    <h3>Applications in ${esc(state.hr.calMonth)}</h3>
+    <div class="tw"><table><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th class="n">Days</th><th>Status</th></tr></thead>
+      <tbody>${entries || '<tr><td colspan="5" class="empty-row">No leave applications and no holidays in this month.</td></tr>'}</tbody></table></div>`;
+}
+
+/* ---------- HR: reports ---------- */
+async function hrReports() {
+  const r = await api("/api/hr/reports");
+  const items = r.ok ? r.body : [];
+  state.hr.repKey = state.hr.repKey || "headcount";
+  openDrawer("HR reports", "Every report states its filters and lists missing data instead of filling it with zeroes.", `
+    <div class="toolbar">
+      <label class="hr-field">From <input id="hrRepFrom" type="date"></label>
+      <label class="hr-field">To <input id="hrRepTo" type="date"></label>
+      <button class="btn ghost" type="button" data-act="hr-report-refresh">Refresh</button>
+    </div>
+    <div class="tw"><table><thead><tr><th>Report</th><th>Access</th><th></th></tr></thead><tbody>
+      ${items.map(x => `<tr><td class="strong">${esc(x.title)}<small>${esc(x.key)}</small></td>
+        <td>${x.available ? `<span class="chip ok">open</span>` : `<span class="chip warn">restricted</span>`}</td>
+        <td class="rowacts">${x.available ? `<button class="btn ghost sm" type="button" data-act="hr-report-view" data-key="${esc(x.key)}">View</button>
+          <button class="btn ghost sm" type="button" data-act="hr-report-file" data-key="${esc(x.key)}" data-format="csv">CSV</button>
+          <button class="btn ghost sm" type="button" data-act="hr-report-file" data-key="${esc(x.key)}" data-format="pdf">PDF</button>` : `<span class="muted">Ask the Administrator for confidential HR rights.</span>`}</td></tr>`).join("") || '<tr><td colspan="3" class="empty-row">No reports for your role.</td></tr>'}
+    </tbody></table></div>
+    <div id="hrReportBody" aria-live="polite"><p class="muted">Choose View to open a report.</p></div>`, true);
+  $("#drawer").classList.add("hr-wide");
+  await hrReportView(state.hr.repKey);
+}
+function hrReportQuery() {
+  const q = new URLSearchParams();
+  const from = $("#hrRepFrom") && $("#hrRepFrom").value;
+  const to = $("#hrRepTo") && $("#hrRepTo").value;
+  if (from) q.set("from_date", from);
+  if (to) q.set("to_date", to);
+  return q.toString();
+}
+async function hrReportView(key) {
+  const box = $("#hrReportBody");
+  if (!box) return;
+  state.hr.repKey = key;
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  const r = await api(`/api/hr/reports/${encodeURIComponent(key)}?${hrReportQuery()}`);
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  const filters = Object.entries(d.filters || {}).map(([k, v]) =>
+    `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v == null ? "–" : String(v))}</dd>`).join("");
+  const summary = Object.entries(d.summary || {}).filter(([, v]) => v === null || typeof v !== "object")
+    .map(([k, v]) => `<div class="hr-sum"><b>${esc(k.replace(/_/g, " "))}</b><span>${esc(v == null ? "No data yet" : String(v))}</span></div>`).join("");
+  const head = (d.columns || []).map(c => `<th>${esc(c.label)}</th>`).join("");
+  const rows = (d.rows || []).slice(0, 100).map(row =>
+    `<tr>${d.columns.map(c => `<td>${esc(row[c.key] == null ? "–" : String(row[c.key]))}</td>`).join("")}</tr>`).join("");
+  box.innerHTML = `<h3>${esc(d.title)}</h3>
+    <dl class="hr-filters">${filters || "<dt>Filters</dt><dd>None</dd>"}</dl>
+    <div class="hr-sums">${summary}</div>
+    ${d.no_data ? `<div class="empty">No data yet for these filters.</div>` : `<div class="tw"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+      ${d.rows.length > 100 ? `<p class="note">Showing the first 100 of ${d.rows.length} rows. Download the CSV for all of them.</p>` : ""}`}
+    ${(d.gaps || []).length ? `<h3>No data yet</h3><ul class="hr-gaps">${d.gaps.map(g => `<li>${esc(g)}</li>`).join("")}</ul>` : ""}`;
+}
+function hrReportFile(key, format) {
+  const q = hrReportQuery();
+  const a = document.createElement("a");
+  a.href = `/api/hr/reports/${encodeURIComponent(key)}?format=${format}${q ? "&" + q : ""}`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast({ok: true, status: 200}, `${key} ${format.toUpperCase()} requested`);
+}
+
+/* ---------- HR: announcements ---------- */
+async function hrNotices() {
+  const [a, n] = await Promise.all([api("/api/hr/announcements?include_inactive=true"),
+    api("/api/hr/notifications?limit=5")]);
+  const rows = a.ok ? a.body : [];
+  const unread = n.ok ? n.body.unread : 0;
+  openDrawer("Announcements", "Publishing notifies every active user with a linked employee record.", `
+    ${can("hr:write") ? `<form id="hrNoticeForm" novalidate><h3>Publish an announcement</h3>
+      <label>Title</label><input name="title" maxlength="200" autocomplete="off">
+      <label>Message</label><textarea name="body" rows="4" maxlength="4000"></textarea>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Publish</button>
+        <button class="btn ghost" type="button" data-act="hr-digest">Send daily digest now</button></div></form>` : ""}
+    <h3>Published</h3>
+    <div class="tw"><table><thead><tr><th>Title</th><th>Published</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map(x => `<tr><td class="strong">${esc(x.title)}<small>${esc((x.body || "").slice(0, 140))}</small></td>
+        <td>${esc(fmtStamp(x.published_at))}</td><td><span class="chip ${x.active ? "ok" : "off"}">${x.active ? "active" : "hidden"}</span></td>
+        <td class="rowacts">${can("hr:write") && x.active ? `<button class="btn ghost sm" type="button" data-act="hr-notice-hide" data-id="${x.id}">Hide</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="4" class="empty-row">No announcements yet.</td></tr>'}
+    </tbody></table></div>
+    <p class="note">${unread ? `${unread} notification(s) are waiting in your bell.` : "Your notification bell is clear."}</p>`, true);
+}
+async function saveHrNotice(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const body = {title: f.title.value.trim(), body: f.body.value.trim()};
+  if (body.title.length < 3) { err.textContent = "Give the announcement a title."; return; }
+  if (body.body.length < 3) { err.textContent = "Write the message."; return; }
+  const res = await api("/api/hr/announcements", {method: "POST", body});
+  toast(res, res.ok ? `Announcement published to ${res.body.notified} user(s)` : "Announcement not published");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrNotices();
+}
+
+/* ---------- HR: period locks ---------- */
+async function hrLocks(unlockId) {
+  const [l, p] = await Promise.all([api("/api/hr/period-locks"),
+    can("hr:payroll_prepare") ? api("/api/hr/payroll/periods") : Promise.resolve({ok: false, body: []})]);
+  const rows = l.ok ? l.body : [];
+  const periods = p.ok ? p.body : [];
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const now = new Date();
+  const scopes = can("hr:payroll_prepare") ? ["attendance", "payroll"] : ["attendance"];
+  openDrawer("Period locks", "A locked month rejects attendance and payroll edits. Only the Administrator may unlock one.", `
+    ${unlockId ? `<form id="hrUnlockForm" data-id="${unlockId}" novalidate><h3>Unlock period</h3>
+      <label>Reason (kept in the audit trail)</label><input name="reason" minlength="5" maxlength="300" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Unlock</button><button class="btn ghost" type="button" data-act="hr-locks">Cancel</button></div></form>` : ""}
+    <form id="hrLockForm" novalidate><h3>Lock a month</h3>
+      <div class="row2">
+        <div><label>Scope</label><select name="scope">${scopes.map(s => `<option value="${s}">${s === "attendance" ? "Attendance" : "Payroll"}</option>`).join("")}</select></div>
+        <div><label>Year</label><input name="year" inputmode="numeric" value="${now.getFullYear()}"></div>
+      </div>
+      <div class="row2"><div><label>Month</label><select name="month">${months.map((m, i) => `<option value="${i + 1}"${i + 1 === now.getMonth() + 1 ? " selected" : ""}>${m}</option>`).join("")}</select></div>
+      <div><label>Reason</label><input name="reason" minlength="5" maxlength="300" autocomplete="off"></div></div>
+      <div class="note">Lock the previous month once it is reconciled. A payroll lock also freezes that month's payroll entries.</div>
+      <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Lock month</button></div></form>
+    <h3>Lock history</h3>
+    <div class="tw"><table><thead><tr><th>Scope</th><th>Month</th><th>Status</th><th>Locked</th><th>Reason</th><th></th></tr></thead><tbody>
+      ${rows.map(x => `<tr><td>${esc(x.scope)}</td><td>${months[x.month - 1]} ${x.year}</td>
+        <td><span class="chip ${x.active ? "warn" : "off"}">${x.active ? "locked" : "open"}</span></td>
+        <td>${esc(x.locked_by || "–")}<small>${esc(fmtStamp(x.locked_at))}</small></td>
+        <td>${esc(x.reason || "–")}${x.unlock_reason ? `<small>Unlocked: ${esc(x.unlock_reason)}</small>` : ""}</td>
+        <td class="rowacts">${x.active && state.user.role === "admin" ? `<button class="btn ghost sm" type="button" data-act="hr-lock-unlock" data-id="${x.id}">Unlock</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No period has been locked yet.</td></tr>'}
+    </tbody></table></div>
+    ${periods.length ? "" : ""}`, true);
+}
+async function saveHrLock(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const body = {scope: f.scope.value, year: Number(f.year.value), month: Number(f.month.value),
+                reason: f.reason.value.trim()};
+  if (!(body.year >= 2000 && body.year <= 2100)) { err.textContent = "Enter a four-digit year."; return; }
+  if (body.reason.length < 5) { err.textContent = "Give a reason of at least five characters."; return; }
+  const res = await api("/api/hr/period-locks", {method: "POST", body});
+  toast(res, res.ok ? `${body.scope} ${body.year}-${String(body.month).padStart(2, "0")} locked` : "Month not locked");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrLocks();
+}
+async function saveHrUnlock(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const reason = f.reason.value.trim();
+  if (reason.length < 5) { err.textContent = "Give a reason of at least five characters."; return; }
+  const res = await api(`/api/hr/period-locks/${form.dataset.id}/unlock`, {method: "POST", body: {reason}});
+  toast(res, res.ok ? "Period unlocked" : "Period not unlocked");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrLocks();
+}
+
+/* ---------- HR: employee import ---------- */
+function hrImport() {
+  state.hr.importText = null;
+  openDrawer("Import employees", "Nothing is created until you confirm. The server validates every row and keeps an undo record.", `
+    <p class="muted">Download the template, fill one employee per row, then choose the file. Bank and ID columns need confidential HR rights.</p>
+    <div class="actions"><a class="btn ghost" href="/api/hr/employees/import-template.csv" download>Download template (CSV)</a></div>
+    <label class="hr-field">CSV file <input id="hrImportFile" type="file" accept=".csv,text/csv"></label>
+    <div class="actions"><button class="btn" type="button" data-act="hr-import-check">Check the file</button>
+      <button class="btn hide" id="hrImportGo" type="button" data-act="hr-import-commit">Import valid rows</button></div>
+    <div id="hrImportBody" aria-live="polite"></div>`, true);
+}
+async function hrImportCheck() {
+  const box = $("#hrImportBody"), file = $("#hrImportFile") && $("#hrImportFile").files[0];
+  if (!file) { toast({ok: false, status: 422, body: {detail: "Choose a CSV file first."}}, "No file"); return; }
+  box.innerHTML = `<p class="muted">Checking…</p>`;
+  const text = await file.text();
+  state.hr.importText = text;
+  const r = await api("/api/hr/employees/import", {method: "POST",
+    body: {filename: file.name, csv_text: text, commit: false}});
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  const errs = d.errors.map(e => `<li>Row ${e.row}${e.code ? ` (${esc(e.code)})` : ""}: ${esc(e.errors.join("; "))}</li>`).join("");
+  box.innerHTML = `<div class="hr-sums"><div class="hr-sum"><b>Valid rows</b><span>${d.valid_rows}</span></div>
+      <div class="hr-sum"><b>Rows with errors</b><span>${d.error_rows}</span></div></div>
+    ${d.preview.length ? `<div class="tw"><table><thead><tr><th>Code</th><th>Name</th><th>Department</th></tr></thead><tbody>
+      ${d.preview.map(p => `<tr><td>${esc(p.code)}</td><td>${esc(p.full_name)}</td><td>${esc(p.department || "–")}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${errs ? `<h3>Rows that cannot be imported</h3><ul class="hr-gaps">${errs}</ul>` : ""}
+    <p class="note">${d.valid_rows ? "Check the preview, then choose Import valid rows. Rows with errors are left out." : "Nothing in this file can be imported yet."}</p>`;
+  $("#hrImportGo").classList.toggle("hide", !d.valid_rows);
+}
+async function hrImportCommit() {
+  const box = $("#hrImportBody");
+  if (!state.hr.importText) { toast({ok: false, status: 422, body: {detail: "Check the file first."}}, "No file"); return; }
+  const file = $("#hrImportFile") && $("#hrImportFile").files[0];
+  const r = await api("/api/hr/employees/import", {method: "POST",
+    body: {filename: file ? file.name : "import.csv", csv_text: state.hr.importText, commit: true}});
+  toast(r, r.ok ? `Imported ${r.body.valid_rows} employee(s)` : "Import failed");
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  box.innerHTML = `<div class="hr-sums"><div class="hr-sum"><b>Created</b><span>${d.valid_rows}</span></div>
+      <div class="hr-sum"><b>Left out</b><span>${d.error_rows}</span></div></div>
+    <p class="note">The import is recorded in the audit trail. If it was a mistake, undo it now.</p>
+    <div class="actions"><button class="btn ghost" type="button" data-act="hr-import-undo" data-id="${d.batch_id}">Undo this import</button></div>`;
+  $("#hrImportGo").classList.add("hide");
+  openHr();
+}
+async function hrImportUndo(id) {
+  const r = await api(`/api/hr/employees/import-batches/${id}/undo`, {method: "POST", body: {}});
+  toast(r, r.ok ? "Import undone" : "Import not undone");
+  if (r.ok) hrImport();
+}
+
+/* ---------- HR: notifications and self-service ---------- */
+async function refreshHrUnread() {
+  const el = $("#hrUnread");
+  if (!el) return;
+  const r = await api("/api/hr/notifications?limit=1");
+  const n = r.ok ? r.body.unread : 0;
+  el.textContent = n > 99 ? "99+" : String(n);
+  el.classList.toggle("hide", !n);
+}
+async function hrNotifications() {
+  const r = await api("/api/hr/notifications?limit=50");
+  const items = r.ok ? r.body.items : [];
+  const unread = r.ok ? r.body.unread : 0;
+  openDrawer("Notifications", unread ? `${unread} unread` : "You are up to date.", `
+    ${unread ? `<div class="actions"><button class="btn ghost" type="button" data-act="hr-notes-readall">Mark all read</button></div>` : ""}
+    <ul class="hr-notes">${items.map(n => `<li class="hr-note${n.read_at ? "" : " unread"}">
+      <b>${esc(n.title)}</b><p>${esc(n.body || "")}</p>
+      <small>${esc(fmtStamp(n.created_at))}${n.link ? ` · <a href="${esc(n.link)}">Open</a>` : ""}</small>
+      ${n.read_at ? "" : `<button class="btn ghost sm" type="button" data-act="hr-note-read" data-id="${n.id}">Mark read</button>`}
+    </li>`).join("") || `<li class="muted">No notifications yet. Announcements and approvals appear here.</li>`}</ul>`, true);
+  refreshHrUnread();
+}
+async function hrPayslips() {
+  const r = await api("/api/hr/me/payslips");
+  const rows = r.ok ? r.body : [];
+  openDrawer("My payslips", "Only payslips released by payroll appear here. Each download is checked against your own employee record.", `
+    ${rows.length ? `<div class="tw"><table><thead><tr><th>Period</th><th class="n">Gross (₹)</th><th class="n">Deductions (₹)</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
+      ${rows.map(x => `<tr><td class="strong">${x.year}-${String(x.month).padStart(2, "0")}</td>
+        <td class="n">${money(x.gross)}</td><td class="n">${money(x.deductions)}</td><td class="n strong">${money(x.net)}</td>
+        <td><a class="link-btn" href="/api/hr/me/payslips/${x.entry_id}" download>PDF</a></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">No payslip has been released yet. Payroll releases them after a period is processed.</div>`}`, true);
+}
+async function renderHrSelf() {
+  const box = $("#hrSelfBody");
+  if (!box) return;
+  const [a, p, n] = await Promise.all([
+    api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
+    api("/api/hr/me/payslips"),
+    api("/api/hr/announcements?limit=3")]);
+  const today = a.ok ? a.body : [];
+  const slips = p.ok ? p.body.slice(0, 3) : [];
+  const notes = n.ok ? n.body : [];
+  box.innerHTML = `<h3>Today</h3>
+    ${today.length ? `<div class="tw"><table><thead><tr><th>Status</th><th>Check-in</th><th>Check-out</th><th class="n">Worked</th></tr></thead><tbody>
+      ${today.map(x => `<tr><td>${esc(x.status)}</td><td>${esc(fmtStamp(x.check_in))}</td><td>${esc(fmtStamp(x.check_out))}</td>
+        <td class="n">${x.worked_minutes ? `${Math.floor(x.worked_minutes / 60)}h ${x.worked_minutes % 60}m` : "–"}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No attendance recorded today. Open “My attendance” to check in.</p>`}
+    <h3>Recent payslips</h3>
+    ${slips.length ? `<div class="tw"><table><thead><tr><th>Period</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
+      ${slips.map(x => `<tr><td>${x.year}-${String(x.month).padStart(2, "0")}</td><td class="n">${money(x.net)}</td>
+        <td><a class="link-btn" href="/api/hr/me/payslips/${x.entry_id}" download>PDF</a></td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No payslip has been released yet.</p>`}
+    <h3>Announcements</h3>
+    ${notes.length ? `<ul class="hr-notes">${notes.map(x => `<li class="hr-note"><b>${esc(x.title)}</b><p>${esc(x.body || "")}</p>
+      <small>${esc(fmtStamp(x.published_at))}</small></li>`).join("")}</ul>` : `<p class="muted">No announcements yet.</p>`}`;
 }
 function renderSettings() {
   if (!$("#setEmprows")) return;
@@ -5381,6 +6206,10 @@ document.addEventListener("click", e => {
   if (geoSortBtn) return setGeoSort(geoSortBtn.dataset.geoSort);
   const srTabBtn = e.target.closest("[data-sr-tab]");
   if (srTabBtn) return srTab(srTabBtn.dataset.srTab);
+  const hrRangeBtn = e.target.closest("[data-hrr]");
+  if (hrRangeBtn) return setHrRangePreset(hrRangeBtn.dataset.hrr);
+  const hrpTab = e.target.closest("[data-hrp]");
+  if (hrpTab) return hrProfileDrawer(hrpTab.dataset.hrp);
   const a = e.target.closest("[data-act]");
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
@@ -5419,6 +6248,37 @@ document.addEventListener("click", e => {
     else if (act === "save-product") productForm(a.dataset.id);
     else if (act === "new-so-dist") { state.soDistPreset = Number(a.dataset.id); soForm(); }
     else if (act === "hr-employees") hrEmployees();
+    else if (act === "hr-range-apply") applyHrRange();
+    else if (act === "hr-refresh") openHr();
+    else if (act === "hr-export") exportHr();
+    else if (act === "hr-profile") hrProfile(a.dataset.id);
+    else if (act === "hr-profile-tab") hrProfileDrawer(a.dataset.tab);
+    else if (act === "hr-doc-new") hrDocForm(a.dataset.id);
+    else if (act === "hr-doc-edit") hrDocForm(state.hr.profile && state.hr.profile.employee.id, a.dataset.id);
+    else if (act === "hr-asset-new") hrAssetForm(a.dataset.id);
+    else if (act === "hr-asset-return") hrAssetReturnForm(a.dataset.id);
+    else if (act === "hr-attention") hrAttention(a.dataset.kind);
+    else if (act === "hr-monthly") hrMonthly();
+    else if (act === "hr-monthly-refresh") loadHrMx();
+    else if (act === "hr-calendar") hrCalendar();
+    else if (act === "hr-calendar-refresh") loadHrCal();
+    else if (act === "hr-reports") hrReports();
+    else if (act === "hr-report-refresh") hrReportView(state.hr.repKey);
+    else if (act === "hr-report-view") hrReportView(a.dataset.key);
+    else if (act === "hr-report-file") hrReportFile(a.dataset.key, a.dataset.format);
+    else if (act === "hr-notices") hrNotices();
+    else if (act === "hr-notice-hide") api(`/api/hr/announcements/${a.dataset.id}`, {method: "PATCH", body: {active: false}}).then(r => { toast(r, r.ok ? "Announcement hidden" : "Not changed"); if (r.ok) hrNotices(); });
+    else if (act === "hr-digest") api("/api/hr/notifications/digest", {method: "POST", body: {}}).then(r => { toast(r, r.ok ? `Digest queued for ${r.body.queued}; ${r.body.skipped} already had one` : "Digest not sent"); if (r.ok) refreshHrUnread(); });
+    else if (act === "hr-locks") hrLocks();
+    else if (act === "hr-lock-unlock") hrLocks(Number(a.dataset.id));
+    else if (act === "hr-import") hrImport();
+    else if (act === "hr-import-check") hrImportCheck();
+    else if (act === "hr-import-commit") hrImportCommit();
+    else if (act === "hr-import-undo") hrImportUndo(a.dataset.id);
+    else if (act === "hr-notifications") hrNotifications();
+    else if (act === "hr-notes-readall") api("/api/hr/notifications/read-all", {method: "POST", body: {}}).then(r => { toast(r, r.ok ? `${r.body.marked} notification(s) marked read` : "Not changed"); if (r.ok) hrNotifications(); });
+    else if (act === "hr-note-read") api(`/api/hr/notifications/${a.dataset.id}/read`, {method: "POST", body: {}}).then(r => { if (r.ok) hrNotifications(); else toast(r, "Not changed"); });
+    else if (act === "hr-payslips") hrPayslips();
     else if (act === "hr-shifts") hrShifts();
     else if (act === "hr-new-shift") hrShiftForm();
     else if (act === "hr-edit-shift") hrShiftForm(a.dataset.id);
@@ -5585,6 +6445,12 @@ document.addEventListener("submit", e => {
   else if (f.id === "hrLeaveForm") saveHrLeave(f);
   else if (f.id === "hrOdForm") saveHrOd(f);
   else if (f.id === "hrPeriodForm") saveHrPeriod(f);
+  else if (f.id === "hrDocForm") saveHrDoc(f);
+  else if (f.id === "hrAssetForm") saveHrAsset(f);
+  else if (f.id === "hrAssetReturnForm") saveHrAssetReturn(f);
+  else if (f.id === "hrNoticeForm") saveHrNotice(f);
+  else if (f.id === "hrLockForm") saveHrLock(f);
+  else if (f.id === "hrUnlockForm") saveHrUnlock(f);
   else if (f.id === "srForm") saveSchedule(f);
   else if (f.id === "srRecipientForm") saveRecipient(f);
 });
@@ -5596,6 +6462,7 @@ document.addEventListener("input", e => {
   if (e.target.id === "cuq") renderCustomers();
   if (e.target.id === "pq") renderProducts();
   if (e.target.id === "rpq") { state.rpSearch = e.target.value; drawRpTabs(); }
+  if (e.target.id === "hrq") renderHrDirectory();
 });
 document.addEventListener("change", e => {
   if (e.target.closest("#poForm")) syncPoLines();
@@ -5607,6 +6474,7 @@ document.addEventListener("change", e => {
   if (e.target.id === "geoFrom" || e.target.id === "geoTo") {
     applyGeoDates($("#geoFrom").value, $("#geoTo").value);
   }
+  if (e.target.id === "hrStatus" || e.target.id === "hrDept") renderHrDirectory();
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
@@ -5726,6 +6594,19 @@ document.addEventListener("change", e => {
 });
 // Scheduled reports: frequency and pack change which fields apply, a named
 // recipient's To/CC/BCC follows its checkbox, and the log filters reload it.
+// HR month views reload the matrix or calendar; the picker is rebuilt each time.
+document.addEventListener("change", e => {
+  if (e.target.id === "hrMxMonth" || e.target.id === "hrMxDept") {
+    if (e.target.id === "hrMxMonth") state.hr.mxMonth = e.target.value;
+    else state.hr.mxDept = e.target.value;
+    loadHrMx();
+  }
+  if (e.target.id === "hrCalMonth" || e.target.id === "hrCalDept") {
+    if (e.target.id === "hrCalMonth") state.hr.calMonth = e.target.value;
+    else state.hr.calDept = e.target.value;
+    loadHrCal();
+  }
+});
 document.addEventListener("change", e => {
   if (e.target.id === "sr-freq" || e.target.id === "sr-monthrule") srFreqSync();
   if (e.target.id === "sr-pack") srPackSync();

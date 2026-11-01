@@ -883,24 +883,90 @@
 
     <!-- HR Management (people, attendance, leave, payroll) -->
     <section id="v-hr" class="view hide">
-      <div class="stats" id="hrStats"></div>
-      <div class="panel flush">
-        <div class="panel-h"><h2>HR workspace</h2><span class="muted">Employee records, attendance, leave, on-duty and payroll.</span></div>
+      <div class="dash-hero">
+        <div>
+          <div class="dash-greet">HR workspace</div>
+          <div class="dash-date" id="hrRangeNote">This month to today</div>
+        </div>
+        <div class="dash-tools">
+          <div class="dash-dates" id="hrDateTools">
+            <label for="hrFrom">From <input id="hrFrom" type="date"></label>
+            <label for="hrTo">To <input id="hrTo" type="date"></label>
+            <button class="btn ghost" type="button" data-act="hr-range-apply">Apply</button>
+            <div class="seg compact" role="group" aria-label="Quick ranges">
+              <button type="button" data-hrr="month" aria-pressed="true">This month</button>
+              <button type="button" data-hrr="30" aria-pressed="false">Last 30 days</button>
+            </div>
+          </div>
+          <button class="btn ghost hide" id="hrExport" type="button" data-act="hr-export">Export CSV</button>
+          <button class="btn ghost hide" id="hrImport" type="button" data-act="hr-import">Import</button>
+          <button class="btn hide" id="hrAdd" type="button" data-act="hr-new-emp">New employee</button>
+        </div>
+      </div>
+      <div class="dash-dateerr hide" id="hrDateError" role="alert"></div>
+      <div class="kpis" id="hrKpis"></div>
+      <div class="dash-grid hr-team-only">
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Needs attention</h2><span class="muted" id="hrAttentionNote"></span></div>
+          <ul class="attention" id="hrAttention" aria-label="Items that need attention"></ul>
+        </div>
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Attendance</h2><span class="muted" id="hrTrendNote"></span></div>
+          <div id="hrTrend"></div>
+          <div id="hrLeaveMix"></div>
+        </div>
+      </div>
+      <div class="dash-grid hr-team-only">
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Celebrations and holidays</h2><span class="muted">Next 30 days</span></div>
+          <div id="hrCalendar"></div>
+        </div>
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Team shape</h2><span class="muted">Active employees</span></div>
+          <div id="hrShape"></div>
+        </div>
+      </div>
+      <div class="panel flush" id="hrDirectory">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>People</h2><span class="muted" id="hrDirNote"></span></div>
         <div class="toolbar">
-          <button class="btn" data-act="hr-employees" type="button">Employees</button>
-          <button class="btn ghost" data-act="hr-attendance" type="button">Attendance</button>
-          <button class="btn ghost" data-act="hr-leave" type="button">Leave</button>
-          <button class="btn ghost" data-act="hr-od" type="button">On duty</button>
-          <button class="btn ghost" data-act="hr-payroll" type="button">Payroll</button>
-          <button class="btn ghost hide" data-act="hr-shifts" type="button">Shift settings</button>
+          <input id="hrq" type="search" placeholder="Search name, code, department" aria-label="Search employees">
+          <select id="hrStatus" aria-label="Filter by status"><option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          <select id="hrDept" aria-label="Filter by department"><option value="">All departments</option></select>
+          <button class="btn ghost" type="button" data-act="hr-refresh">Refresh</button>
         </div>
-        <div id="hrDirectory">
-          <div class="tw"><table>
-            <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Status</th></tr></thead>
-            <tbody id="hrrows"></tbody>
-          </table></div>
-          <div class="empty hide" id="hrempty"></div>
+        <div class="tw"><table>
+          <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Joined</th><th>Status</th><th></th></tr></thead>
+          <tbody id="hrrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="hrempty"></div>
+      </div>
+      <div class="panel" id="hrTasks">
+        <div class="panel-h"><h2>HR tasks</h2><span class="muted">Every screen checks your role on the server.</span></div>
+        <div class="toolbar">
+          <button class="btn ghost" type="button" data-act="hr-attendance">Attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-monthly">Monthly attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-leave">Leave</button>
+          <button class="btn ghost" type="button" data-act="hr-calendar">Leave calendar</button>
+          <button class="btn ghost" type="button" data-act="hr-od">On duty</button>
+          <button class="btn ghost hide" type="button" data-act="hr-payroll">Payroll</button>
+          <button class="btn ghost hide" type="button" data-act="hr-shifts">Shift settings</button>
+          <button class="btn ghost hide" type="button" data-act="hr-reports">HR reports</button>
+          <button class="btn ghost hide" type="button" data-act="hr-notices">Announcements</button>
+          <button class="btn ghost hide" type="button" data-act="hr-locks">Period locks</button>
+          <button class="btn ghost" type="button" data-act="hr-notifications">Notifications <span class="chip hide" id="hrUnread">0</span></button>
         </div>
+      </div>
+      <div class="panel hide" id="hrSelf">
+        <div class="panel-h"><h2>My workspace</h2><span class="muted">Only your own records; every call is scoped on the server.</span></div>
+        <div class="toolbar">
+          <button class="btn ghost" type="button" data-act="hr-attendance">My attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-monthly">My monthly attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-leave">Leave</button>
+          <button class="btn ghost" type="button" data-act="hr-od">On duty</button>
+          <button class="btn ghost" type="button" data-act="hr-payslips">My payslips</button>
+          <button class="btn ghost" type="button" data-act="hr-notifications">Notifications</button>
+        </div>
+        <div id="hrSelfBody"></div>
       </div>
     </section>
 

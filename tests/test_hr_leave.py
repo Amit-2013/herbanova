@@ -268,3 +268,34 @@ def test_locked_attendance_month_blocks_leave_approval(client):
         f"/api/approvals/{request['id']}/decide",
         json={"decision": "approve", "reason": "Approved after reopening"})
     assert allowed.status_code == 200, allowed.text
+
+
+def test_staff_self_service_reads_are_scoped_to_their_own_record(client):
+    """A staff login may read leave policy and its own records, nothing wider."""
+    other = _employee(client)
+    type_id = _leave_type(client)
+    created = client.as_user("admin").post("/api/hr/leave/applications", json={
+        "leave_type_id": type_id, "employee_id": other,
+        "date_from": "2035-02-05", "date_to": "2035-02-05",
+        "reason": "Colleague's application"})
+    assert created.status_code == 201, created.text
+    me = client.employee_ids["staff"]
+
+    staff = client.as_user("staff")
+    types = staff.get("/api/hr/leave/types")
+    assert types.status_code == 200 and types.json()
+
+    balances = staff.get("/api/hr/leave/balances")
+    assert balances.status_code == 200
+    assert balances.json()["employee_id"] == me
+
+    applications = staff.get("/api/hr/leave/applications")
+    assert applications.status_code == 200
+    assert all(a["employee_id"] == me for a in applications.json())
+
+    assert staff.get(f"/api/hr/leave/balances?employee_id={other}").status_code == 403
+    assert staff.get(f"/api/hr/leave/applications?employee_id={other}").status_code == 403
+
+    od = staff.get("/api/hr/od")
+    assert od.status_code == 200
+    assert all(row["employee_id"] == me for row in od.json())
