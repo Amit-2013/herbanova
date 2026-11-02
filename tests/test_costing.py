@@ -175,6 +175,18 @@ def _strip_issue_cost(product):
         db.commit()
 
 
+def _strip_all_costs(product_id):
+    """Make every movement look like pre-Stage-2 data: no cost, no source."""
+    with SessionLocal() as db:
+        for m in db.scalars(
+                select(StockMovement)
+                .join(Batch, Batch.id == StockMovement.batch_id)
+                .where(Batch.product_id == product_id)).all():
+            m.unit_cost = None
+            m.cost_source = None
+        db.commit()
+
+
 def _cost_fingerprint(product):
     with SessionLocal() as db:
         return costing.cost_fingerprint(
@@ -759,6 +771,54 @@ def test_audited_cost_correction_replays_and_reports_changed_invoices(client, wo
     assert correction.result["new_po_rate"] == "12.00"
     assert audit_row is not None
     assert cogs["cogs"] == _dec("120.00")
+
+
+def test_cost_correction_works_before_any_movement_has_a_cost(client, world):
+    """Dev's situation: the stock moved before costs existed, so every movement
+    row is uncosted. Settling the PO rate must fill the receipt and the issue."""
+    product = _new_product(world)
+    po_id, po_line_id = _po(client, world, product["sku"], 20, "10.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 20)
+    _order_id, invoice_id = _dispatch(client, product, 10)
+
+    with SessionLocal() as db:
+        line = db.get(PurchaseOrderLine, po_line_id)
+        line.unit_cost = Decimal("0.00")      # legacy: explicit zero, no remark
+        line.rate_remark = None
+        db.commit()
+    _strip_all_costs(product["product_id"])
+    with SessionLocal() as db:
+        stored = db.scalars(
+            select(StockMovement)
+            .join(Batch, Batch.id == StockMovement.batch_id)
+            .where(Batch.product_id == product["product_id"])).all()
+        assert stored and all(m.unit_cost is None for m in stored)
+
+    fixed = client.as_user("admin").post("/api/accounts/costs/correction", json={
+        "po_line_id": po_line_id, "new_unit_cost": "12.00",
+        "reason": "late supplier invoice"})
+    assert fixed.status_code == 200, fixed.text
+    body = fixed.json()
+    assert _dec(body["old_po_rate"]) == _dec("0.00")
+    assert _dec(body["new_po_rate"]) == _dec("12.00")
+    assert _dec(body["before_total"]) == _dec("0.00")
+    assert _dec(body["after_total"]) == _dec("120.00")
+    assert body["movements_changed"] >= 2
+    row = next(r for r in body["invoices"] if r["invoice_id"] == invoice_id)
+    assert row["costed_before"] is False
+    assert row["costed_after"] is True
+    assert _dec(row["before_cogs"]) == _dec("0.00")
+    assert _dec(row["after_cogs"]) == _dec("120.00")
+
+    with SessionLocal() as db:
+        line = db.get(PurchaseOrderLine, po_line_id)
+        correction = db.scalar(select(CostCorrection).where(
+            CostCorrection.po_line_id == po_line_id))
+        cogs = costing.invoice_cogs(db, [invoice_id])[invoice_id]
+    assert _dec(line.unit_cost) == _dec("12.00") and line.rate_remark is None
+    assert correction is not None
+    assert _dec(correction.old_unit_cost) == _dec("0.00")
+    assert cogs["costed"] is True and cogs["cogs"] == _dec("120.00")
 
 
 def test_legacy_receipt_without_cost_is_derived_from_the_purchase_order(client, world):

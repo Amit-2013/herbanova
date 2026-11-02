@@ -45,7 +45,11 @@ WEIGHTED_AVERAGE = "weighted_average"
 PARTIAL = "partial"
 RETURN = "return"
 UNCOSTED = "uncosted"
-COST_SOURCES = (PO_RECEIPT, WEIGHTED_AVERAGE, PARTIAL, RETURN, UNCOSTED)
+# Free-of-cost stock is a separate quantity pool. It never enters the costed
+# pool, so a zero-price sample cannot pull the weighted average down, and it is
+# not "uncosted" either: its cost is known to be zero by policy.
+FOC = "foc"
+COST_SOURCES = (PO_RECEIPT, WEIGHTED_AVERAGE, PARTIAL, RETURN, UNCOSTED, FOC)
 ATTRIBUTION_AUDIT = "accounts.cost_attribution"
 COST_BACKFILL_AUDIT = "accounts.cost_backfill"
 
@@ -96,6 +100,7 @@ class ReplayPlan:
     qty_on_hand: Decimal = ZERO
     costed_qty: Decimal = ZERO
     costed_value: Decimal = ZERO
+    foc_qty: Decimal = ZERO
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -106,7 +111,8 @@ class ReplayPlan:
 
     @property
     def uncosted_on_hand(self) -> Decimal:
-        return max(self.qty_on_hand - self.costed_qty, ZERO)
+        """Stock that is neither costed nor known to be free of cost."""
+        return max(self.qty_on_hand - self.costed_qty - self.foc_qty, ZERO)
 
 
 def _product_movements(db: Session, product_id: int) -> list[StockMovement]:
@@ -145,6 +151,37 @@ def _po_unit_cost(db: Session, product_id: int, ref_id: str, batch_id: int,
     return cost
 
 
+def _po_is_foc(db: Session, product_id: int, ref_id: str, batch_id: int,
+               cache: dict) -> bool:
+    """True when the goods receipt's purchase-order line says the rate is FOC.
+
+    Legacy receipts written before the flag existed have no stored source, so the
+    remark on the PO line is the evidence that the zero is a policy, not a price.
+    """
+    key = ("foc", ref_id, batch_id)
+    if key in cache:
+        return cache[key]
+    found = False
+    try:
+        grn_id = int(ref_id)
+    except (TypeError, ValueError):
+        cache[key] = False
+        return False
+    line = db.scalar(select(GoodsReceiptLine).where(
+        GoodsReceiptLine.grn_id == grn_id,
+        GoodsReceiptLine.batch_id == batch_id,
+        GoodsReceiptLine.product_id == product_id))
+    if line is not None:
+        grn = db.get(GoodsReceipt, grn_id)
+        if grn is not None:
+            po_line = db.scalar(select(PurchaseOrderLine).where(
+                PurchaseOrderLine.po_id == grn.po_id,
+                PurchaseOrderLine.product_id == product_id))
+            found = bool(po_line and (po_line.rate_remark or "").strip().lower() == "foc")
+    cache[key] = found
+    return found
+
+
 def _add_stock(plan: ReplayPlan, qty: Decimal, cost: Decimal | None) -> None:
     plan.qty_on_hand += qty
     if cost is not None:
@@ -152,16 +189,32 @@ def _add_stock(plan: ReplayPlan, qty: Decimal, cost: Decimal | None) -> None:
         plan.costed_value += qty * cost
 
 
+def _add_foc(plan: ReplayPlan, qty: Decimal) -> None:
+    """Move free stock in or out. It changes quantity, never the costed pool."""
+    plan.qty_on_hand += qty
+    plan.foc_qty += qty
+    if plan.foc_qty < 0:
+        plan.warnings.append("FOC ledger goes negative")
+    if plan.qty_on_hand < 0:
+        plan.warnings.append("movement ledger goes negative")
+
+
 def _take_stock(plan: ReplayPlan, qty: Decimal) -> None:
     average = plan.average
     plan.qty_on_hand -= qty
+    costed_take = min(qty, plan.costed_qty) if average is not None else ZERO
     if average is not None:
-        costed_take = min(qty, plan.costed_qty)
         plan.costed_qty -= costed_take
         plan.costed_value -= costed_take * average
     if plan.costed_qty <= 0:
         plan.costed_qty = ZERO
         plan.costed_value = ZERO
+    # A normal issue that runs past the purchased pool physically consumes free
+    # stock. Reduce the free pool by that much so it is not counted twice; the
+    # caller marks such an issue partial because its cost is mixed.
+    extra = qty - costed_take
+    if extra > 0 and plan.foc_qty > 0:
+        plan.foc_qty = max(plan.foc_qty - extra, ZERO)
     if plan.qty_on_hand < 0:
         plan.warnings.append("movement ledger goes negative")
 
@@ -184,16 +237,44 @@ def replay(db: Session, product_id: int, *,
         source = m.cost_source
         cost = money(m.unit_cost) if m.unit_cost is not None else None
 
-        if m.movement_type == "receipt" and m.id in overrides:
+        # A receipt is FOC when it was posted with the new source, or (legacy)
+        # when its purchase-order line carries the FOC remark. The second case
+        # is what stops an old zero-rate receipt from entering the average.
+        foc_receipt = (m.movement_type == "receipt" and qty > 0
+                       and (source == FOC or (cost is None and m.ref_type == "grn"
+                                              and _po_is_foc(db, product_id, m.ref_id,
+                                                             m.batch_id, grn_cache))))
+
+        if m.movement_type == "receipt" and m.id in overrides and not foc_receipt:
             cost, source = money(overrides[m.id]), PO_RECEIPT
+            _add_stock(plan, qty, cost)
+        elif foc_receipt:
+            cost, source = ZERO, FOC
+            _add_foc(plan, qty)
+        elif m.movement_type in ("foc_issue", "foc_return"):
+            # The two FOC-specific types are the only ones allowed to move the
+            # free pool directly; a normal issue cannot silently consume it.
+            cost, source = ZERO, FOC
+            _add_foc(plan, qty)
         elif qty < 0 and m.movement_type == "issue":
             average = plan.average
-            cost = average
-            source = PARTIAL if (plan.uncosted_on_hand > 0 or average is None) \
-                else WEIGHTED_AVERAGE
+            needed = -qty
+            short = (max(needed - plan.costed_qty, ZERO)
+                     if average is not None else ZERO)
+            if average is not None and short > 0 and plan.foc_qty >= short:
+                # Mixed issue: the purchased part carries the average, the rest
+                # is free stock at zero. One movement can hold one unit cost, so
+                # the weighted cost of the mix is the honest figure.
+                cost = money((needed - short) * average / needed)
+                source = PARTIAL
+            else:
+                cost = average
+                source = PARTIAL if (plan.uncosted_on_hand > 0 or average is None
+                                     or short > 0) else WEIGHTED_AVERAGE
             if m.invoice_id:
                 invoice_issues.setdefault((m.invoice_id, product_id), []).append(
                     (-qty, cost, source == PARTIAL))
+            _take_stock(plan, -qty)
         elif qty > 0 and m.movement_type == "return":
             if cost is None:
                 issued = invoice_issues.get((m.invoice_id, product_id)) if m.invoice_id else None
@@ -208,6 +289,7 @@ def replay(db: Session, product_id: int, *,
                     source = PARTIAL
             else:
                 source = source or RETURN
+            _add_stock(plan, qty, cost)
         elif qty > 0:
             if cost is None and m.ref_type == "grn":
                 cost = _po_unit_cost(db, product_id, m.ref_id, m.batch_id, grn_cache)
@@ -215,15 +297,16 @@ def replay(db: Session, product_id: int, *,
                 source = source or (PO_RECEIPT if m.ref_type == "grn" else WEIGHTED_AVERAGE)
             else:
                 source = UNCOSTED
+            _add_stock(plan, qty, cost)
         else:
             cost = plan.average
             source = source or (WEIGHTED_AVERAGE if cost is not None else UNCOSTED)
+            if qty > 0:
+                _add_stock(plan, qty, cost)
+            elif qty < 0:
+                _take_stock(plan, -qty)
 
-        if qty > 0:
-            _add_stock(plan, qty, cost)
-        elif qty < 0:
-            _take_stock(plan, -qty)
-        else:
+        if qty == 0:
             plan.warnings.append(f"movement {m.id} has zero quantity")
 
         plan.costs[m.id] = MovementCost(

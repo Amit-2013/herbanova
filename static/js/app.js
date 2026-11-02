@@ -30,6 +30,7 @@ const state = {user: null, perms: new Set(), features: null, featureFlags: [], m
                      cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0}},
                exp: {rows: [], heads: [], settings: null, status: "", head: "", q: "",
                      loading: false, error: null, seq: 0, loaded: false},
+               foc: {stock: [], notes: [], loading: false, error: null, loaded: false},
                sr: {status: null, schedules: [], recipients: [], deliveries: [],
                     tab: "schedules", logStatus: "", logPack: ""},
                email: {settings: null, messages: [], loading: false, loaded: false,
@@ -161,6 +162,7 @@ const drawerOpen = () => !$("#drawer").classList.contains("hide");
    role. The map mirrors app/core/features.py so navigation never offers a
    screen whose API answers 403. A missing list (older server) means all on. */
 const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "stock",
+                      foc: "foc",
                       suppliers: "suppliers", sales: "sales", billing: "sales",
                       customers: "sales", geo: "sales",
                       approvals: "approvals", leads: "leads", lost: "leads",
@@ -206,6 +208,7 @@ function enter(u) {
   showView("purchasing", can("stock:read"));
   showView("products", can("product:read"));
   showView("inventory", can("stock:read"));
+  showView("foc", can("foc:read"));
   showView("geo", can("sales:read"));
   showView("roles", can("user:manage"));
   showView("scheduled", srAllowed());
@@ -367,7 +370,7 @@ async function loadMovements() {
 const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", purchasing: "Purchases",
                 suppliers: "Suppliers", tax: "Tax and discounts",
                 sales: "Sales orders", billing: "Billing", accounts: "Accounting & Finance",
-                expenses: "Expenses",
+                expenses: "Expenses", foc: "Free samples (FOC)",
                 approvals: "Approvals", customers: "Customers and distributors",
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
@@ -381,6 +384,7 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
                    expenses: "expense:read",
                    products: "product:read", inventory: "stock:read", purchasing: "stock:read",
+                   foc: "foc:read",
                    sales: "sales:read", billing: "sales:read",
                    approvals: "approval:read",
                    hr: "hr:read", scheduled: "email:manage"};
@@ -414,6 +418,7 @@ function route() {
   if (state.view === "geo") loadGeo();
   if (state.view === "accounts") openAccountsReports();
   if (state.view === "expenses") openExpenses();
+  if (state.view === "foc") openFoc();
   if (state.view === "scheduled") openScheduled();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
@@ -552,7 +557,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderExpenses(); renderApprovals(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderExpenses(); renderFoc(); renderApprovals(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -2851,6 +2856,200 @@ function renderCustomers() {
     can("distributor:write") ? " Select “New customer or distributor” to add the first one." : ""];
   empty($("#cuempty"), !list.length, title, hint);
 }
+/* ---------- free samples (FOC) ---------- */
+const FOC_REASONS = {sample: "Sample", promotional: "Promotional",
+                     replacement: "Replacement", donation: "Donation", other: "Other"};
+const FOC_STATUS = {draft: "Draft", approved: "Approved", rejected: "Rejected",
+                    reversed: "Reversed"};
+
+function openFoc() {
+  if (!can("foc:read")) return;
+  renderFoc();
+  if (!state.foc.loaded && !state.foc.loading) loadFoc();
+}
+
+async function loadFoc() {
+  if (!can("foc:read")) return;
+  const s = state.foc;
+  s.loading = true; s.error = null;
+  renderFoc();
+  const [stock, notes] = await Promise.all([
+    api("/api/foc/stock"),
+    api("/api/foc/notes?limit=200"),
+  ]);
+  if (!state.user) return;
+  s.loading = false;
+  if (stock.ok && Array.isArray(stock.body)) s.stock = stock.body;
+  else s.error = detail(stock.body);
+  if (notes.ok && Array.isArray(notes.body)) s.notes = notes.body;
+  else s.error = s.error || detail(notes.body);
+  s.loaded = true;
+  renderFoc();
+}
+
+function renderFoc() {
+  if (!$("#focPanel") || !state.user) return;
+  const s = state.foc;
+  $("#focNewBtn").classList.toggle("hide", !can("foc:write"));
+  $("#focErr").classList.toggle("hide", !s.error);
+  $("#focErr").textContent = s.error || "";
+  $("#focNote").textContent = s.loading ? "Loading free stock…"
+    : s.loaded ? `${plural(s.stock.length, "product")} with a stock position` : "";
+
+  $("#focStockRows").innerHTML = (s.stock || []).map(r =>
+    `<tr><td class="strong">${esc(r.sku || "")}</td><td>${esc(r.name || "")}</td>`
+    + `<td class="n">${esc(r.on_hand)}</td>`
+    + `<td class="n strong">${esc(r.foc_qty)}</td>`
+    + `<td class="n">${esc(r.costed_qty)}</td>`
+    + `<td class="n">${r.average == null ? "–" : esc(money(r.average))}</td></tr>`).join("");
+  empty($("#focStockEmpty"), !(s.stock || []).length,
+    s.loading ? "Loading free stock…" : "No product holds free or costed stock yet.");
+
+  const notes = s.notes || [];
+  $("#focNoteRows").innerHTML = notes.map(n => {
+    const qty = (n.lines || []).reduce((sum, l) => sum + Number(l.qty || 0), 0);
+    const acts = [];
+    if (n.status === "draft" && can("foc:approve") && n.created_by !== state.user.id) {
+      acts.push(`<button class="rowbtn" type="button" data-act="foc-approve" data-id="${n.id}">Approve</button>`);
+    }
+    if (n.status === "draft" && can("foc:write")) {
+      acts.push(`<button class="rowbtn" type="button" data-act="foc-reject" data-id="${n.id}">Reject</button>`);
+    }
+    if (n.status === "approved" && can("foc:approve")) {
+      acts.push(`<button class="rowbtn" type="button" data-act="foc-reverse" data-id="${n.id}">Reverse</button>`);
+    }
+    return `<tr><td class="strong">${esc(n.note_number)}</td>`
+      + `<td>${esc(fmtDate(n.note_date))}</td>`
+      + `<td>${esc(n.recipient_name)}${n.correction ? ' <span class="chip">Correction</span>' : ""}</td>`
+      + `<td>${esc(n.warehouse || "")}</td>`
+      + `<td>${esc(FOC_REASONS[n.reason] || n.reason)}</td>`
+      + `<td class="n">${esc(qty)}</td>`
+      + `<td class="n">${n.notional_value == null ? "–" : esc(money(n.notional_value))}</td>`
+      + `<td><span class="pill">${esc(FOC_STATUS[n.status] || n.status)}</span>`
+      + (n.rejection_reason ? `<small>${esc(n.rejection_reason)}</small>` : "")
+      + (n.reversal_reason ? `<small>${esc(n.reversal_reason)}</small>` : "") + `</td>`
+      + `<td class="rowacts">${acts.join(" ") || "–"}</td></tr>`;
+  }).join("");
+  empty($("#focNoteEmpty"), !notes.length,
+    s.loading ? "Loading free-sample notes…" : "No free-sample note has been written yet.",
+    can("foc:write") ? " Use “New free-sample note” to record one recipient at a time." : "");
+}
+
+function fillFocBatches() {
+  const product = $("#f-product"), warehouse = $("#f-wh"), batch = $("#f-batch");
+  if (!product || !warehouse || !batch) return;
+  const pid = Number(product.value), wid = Number(warehouse.value);
+  const rows = (state.batches || []).filter(b =>
+    Number(b.product_id) === pid && Number(b.warehouse_id) === wid && Number(b.on_hand) > 0);
+  batch.innerHTML = rows.length
+    ? rows.map(b => `<option value="${b.id}">${esc(b.batch_no)} · ${esc(b.on_hand)} on hand</option>`).join("")
+    : `<option value="">No batch with stock in this warehouse</option>`;
+}
+
+function focNewForm() {
+  if (!can("foc:write")) return;
+  const stock = (state.foc.stock || []).filter(r => Number(r.foc_qty) > 0);
+  if (!stock.length) {
+    openDrawer("New free-sample note", "No FOC stock is on hand.", `
+      <p class="gap-note">No product holds free stock yet. Record the purchase receipt with the
+      FOC remark first; then a note can give the stock away.</p>
+      <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`);
+    return;
+  }
+  openDrawer("New free-sample note",
+    "One recipient per note. No invoice, revenue or GST.", `
+    <form id="focForm" autocomplete="off">
+      <div class="row2">
+        <div><label for="f-date">Date</label><input id="f-date" name="note_date" type="date" value="${dayIso(new Date())}" max="${dayIso(new Date())}" required></div>
+        <div><label for="f-wh">Warehouse</label><select id="f-wh" name="warehouse_id">
+          ${(state.warehouses || []).map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join("")}
+        </select></div>
+      </div>
+      <div class="row2">
+        <div><label for="f-name">Recipient</label><input id="f-name" name="recipient_name" maxlength="150" required autocomplete="off"></div>
+        <div><label for="f-contact">Contact (optional)</label><input id="f-contact" name="recipient_contact" maxlength="120" autocomplete="off"></div>
+      </div>
+      <label for="f-address">Address (optional)</label><input id="f-address" name="recipient_address" maxlength="300" autocomplete="off">
+      <div class="row2">
+        <div><label for="f-reason">Reason</label><select id="f-reason" name="reason">
+          ${Object.entries(FOC_REASONS).map(([k, v]) => `<option value="${k}"${k === "sample" ? " selected" : ""}>${v}</option>`).join("")}
+        </select></div>
+        <div><label for="f-notional">Notional value (₹, memo only)</label><input id="f-notional" name="notional_value" inputmode="decimal" autocomplete="off"></div>
+      </div>
+      <label for="f-reason-note">Note (optional)</label><input id="f-reason-note" name="reason_note" maxlength="300" autocomplete="off">
+      <div class="row3">
+        <div><label for="f-product">Product</label><select id="f-product" name="product_id">
+          ${stock.map(r => `<option value="${r.product_id}">${esc(r.sku)} · ${esc(r.foc_qty)} FOC</option>`).join("")}
+        </select></div>
+        <div><label for="f-batch">Batch</label><select id="f-batch" name="batch_id"></select></div>
+        <div><label for="f-qty">Quantity</label><input id="f-qty" name="qty" inputmode="decimal" required autocomplete="off"></div>
+      </div>
+      <div class="note">The quantity is checked against the product's FOC stock at approval. A zero-rate sample never changes the weighted average of purchased stock. A second Administrator must approve the note.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save draft</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+  fillFocBatches();
+  const productSel = $("#f-product"), whSel = $("#f-wh");
+  if (productSel) productSel.addEventListener("change", fillFocBatches);
+  if (whSel) whSel.addEventListener("change", fillFocBatches);
+}
+
+async function saveFocNote(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const f = form.elements;
+  if (!f.batch_id.value) {
+    btn.disabled = false; err.textContent = "Choose a batch that holds stock in this warehouse.";
+    return;
+  }
+  const body = {
+    note_date: f.note_date.value, warehouse_id: Number(f.warehouse_id.value),
+    recipient_name: f.recipient_name.value.trim(),
+    reason: f.reason.value,
+    lines: [{product_id: Number(f.product_id.value), batch_id: Number(f.batch_id.value),
+             qty: f.qty.value.trim()}],
+  };
+  if (f.recipient_address.value.trim()) body.recipient_address = f.recipient_address.value.trim();
+  if (f.recipient_contact.value.trim()) body.recipient_contact = f.recipient_contact.value.trim();
+  if (f.reason_note.value.trim()) body.reason_note = f.reason_note.value.trim();
+  if (f.notional_value.value.trim()) body.notional_value = f.notional_value.value.trim();
+  const res = await api("/api/foc/notes", {method: "POST", body});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Free-sample note saved as a draft");
+  closeDrawer(); loadFoc();
+}
+
+async function focApprove(id) {
+  const res = await api(`/api/foc/notes/${id}/approve`, {method: "POST"});
+  toast(res, res.ok ? "Free-sample note approved; stock has left the ledger" : "Not approved");
+  if (res.ok) loadFoc();
+}
+
+function focReasonForm(id, mode) {
+  const verb = mode === "reject" ? "Reject" : "Reverse";
+  openDrawer(`${verb} free-sample note`,
+    "The original note and its movements stay on file.", `
+    <form id="focReasonForm" data-id="${id}" data-mode="${mode}">
+      <label for="f-why">Reason</label>
+      <input id="f-why" name="reason" maxlength="300" required autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${verb}</button>
+      <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveFocReason(form) {
+  const err = $(".err", form);
+  const reason = form.elements.reason.value.trim();
+  if (!reason) { err.textContent = "Give a reason."; return; }
+  const res = await api(`/api/foc/notes/${form.dataset.id}/${form.dataset.mode}`,
+                        {method: "POST", body: {reason}});
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, form.dataset.mode === "reject" ? "Note rejected" : "Note reversed; stock is back");
+  closeDrawer(); loadFoc();
+}
+
 /* ---------- HR workspace ---------- */
 function hrSetRange(from, to) {
   state.hr.from = from;
@@ -7608,6 +7807,11 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "exp-reverse") return expenseReverseForm(a.dataset.id);
   if (a && a.dataset.act === "exp-receipt") return expenseReceiptForm(a.dataset.id);
   if (a && a.dataset.act === "exp-head-toggle") return toggleExpenseHead(a.dataset.id, a.dataset.on === "1");
+  if (a && a.dataset.act === "foc-refresh") return loadFoc();
+  if (a && a.dataset.act === "new-foc") return focNewForm();
+  if (a && a.dataset.act === "foc-approve") return focApprove(a.dataset.id);
+  if (a && a.dataset.act === "foc-reject") return focReasonForm(a.dataset.id, "reject");
+  if (a && a.dataset.act === "foc-reverse") return focReasonForm(a.dataset.id, "reverse");
   if (a && a.dataset.act === "open-search") return openPalette();
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
   if (a && a.dataset.act === "reload-compare") return loadCompare();
@@ -7838,6 +8042,8 @@ document.addEventListener("submit", e => {
   else if (f.id === "expReverseForm") saveExpenseReverse(f);
   else if (f.id === "expHeadForm") saveExpenseHead(f);
   else if (f.id === "expSettingsForm") saveExpenseSettings(f);
+  else if (f.id === "focForm") saveFocNote(f);
+  else if (f.id === "focReasonForm") saveFocReason(f);
   else if (f.id === "leadForm") saveLead(f);
   else if (f.id === "actForm") saveActivity(f);
   else if (f.id === "lstatusForm") saveLeadStatus(f);
@@ -7951,50 +8157,56 @@ document.addEventListener("keydown", e => {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 });
-$("#scrim").addEventListener("click", closeDrawer);
-$("#dclose").addEventListener("click", closeDrawer);
+/* One missing marker must not stop the rest of the page from booting: bind only
+   when the element is there, so a stale markup/cache pair degrades to one dead
+   control instead of a blank screen. */
+const bind = (sel, event, fn) => { const el = typeof sel === "string" ? $(sel) : sel; if (el) el.addEventListener(event, fn); return el; };
+bind("#scrim", "click", closeDrawer);
+bind("#dclose", "click", closeDrawer);
 const signOut = async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); };
-$("#out").addEventListener("click", signOut);
-$("#mcOut").addEventListener("click", signOut);
-$("#themeToggle").addEventListener("click", toggleTheme);
-$("#dashTheme").addEventListener("click", toggleTheme);
-$("#paletteQ").addEventListener("input", e => {
+bind("#out", "click", signOut);
+bind("#mcOut", "click", signOut);
+bind("#themeToggle", "click", toggleTheme);
+bind("#dashTheme", "click", toggleTheme);
+bind("#paletteQ", "input", e => {
   clearTimeout(state.palette.timer);
   const term = e.target.value.trim();
   state.palette.timer = setTimeout(() => paletteSearch(term), 180);
 });
-$("#paletteResults").addEventListener("click", e => {
+bind("#paletteResults", "click", e => {
   const item = e.target.closest(".palette-item");
   if (item) paletteGo(item);
 });
-$("#palette").addEventListener("click", e => { if (e.target.id === "palette") closePalette(); });
+bind("#palette", "click", e => { if (e.target.id === "palette") closePalette(); });
 const chartEl = $("#salesChart");
-chartEl.addEventListener("pointermove", e => {
-  const hit = e.target.closest("[data-i]");
-  if (hit) chartTip(Number(hit.dataset.i));
-});
-chartEl.addEventListener("pointerleave", hideChartTip);
-chartEl.addEventListener("blur", hideChartTip);
-chartEl.addEventListener("keydown", e => {
-  const c = state.dashboard && state.dashboard.sales_vs_purchases;
-  if (!c || !c.series || !c.series.length) return;
-  const n = c.series.length;
-  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-    e.preventDefault();
-    const i = state.chart.index < 0
-      ? (e.key === "ArrowRight" ? 0 : n - 1)
-      : Math.max(0, Math.min(n - 1, state.chart.index + (e.key === "ArrowRight" ? 1 : -1)));
-    chartTip(i);
-  } else if (e.key === "Escape") {
-    hideChartTip();
-  }
-});
-["pq", "sq", "lq", "oq"].forEach(id => $("#" + id).addEventListener("input", () => ({pq: renderProducts, sq: renderStock, lq: renderLedger, oq: renderPOs})[id]()));
-$("#supq").addEventListener("input", renderSuppliers);
-$("#soq").addEventListener("input", renderSales);
-$("#biq").addEventListener("input", renderBilling);
-$("#ldq").addEventListener("input", renderLeads);
-$("#rateq").addEventListener("input", renderTax);
+if (chartEl) {
+  chartEl.addEventListener("pointermove", e => {
+    const hit = e.target.closest("[data-i]");
+    if (hit) chartTip(Number(hit.dataset.i));
+  });
+  chartEl.addEventListener("pointerleave", hideChartTip);
+  chartEl.addEventListener("blur", hideChartTip);
+  chartEl.addEventListener("keydown", e => {
+    const c = state.dashboard && state.dashboard.sales_vs_purchases;
+    if (!c || !c.series || !c.series.length) return;
+    const n = c.series.length;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      const i = state.chart.index < 0
+        ? (e.key === "ArrowRight" ? 0 : n - 1)
+        : Math.max(0, Math.min(n - 1, state.chart.index + (e.key === "ArrowRight" ? 1 : -1)));
+      chartTip(i);
+    } else if (e.key === "Escape") {
+      hideChartTip();
+    }
+  });
+}
+["pq", "sq", "lq", "oq"].forEach(id => bind("#" + id, "input", () => ({pq: renderProducts, sq: renderStock, lq: renderLedger, oq: renderPOs})[id]));
+bind("#supq", "input", renderSuppliers);
+bind("#soq", "input", renderSales);
+bind("#biq", "input", renderBilling);
+bind("#ldq", "input", renderLeads);
+bind("#rateq", "input", renderTax);
 document.addEventListener("change", e => {
   if (e.target.id === "rpFrom" || e.target.id === "rpTo") { state.rp.from = $("#rpFrom").value; state.rp.to = $("#rpTo").value; markPreset(""); loadReport(); }  if (["rpEmployee", "rpDepartment", "rpBranch"].includes(e.target.id)) {
     const key = {rpEmployee: "employee_id", rpDepartment: "department", rpBranch: "branch_id"}[e.target.id];
@@ -8008,10 +8220,10 @@ document.addEventListener("change", e => {                       // activity for
   if (e.target.name === "kind" && f.elements.date) f.elements.date.value = e.target.value === "note" ? "" : (f.elements.date.value || isoDay(3));
   if (e.target.name === "clear" && f.elements.date) f.elements.date.disabled = e.target.checked;
 });
-$("#swh").addEventListener("change", renderStock);
-$("#sin").addEventListener("change", renderStock);
-$("#ltype").addEventListener("change", renderLedger);
-["audAction", "audActor", "audFrom", "audTo"].forEach(id => $("#" + id).addEventListener("change", loadAudit));
+bind("#swh", "change", renderStock);
+bind("#sin", "change", renderStock);
+bind("#ltype", "change", renderLedger);
+["audAction", "audActor", "audFrom", "audTo"].forEach(id => bind("#" + id, "change", loadAudit));
 // The party master's status filter sits in the page toolbar, so it survives a
 // re-render; only the chosen value has to be kept in state.
 document.addEventListener("change", e => {

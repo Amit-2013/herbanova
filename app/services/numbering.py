@@ -14,12 +14,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models.core import (CreditNote, DebitNote, DocumentSequence, Invoice)
+from ..models.foc import FocNote
 
 # The document each counter numbers, and the column that holds the number.
 DOCUMENTS = {
     "invoice": (Invoice, Invoice.invoice_number),
     "credit_note": (CreditNote, CreditNote.credit_note_number),
     "debit_note": (DebitNote, DebitNote.debit_note_number),
+    "foc_note": (FocNote, FocNote.note_number),
 }
 
 # The invoice number is at most 16 characters (FR-14). "INV/2627/000001" is 15,

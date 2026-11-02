@@ -26,6 +26,9 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "tax:write":         ("Maintain the company tax profile, GST rates and discount slabs", "Tax and discounts"),
     "stock:read":        ("View warehouses, batches, ledger and purchasing", "Inventory"),
     "stock:write":       ("Create warehouses, purchase orders and goods receipts", "Inventory"),
+    "foc:read":          ("View free-of-cost receipts and sample distributions", "Inventory"),
+    "foc:write":         ("Create free-sample distribution drafts", "Inventory"),
+    "foc:approve":       ("Approve and reverse free-sample distributions (Administrator only)", "Inventory"),
     "sales:read":        ("View distributors, sales orders and approvals", "Sales"),
     "sales:write":       ("Create, submit and cancel sales orders", "Sales"),
     "approval:read":     ("View the central approvals queue", "Approvals"),
@@ -83,6 +86,9 @@ PERMISSION_PARENT: dict[str, str | None] = {
     "product:write": "product:read",
     "stock:read": None,
     "stock:write": "stock:read",
+    "foc:read": "stock:read",
+    "foc:write": "foc:read",
+    "foc:approve": "foc:read",
     "supplier:read": None,
     "supplier:write": "supplier:read",
     "supplier:bank": "supplier:read",
@@ -131,6 +137,9 @@ ADMIN_ONLY_PERMISSIONS: frozenset[str] = frozenset({
     "invoice:edit_post_billing",
     "email:manage",
     "db:reset",
+    # Giving company stock away is a money decision; a custom role must not
+    # acquire it by being granted the key.
+    "foc:approve",
 })
 
 
@@ -178,6 +187,7 @@ def sanitized_permissions(requested) -> tuple[list[str], list[str]]:
 # these values also define seeded-role parity (AUD-015 / AUD-024).
 BASELINE_ROLE_PERMS: dict[str, set[str]] = {
     "admin":     {"user:manage", "product:read", "product:write", "stock:read", "stock:write",
+                  "foc:read", "foc:write", "foc:approve",
                   "sales:read", "sales:write", "approval:decide", "report:export", "audit:read",
                   "distributor:write", "credit:manage", "dispatch:write",
                   # Module Phase 4 adds billing: the issue, correction and cancellation of tax documents
@@ -217,6 +227,7 @@ BASELINE_ROLE_PERMS: dict[str, set[str]] = {
                   # Staff record their own office/GPS attendance; nothing team-wide
                   "hr:attendance_self"},
     "inventory": {"product:read", "product:write", "stock:read", "stock:write",
+                  "foc:read", "foc:write",
                   "sales:read", "dispatch:write", "approval:read",
                   # Module Phase 4: the dispatch desk records the vehicle and e-way bill
                   "invoice:write", "print:document",
@@ -226,5 +237,6 @@ BASELINE_ROLE_PERMS: dict[str, set[str]] = {
                   "tax:read",
                   # Staff record their own office/GPS attendance; nothing team-wide
                   "hr:attendance_self"},
-    "viewer":    {"product:read", "stock:read", "sales:read", "hr:attendance_self"},
+    "viewer":    {"product:read", "stock:read", "foc:read", "sales:read",
+                  "hr:attendance_self"},
 }
