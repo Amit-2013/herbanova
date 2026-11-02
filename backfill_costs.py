@@ -1,9 +1,12 @@
 """Cost backfill report - dry run only in this phase.
 
 Reads the stock ledger, replays each product through the weighted-average rule
-and prints what a backfill would fill. It never writes: the proposal must be
-checked against a database copy before an apply mode is enabled. Amounts are
-not printed; the report carries counts, product ids and affected invoice ids.
+and prints what a backfill would fill. It also lists which legacy issue rows
+can be attributed to their invoice. It never writes: the proposal must be
+checked against a database copy before an apply mode is enabled. Money amounts
+are not printed; the report carries counts, product ids, movement ids and
+affected invoice ids. Stock quantities are printed as strings to show that the
+issued and invoiced quantities match.
 
     python backfill_costs.py [--product 12] [--product 13]
 """
@@ -13,7 +16,7 @@ import sys
 from decimal import Decimal
 
 from app.core.db import SessionLocal
-from app.services.costing import backfill_plan
+from app.services.costing import attribution_plan, backfill_plan
 
 
 def _json(value):
@@ -39,6 +42,7 @@ def main() -> int:
 
     with SessionLocal() as db:
         plan = backfill_plan(db, args.product)
+        attribution = None if args.product else attribution_plan(db)
     report = {
         "mode": "dry-run",
         "products": len(plan["products"]),
@@ -53,6 +57,8 @@ def main() -> int:
              "affected_invoice_ids": [i["invoice_id"] for i in row["affected_invoices"]]}
             for row in plan["products"]
         ],
+        "attribution": attribution if attribution is not None
+        else {"skipped": "the --product filter applies to costs only"},
     }
     print(json.dumps(_json(report), indent=2))
     return 0

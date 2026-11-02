@@ -204,6 +204,143 @@ def test_two_invoices_on_one_order_are_costed_separately(client, world):
     assert set(order_invoices) == {invoice_a, invoice_b}
 
 
+def test_live_dispatch_links_and_costs_every_issue(client, world):
+    """The real flow: order, dispatch, invoice in one transaction, issues linked.
+
+    Invoice creation is inside dispatch, so there is no separate "invoice after
+    dispatch" step whose order could matter. This test pins that down: the
+    invoice that dispatch creates is the one every issue movement points at, and
+    the movement carries the weighted-average cost.
+    """
+    product = _new_product(world)
+    po_id, _ = _po(client, world, product["sku"], 50, "10.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 50)
+
+    order_id, invoice_id = _dispatch(client, product, 10)
+
+    with SessionLocal() as db:
+        invoice = db.get(Invoice, invoice_id)
+        issues = _issue_movements(product["product_id"])
+        cogs = costing.invoice_cogs(db, [invoice_id])[invoice_id]
+        plan = costing.attribution_plan(db)
+    assert invoice.sales_order_id == order_id
+    assert issues
+    assert all(m.invoice_id == invoice_id for m in issues)
+    assert all(m.unit_cost == _dec("10.00") for m in issues)
+    assert all(m.cost_source == costing.WEIGHTED_AVERAGE for m in issues)
+    assert cogs["cogs"] == _dec("100.00")
+    assert cogs["costed"] is True
+    assert any(a["sales_order_id"] == order_id for a in plan["already_attributed"])
+    assert not any(c["sales_order_id"] == order_id for c in plan["candidates"])
+
+
+def test_attribution_plan_proposes_a_legacy_order_and_never_writes(client, world):
+    product = _new_product(world)
+    po_id, _ = _po(client, world, product["sku"], 50, "10.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 50)
+    order_id, invoice_id = _dispatch(client, product, 10)
+
+    with SessionLocal() as db:
+        issues = list(db.scalars(
+            select(StockMovement)
+            .join(Batch, Batch.id == StockMovement.batch_id)
+            .where(Batch.product_id == product["product_id"],
+                   StockMovement.movement_type == "issue")).all())
+        movement_ids = sorted(m.id for m in issues)
+        for m in issues:                     # simulate a pre-0021 dispatch
+            m.invoice_id = None
+        db.commit()
+
+    with SessionLocal() as db:
+        plan = costing.attribution_plan(db)
+    match = next(c for c in plan["candidates"] if c["sales_order_id"] == order_id)
+    assert match["invoice_id"] == invoice_id
+    assert match["movement_ids"] == movement_ids
+    assert match["products"] == {str(product["product_id"]): "10.000"}
+
+    with SessionLocal() as db:
+        again = costing.attribution_plan(db)
+        unchanged = _issue_movements(product["product_id"])
+    assert again["candidates"] == plan["candidates"]
+    assert all(m.invoice_id is None for m in unchanged)
+
+
+def test_attribution_plan_refuses_two_invoices_and_quantity_mismatches(client, world):
+    """Two issued invoices, or a quantity that differs, stay unlinked with a reason."""
+    product = _new_product(world)
+    po_id, _ = _po(client, world, product["sku"], 100, "12.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 100)
+    order_id, invoice_a = _dispatch(client, product, 10)
+
+    with SessionLocal() as db:
+        first = db.get(Invoice, invoice_a)
+        data = {c.name: getattr(first, c.name)
+                for c in Invoice.__table__.columns if c.name != "id"}
+        data["invoice_number"] = f"{first.invoice_number}B"[:16]
+        second = Invoice(**data)
+        db.add(second)
+        db.flush()
+        db.add(InvoiceLine(
+            invoice_id=second.id, product_id=product["product_id"], sku=product["sku"],
+            product_name="Cost product", hsn=world["hsn"], uqc="TAB", qty=Decimal(4),
+            unit_price=Decimal(100), mrp=Decimal(100), discount_percent=Decimal(0),
+            discount_amount=Decimal(0), taxable_value=Decimal(400),
+            line_total=Decimal(400)))
+        for m in db.scalars(
+                select(StockMovement)
+                .join(Batch, Batch.id == StockMovement.batch_id)
+                .where(Batch.product_id == product["product_id"],
+                       StockMovement.movement_type == "issue")).all():
+            m.invoice_id = None
+        db.commit()
+
+    with SessionLocal() as db:
+        plan = costing.attribution_plan(db)
+    two = next(a for a in plan["ambiguous"] if a["sales_order_id"] == order_id)
+    assert set(two["invoice_ids"]) == {invoice_a, second.id}
+    assert "2 issued invoices" in two["reason"]
+    assert not any(c["sales_order_id"] == order_id for c in plan["candidates"])
+
+    mismatch_product = _new_product(world)
+    po_id, _ = _po(client, world, mismatch_product["sku"], 50, "10.00")
+    _receive(client, po_id, mismatch_product["warehouse_id"], mismatch_product["sku"], 50)
+    mismatch_order, original_invoice = _dispatch(client, mismatch_product, 10)
+    assert client.as_user("admin").post(
+        f"/api/invoices/{original_invoice}/cancel",
+        json={"reason": "reissuing for the test"}).status_code == 200
+    with SessionLocal() as db:
+        original = db.get(Invoice, original_invoice)
+        data = {c.name: getattr(original, c.name)
+                for c in Invoice.__table__.columns if c.name != "id"}
+        data.update(invoice_number=f"{original.invoice_number}B"[:16], status="issued",
+                    cancel_reason=None, cancelled_by=None, cancelled_at=None,
+                    copy_designation="ORIGINAL")
+        replacement = Invoice(**data)
+        db.add(replacement)
+        db.flush()
+        db.add(InvoiceLine(
+            invoice_id=replacement.id, product_id=mismatch_product["product_id"],
+            sku=mismatch_product["sku"], product_name="Cost product", hsn=world["hsn"],
+            uqc="TAB", qty=Decimal(9), unit_price=Decimal(100), mrp=Decimal(100),
+            discount_percent=Decimal(0), discount_amount=Decimal(0),
+            taxable_value=Decimal(900), line_total=Decimal(900)))
+        movement = db.scalars(
+            select(StockMovement)
+            .join(Batch, Batch.id == StockMovement.batch_id)
+            .where(Batch.product_id == mismatch_product["product_id"],
+                   StockMovement.movement_type == "issue")).one()
+        movement.invoice_id = None
+        db.commit()
+        movement_id = movement.id
+    with SessionLocal() as db:
+        plan = costing.attribution_plan(db)
+    mismatched = next(a for a in plan["ambiguous"]
+                      if a["sales_order_id"] == mismatch_order)
+    assert mismatched["movement_ids"] == [movement_id]
+    assert "quantities differ" in mismatched["reason"]
+    assert "issued 10" in mismatched["reason"] and "invoiced 9" in mismatched["reason"]
+
+
 def test_issue_is_partial_when_any_on_hand_stock_has_no_cost(client, world):
     product = _new_product(world, opening=100)          # 100 units, no cost
     po_id, _ = _po(client, world, product["sku"], 50, "10.00")
