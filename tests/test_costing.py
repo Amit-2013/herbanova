@@ -121,6 +121,72 @@ def _issue_movements(product_id):
                    StockMovement.movement_type == "issue")).all())
 
 
+def _unlink_issues(product):
+    with SessionLocal() as db:
+        for m in db.scalars(
+                select(StockMovement)
+                .join(Batch, Batch.id == StockMovement.batch_id)
+                .where(Batch.product_id == product["product_id"],
+                       StockMovement.movement_type == "issue")).all():
+            m.invoice_id = None
+        db.commit()
+
+
+def _second_invoice(invoice_id, product, world, qty):
+    """A second issued invoice for the same sales order, to make it ambiguous."""
+    with SessionLocal() as db:
+        first = db.get(Invoice, invoice_id)
+        data = {c.name: getattr(first, c.name)
+                for c in Invoice.__table__.columns if c.name != "id"}
+        data["invoice_number"] = f"T{uuid4().hex[:10].upper()}"
+        second = Invoice(**data)
+        db.add(second)
+        db.flush()
+        db.add(InvoiceLine(
+            invoice_id=second.id, product_id=product["product_id"],
+            sku=product["sku"], product_name="Cost product", hsn=world["hsn"],
+            uqc="TAB", qty=Decimal(qty), unit_price=Decimal(100), mrp=Decimal(100),
+            discount_percent=Decimal(0), discount_amount=Decimal(0),
+            taxable_value=Decimal(qty) * 100, line_total=Decimal(qty) * 100))
+        db.commit()
+        return second.id
+
+
+def _fingerprint():
+    with SessionLocal() as db:
+        return costing.attribution_fingerprint(costing.attribution_plan(db))
+
+
+def _attribution_audits():
+    with SessionLocal() as db:
+        return list(db.scalars(select(AuditLog).where(
+            AuditLog.action == costing.ATTRIBUTION_AUDIT).order_by(AuditLog.id)).all())
+
+
+def _strip_issue_cost(product):
+    with SessionLocal() as db:
+        for m in db.scalars(
+                select(StockMovement)
+                .join(Batch, Batch.id == StockMovement.batch_id)
+                .where(Batch.product_id == product["product_id"],
+                       StockMovement.movement_type == "issue")).all():
+            m.unit_cost = None
+            m.cost_source = None
+        db.commit()
+
+
+def _cost_fingerprint(product):
+    with SessionLocal() as db:
+        return costing.cost_fingerprint(
+            costing.backfill_plan(db, [product["product_id"]]))
+
+
+def _cost_audits():
+    with SessionLocal() as db:
+        return list(db.scalars(select(AuditLog).where(
+            AuditLog.action == costing.COST_BACKFILL_AUDIT).order_by(AuditLog.id)).all())
+
+
 def test_receipt_carries_the_purchase_order_rate(client, world):
     product = _new_product(world)
     po_id, _line = _po(client, world, product["sku"], 100, "10.00")
@@ -341,6 +407,221 @@ def test_attribution_plan_refuses_two_invoices_and_quantity_mismatches(client, w
     assert "issued 10" in mismatched["reason"] and "invoiced 9" in mismatched["reason"]
 
 
+def test_apply_links_only_the_candidates_and_writes_one_audit_row(client, world):
+    """Apply the approved plan: candidates linked, ambiguous order untouched."""
+    linked = _new_product(world)
+    po_id, _ = _po(client, world, linked["sku"], 50, "10.00")
+    _receive(client, po_id, linked["warehouse_id"], linked["sku"], 50)
+    linked_order, linked_invoice = _dispatch(client, linked, 10)
+    _unlink_issues(linked)
+
+    blocked = _new_product(world)
+    po_id, _ = _po(client, world, blocked["sku"], 50, "10.00")
+    _receive(client, po_id, blocked["warehouse_id"], blocked["sku"], 50)
+    blocked_order, blocked_invoice = _dispatch(client, blocked, 10)
+    _unlink_issues(blocked)
+    _second_invoice(blocked_invoice, blocked, world, 4)
+
+    with SessionLocal() as db:
+        plan = costing.attribution_plan(db)
+        fingerprint = costing.attribution_fingerprint(plan)
+    planned = next(c for c in plan["candidates"] if c["sales_order_id"] == linked_order)
+    assert not any(c["sales_order_id"] == blocked_order for c in plan["candidates"])
+
+    with SessionLocal() as db:
+        result = costing.apply_attribution(db, expected_fingerprint=fingerprint)
+        db.commit()
+
+    assert result["applied"] is True and result["already_applied"] is False
+    assert result["audit_rows"] == 1
+    assert result["attributed_movements"] >= planned["movements"]
+    assert any(link["sales_order_id"] == linked_order for link in result["links"])
+
+    linked_issues = _issue_movements(linked["product_id"])
+    blocked_issues = _issue_movements(blocked["product_id"])
+    assert linked_issues and all(m.invoice_id == linked_invoice for m in linked_issues)
+    assert blocked_issues and all(m.invoice_id is None for m in blocked_issues)
+
+    audited = [row for row in _attribution_audits()
+               if (row.changes or {}).get("plan_fingerprint") == fingerprint]
+    assert len(audited) == 1
+    assert audited[0].actor_id is None
+    assert audited[0].record == "stock_movements:attribution"
+    assert audited[0].changes["tool"] == "backfill_costs.py"
+
+
+def test_apply_is_idempotent_and_writes_no_second_audit_row(client, world):
+    product = _new_product(world)
+    po_id, _ = _po(client, world, product["sku"], 50, "10.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 50)
+    order_id, invoice_id = _dispatch(client, product, 10)
+    _unlink_issues(product)
+
+    fingerprint = _fingerprint()
+    with SessionLocal() as db:
+        first = costing.apply_attribution(db, expected_fingerprint=fingerprint)
+        db.commit()
+    audits_after_first = len(_attribution_audits())
+
+    with SessionLocal() as db:
+        second = costing.apply_attribution(db, expected_fingerprint=fingerprint)
+        db.commit()
+
+    assert first["applied"] is True and first["audit_rows"] == 1
+    assert second["applied"] is False and second["already_applied"] is True
+    assert second["idempotent"] is True
+    assert second["attributed_movements"] == 0 and second["audit_rows"] == 0
+    assert len(_attribution_audits()) == audits_after_first
+    assert all(m.invoice_id == invoice_id for m in _issue_movements(product["product_id"]))
+
+
+def test_apply_refuses_a_stale_plan_and_writes_nothing(client, world):
+    product = _new_product(world)
+    po_id, _ = _po(client, world, product["sku"], 50, "10.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 50)
+    order_id, invoice_id = _dispatch(client, product, 10)
+    _unlink_issues(product)
+
+    fingerprint = _fingerprint()
+    _second_invoice(invoice_id, product, world, 4)      # the database moved on
+    audits_before = len(_attribution_audits())
+
+    with SessionLocal() as db:
+        with pytest.raises(costing.StaleAttributionPlanError):
+            costing.apply_attribution(db, expected_fingerprint=fingerprint)
+        db.rollback()
+
+    assert all(m.invoice_id is None for m in _issue_movements(product["product_id"]))
+    assert len(_attribution_audits()) == audits_before
+
+    with SessionLocal() as db:
+        with pytest.raises(ValueError):
+            costing.apply_attribution(db, expected_fingerprint="not-a-fingerprint")
+
+
+def _legacy_partial_order(client, world, qty=4):
+    """Opening stock with no cost plus a costed receipt: the issue stays partial."""
+    product = _new_product(world, opening=5)
+    po_id, _ = _po(client, world, product["sku"], 10, "10.00")
+    _receive(client, po_id, product["warehouse_id"], product["sku"], 10)
+    order_id, invoice_id = _dispatch(client, product, qty)
+    _strip_issue_cost(product)
+    return product, order_id, invoice_id
+
+
+def test_cost_apply_sets_the_proposal_and_writes_one_audit_row(client, world):
+    product, _order_id, invoice_id = _legacy_partial_order(client, world)
+
+    with SessionLocal() as db:
+        plan = costing.backfill_plan(db, [product["product_id"]])
+    row = plan["products"][0]
+    detail = next(m for m in row["movements_detail"] if m["movement_type"] == "issue")
+    assert detail["changed"] is True
+    assert detail["unit_cost"] == "10.00"
+    assert detail["cost_source"] == costing.PARTIAL
+    assert row["uncosted_on_hand"] == _dec("5")
+    invoice = next(i for i in plan["invoices"] if i["invoice_id"] == invoice_id)
+    assert invoice["costed_after"] is False
+    assert "partial" in invoice["partial_reason_after"]
+
+    fingerprint = costing.cost_fingerprint(plan)
+    with SessionLocal() as db:
+        result = costing.apply_cost_backfill(
+            db, expected_fingerprint=fingerprint, product_ids=[product["product_id"]])
+        db.commit()
+
+    assert result["applied"] is True and result["audit_rows"] == 1
+    assert result["movements_changed"] == row["would_set_cost"] + row["would_change_source"]
+    issue = _issue_movements(product["product_id"])[0]
+    assert issue.unit_cost == _dec("10.00")
+    assert issue.cost_source == costing.PARTIAL
+
+    audited = [row for row in _cost_audits()
+               if row.changes.get("plan_fingerprint") == fingerprint]
+    assert len(audited) == 1
+    assert audited[0].actor_id is None
+    assert audited[0].record == "stock_movements:cost_backfill"
+    recorded = {c["movement_id"]: c for c in audited[0].changes["costs"]}
+    assert recorded[issue.id]["unit_cost"] == "10.00"
+    assert recorded[issue.id]["cost_source"] == costing.PARTIAL
+
+
+def test_cost_apply_is_idempotent_and_writes_no_second_audit_row(client, world):
+    product, _order_id, _invoice_id = _legacy_partial_order(client, world)
+    fingerprint = _cost_fingerprint(product)
+
+    with SessionLocal() as db:
+        first = costing.apply_cost_backfill(
+            db, expected_fingerprint=fingerprint, product_ids=[product["product_id"]])
+        db.commit()
+    audits_after_first = len(_cost_audits())
+
+    with SessionLocal() as db:
+        second = costing.apply_cost_backfill(
+            db, expected_fingerprint=fingerprint, product_ids=[product["product_id"]])
+        db.commit()
+
+    assert first["applied"] is True and first["audit_rows"] == 1
+    assert second["applied"] is False and second["already_applied"] is True
+    assert second["idempotent"] is True and second["audit_rows"] == 0
+    assert len(_cost_audits()) == audits_after_first
+
+
+def test_cost_apply_refuses_a_stale_plan_and_writes_nothing(client, world):
+    product, _order_id, _invoice_id = _legacy_partial_order(client, world)
+    fingerprint = _cost_fingerprint(product)
+
+    with SessionLocal() as db:
+        receipt = db.scalar(
+            select(StockMovement)
+            .join(Batch, Batch.id == StockMovement.batch_id)
+            .where(Batch.product_id == product["product_id"],
+                   StockMovement.movement_type == "receipt",
+                   StockMovement.ref_type == "grn"))
+        receipt.unit_cost = Decimal("20.00")
+        db.commit()
+    audits_before = len(_cost_audits())
+
+    with SessionLocal() as db:
+        with pytest.raises(costing.StaleCostPlanError):
+            costing.apply_cost_backfill(
+                db, expected_fingerprint=fingerprint,
+                product_ids=[product["product_id"]])
+        db.rollback()
+
+    issue = _issue_movements(product["product_id"])[0]
+    assert issue.unit_cost is None and issue.cost_source is None
+    assert len(_cost_audits()) == audits_before
+
+
+def test_cost_apply_refuses_a_locked_invoice_month(client, world):
+    product, _order_id, invoice_id = _legacy_partial_order(client, world)
+    with SessionLocal() as db:
+        db.get(Invoice, invoice_id).invoice_date = date(2019, 3, 10)
+        db.add(PeriodLock(scope="accounting", year=2019, month=3, active=True,
+                          locked_by=1, reason="test close"))
+        db.commit()
+    fingerprint = _cost_fingerprint(product)
+    audits_before = len(_cost_audits())
+    try:
+        with SessionLocal() as db:
+            with pytest.raises(costing.LockedPeriodError):
+                costing.apply_cost_backfill(
+                    db, expected_fingerprint=fingerprint,
+                    product_ids=[product["product_id"]])
+            db.rollback()
+        issue = _issue_movements(product["product_id"])[0]
+        assert issue.unit_cost is None and len(_cost_audits()) == audits_before
+    finally:
+        with SessionLocal() as db:
+            lock = db.scalar(select(PeriodLock).where(
+                PeriodLock.scope == "accounting", PeriodLock.year == 2019,
+                PeriodLock.month == 3))
+            if lock is not None:
+                lock.active = False
+                db.commit()
+
+
 def test_issue_is_partial_when_any_on_hand_stock_has_no_cost(client, world):
     product = _new_product(world, opening=100)          # 100 units, no cost
     po_id, _ = _po(client, world, product["sku"], 50, "10.00")
@@ -531,7 +812,34 @@ def test_backfill_tool_refuses_to_write():
     refused = subprocess.run([sys.executable, "backfill_costs.py", "--apply"],
                              cwd=ROOT, env=env, capture_output=True, text=True)
     assert refused.returncode == 2
-    assert "dry-run only" in refused.stderr
+    assert "--plan-fingerprint" in refused.stderr
+
+    filtered = subprocess.run(
+        [sys.executable, "backfill_costs.py", "--apply", "--product", "1",
+         "--plan-fingerprint", "0" * 64],
+        cwd=ROOT, env=env, capture_output=True, text=True)
+    assert filtered.returncode == 2
+    assert "--product" in filtered.stderr
+
+    both = subprocess.run(
+        [sys.executable, "backfill_costs.py", "--apply", "--apply-costs",
+         "--plan-fingerprint", "0" * 64],
+        cwd=ROOT, env=env, capture_output=True, text=True)
+    assert both.returncode == 2
+    assert "not both" in both.stderr
+
+    no_cost_fingerprint = subprocess.run(
+        [sys.executable, "backfill_costs.py", "--apply-costs"],
+        cwd=ROOT, env=env, capture_output=True, text=True)
+    assert no_cost_fingerprint.returncode == 2
+    assert "--plan-fingerprint" in no_cost_fingerprint.stderr
+
+    stale = subprocess.run(
+        [sys.executable, "backfill_costs.py", "--apply",
+         "--plan-fingerprint", "0" * 64],
+        cwd=ROOT, env=env, capture_output=True, text=True)
+    assert stale.returncode == 3
+    assert "Refused" in stale.stderr
 
     report = subprocess.run([sys.executable, "backfill_costs.py"],
                             cwd=ROOT, env=env, capture_output=True, text=True)
@@ -539,6 +847,9 @@ def test_backfill_tool_refuses_to_write():
     data = json.loads(report.stdout)
     assert data["mode"] == "dry-run"
     assert "would_set_cost" in data
+    assert len(data["attribution"]["plan_fingerprint"]) == 64
+    assert len(data["cost_plan_fingerprint"]) == 64
+    assert all("movements_detail" in row for row in data["detail"])
 
 
 # ------------------------------------------------- issues with no known cost
