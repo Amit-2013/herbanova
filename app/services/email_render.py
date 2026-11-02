@@ -251,8 +251,9 @@ def _accounts(data: dict) -> str:
         f'<div style="padding:22px 28px">'
         f'<h2 style="margin:0 0 6px;font-size:16px;color:{INK}">Accounts summary</h2>'
         f'<p style="margin:0 0 12px;font-size:13px;color:{MUTED}">Period {_e(data["period_label"])}. '
-        f'Outstanding and payables are as at {_e(acc["as_of"])}. Accounting months can be '
-        f'locked against cost corrections; there is no year-end close (GAP-A03).</p>'
+        f'Outstanding and payables are as at {_e(acc["as_of"])}. A locked accounting month '
+        f'refuses cost corrections and expense creation or reversal; invoice changes, '
+        f'credit notes, receipts, payments and year-end close are not covered (GAP-A03).</p>'
         + _tiles(tiles)
         + f'<p style="font-size:12px;color:{"#1F6B4A" if tb["balanced"] else RED};margin:8px 0 0">'
           f'Trial balance: {_e(check)}.</p>'
@@ -514,7 +515,8 @@ def _plain(data: dict, attachments: list[dict], mode: str, test_recipient: str |
                                        if profit.get("net_profit") is not None
                                        else f"No data yet ({first_gap})"),
                   f"- Trial balance: {'debits equal credits' if acc['trial_balance']['balanced'] else 'DOES NOT BALANCE'}",
-                  "- Accounting months can be locked against cost corrections; no year-end close (GAP-A03)"]
+                  "- A locked accounting month refuses cost corrections and expense creation or reversal; "
+                  "invoice changes, credit notes, receipts, payments and year-end close are not covered (GAP-A03)"]
     lines += ["", "ATTACHED REPORTS"]
     lines += ([f"- {a['filename']} ({a.get('contains')}, {a.get('rows')} rows, {_size(len(a['bytes']))})"
                for a in attachments] or ["- None"])

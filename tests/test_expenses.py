@@ -381,6 +381,58 @@ def test_receipt_upload_validation_download_and_permissions(client):
     assert _audit("expense.attachment", f"expense:{entry['id']}")
 
 
+def test_create_and_reverse_are_refused_while_the_accounting_month_is_locked(client):
+    admin = client.as_user("admin")
+    _set_settings(admin, False)
+    head = _head(admin)
+    january, february = date(2020, 1, 15), date(2020, 2, 10)
+
+    def lock(day):
+        res = admin.post("/api/accounts/period-locks", json={
+            "year": day.year, "month": day.month, "reason": "month closed for audit"})
+        assert res.status_code == 201, res.text
+        return res.json()
+
+    january_lock = lock(january)
+
+    refused = admin.post("/api/expenses", json={
+        "head_id": head["id"], "entry_date": january.isoformat(),
+        "amount": "100.00", "mode": "bank"})
+    assert refused.status_code == 423, refused.text
+    assert "2020-01" in refused.json()["detail"]
+    assert "locked" in refused.json()["detail"]
+
+    february_entry = _entry(admin, head["id"], "100.00",
+                            entry_date=february.isoformat())
+    assert february_entry["status"] == "approved"
+    february_lock = lock(february)
+    reverse = admin.post(f"/api/expenses/{february_entry['id']}/reverse",
+                         json={"reason": "wrong head"})
+    assert reverse.status_code == 423, reverse.text
+    assert "2020-02" in reverse.json()["detail"]
+
+    with SessionLocal() as db:
+        stored = db.get(Expense, february_entry["id"])
+        assert stored.status == "approved" and stored.reversed_at is None
+        assert db.scalar(select(Expense).where(Expense.entry_date == january)) is None
+    assert _audit("expense.reverse", f"expense:{february_entry['id']}") == []
+
+    unlocked = admin.post(f"/api/accounts/period-locks/{january_lock['id']}/unlock",
+                          json={"reason": "reopened for a correction"})
+    assert unlocked.status_code == 200, unlocked.text
+    assert unlocked.json()["active"] is False
+    allowed = _entry(admin, head["id"], "120.00", entry_date=january.isoformat())
+    assert allowed["status"] == "approved"
+
+    unlocked = admin.post(f"/api/accounts/period-locks/{february_lock['id']}/unlock",
+                          json={"reason": "reopened for a correction"})
+    assert unlocked.status_code == 200, unlocked.text
+    reversed_ok = admin.post(f"/api/expenses/{february_entry['id']}/reverse",
+                             json={"reason": "wrong head"})
+    assert reversed_ok.status_code == 200, reversed_ok.text
+    assert reversed_ok.json()["status"] == "reversed"
+
+
 def test_expense_api_is_owned_by_the_accounting_feature_switch():
     from app.core.features import feature_for_path
     assert feature_for_path("/api/expenses") == "accounts"

@@ -415,7 +415,7 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 | Day book / cash book / bank book | **PARTIAL** | A dated payment book can be produced; opening balances and running closing balances cannot. |
 | Expenses / expense heads | **CLOSED 2 Nov 2026** | `expenses`, `expense_heads` and `expense_settings` (migration `0020`); approval threshold with an on/off switch, non-creditable GST flag, audited reversal and receipts. |
 | P&L / balance sheet | **P&L CLOSED 2 Nov 2026; balance sheet still MISSING** | `profit_loss.statement()` builds revenue, returns, COGS, expenses, payroll, gross profit and net profit, with GAP-P01/P02/P03 when an input is missing. Closing stock valuation and opening balances are still not captured, so a balance sheet is still not produced (GAP-A10). |
-| Financial-year / period locks | **PARTIAL** | Accounting months can be locked for cost corrections through `hr_period_locks` scope `accounting` (migration `0022`, HTTP 423 on a locked correction). No year-end close or whole-document freeze exists (GAP-A03). |
+| Financial-year / period locks | **PARTIAL** | Accounting months can be locked through `hr_period_locks` scope `accounting` (migration `0022`). A locked month refuses purchase-cost corrections and expense creation or reversal with HTTP 423. Invoice changes, credit notes, receipts, payments and a year-end close are not covered (GAP-A03). |
 | TDS / statutory dues | **MISSING** | No TDS section, rate, deduction or challan. |
 | Bank reconciliation / unposted vouchers | **MISSING** | No bank statement import, no posting state. |
 | Invoice due dates | **MISSING** | No due date or payment term on an invoice, so "due this week" cannot be computed. |
@@ -440,7 +440,7 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 | GAP-E09 | No email delivery provider/reputation handling | Rate limits | Send in batches of 20 with a pause; provider-specific APIs not integrated |
 | GAP-A01 | No expense table or heads | Expenses, P&L, net profit | **Closed 2 Nov 2026:** migration `0020` adds expenses, heads, settings, approval and reversal; the P&L reads approved entries by head |
 | GAP-A02 | No cost on stock or invoice lines | COGS, gross profit, margin | **Closed 2 Nov 2026:** migration `0021` captures cost on the movement ledger; COGS is proved per invoice, partial/NULL when cost is unknown |
-| GAP-A03 | No closed-period lock | Locked-period enforcement | **Partially closed 2 Nov 2026:** accounting months can be locked for cost corrections (migration `0022`); no year-end close exists, so the page says exactly that |
+| GAP-A03 | No closed-period lock | Locked-period enforcement | **Partially closed 2 Nov 2026:** accounting months can be locked; a locked month refuses cost corrections and expense creation/reversal (migration `0022`, HTTP 423). Invoice changes, credit notes, receipts, payments and year-end close are not covered |
 | GAP-A04 | No invoice due date | Payables/receivables due this week | Show outstanding ageing only |
 | GAP-A05 | No purchase-side tax | Input GST, net GST, GSTR-3B | Show output GST only, labelled |
 | GAP-A06 | No GSTR-1/3B filings | Reconciliation | Not shown |

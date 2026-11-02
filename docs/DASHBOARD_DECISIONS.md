@@ -179,7 +179,7 @@ This file records every decision taken without the owner present, so each one ca
 
 **Decision.** The Accounts page, email block and pack show: revenue (taxable and gross), output GST split, receipts, returns, outstanding and ageing, overdue-60, payables outstanding, cash/bank **net movement**, credit exposure, trial balance and post-billing audit activity. Since the accounting/expenses work they also show COGS, gross profit, expenses by head, payroll gross and net profit where those inputs are complete (D-42). They still show a gap for balance sheet, input GST/net GST, TDS, due-this-week, vouchers, bank reconciliation and year-end close.
 **Why.** There is no purchase tax, no due date and no year-end close, so deriving any of those would invent a number. The trial balance is labelled "derived from documents, no opening balances".
-**Period locks.** Accounting months can be locked for cost corrections (scope `accounting` in `hr_period_locks`, refused with HTTP 423); there is no year-end close (GAP-A03). The page states which lock exists and which does not.
+**Period locks.** Accounting months can be locked (scope `accounting` in `hr_period_locks`). A locked month refuses purchase-cost corrections and expense creation or reversal with HTTP 423. Invoice changes, credit notes, receipts, payments and a year-end close are not covered (GAP-A03). The page states exactly which actions the lock covers.
 **Cash.** The trial balance carries net cash/bank debits, not a closing balance, because opening balances are not captured (GAP-A10). The card says "net movement recorded".
 
 ## D-29. Delivery log is kept indefinitely

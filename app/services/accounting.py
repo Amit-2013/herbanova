@@ -34,8 +34,9 @@ ZERO = Decimal("0.00")
 
 GAPS = (
     ("GAP-A03", "Financial-year close",
-     "Accounting months can be locked for cost corrections, and are refused when "
-     "locked, but there is no year-end close that freezes every document."),
+     "Accounting months can be locked. A locked month refuses purchase-cost "
+     "corrections and expense creation or reversal. Invoice changes, credit "
+     "notes, receipts, payments and a year-end close are not covered."),
     ("GAP-A04", "Invoice due dates",
      "An invoice carries no due date. Payables due dates are estimated from the supplier's current payment terms and the latest receipt."),
     ("GAP-A05", "Input GST and net GST payable",
@@ -216,8 +217,9 @@ def window(db: Session, start: date, end: date, as_of: date | None = None,
             "Payables are the cost of goods received on or before the date minus payments made by then.",
             "Cash and bank is the net movement recorded in the window; opening balances are not captured (GAP-A10).",
             "Output GST only: purchase-side tax is not captured (GAP-A05).",
-            "Accounting months can be locked against cost corrections; there is no "
-            "year-end close (GAP-A03).",
+            "Accounting months can be locked: a locked month refuses cost "
+            "corrections and expense creation or reversal; invoice changes, credit "
+            "notes, receipts, payments and year-end close are not covered (GAP-A03).",
         ] + ([f"Region filter: {state_name(state) or state}. It narrows revenue, returns, "
               "output GST and distributor receipts; balances and cash stay company-wide."]
              if state else []),
