@@ -523,7 +523,8 @@ class PeriodLock(Base):
     __tablename__ = "hr_period_locks"
     __table_args__ = (
         UniqueConstraint("scope", "year", "month", name="uq_hr_period_lock"),
-        CheckConstraint("scope IN ('attendance','payroll')", name="ck_hr_period_lock_scope"),
+        CheckConstraint("scope IN ('attendance','payroll','accounting')",
+                        name="ck_hr_period_lock_scope"),
         CheckConstraint("month BETWEEN 1 AND 12", name="ck_hr_period_lock_month"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)

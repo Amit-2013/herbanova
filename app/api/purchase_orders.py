@@ -341,6 +341,7 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
                                      "warehouse's capacity")
 
     ordered = {ln.product_id: ln.qty for ln in po.lines}
+    po_cost = {ln.product_id: ln.unit_cost for ln in po.lines}
     already = _received_by_product(db, po.id)
     running = dict(already)
     for ln in body.lines:
@@ -381,8 +382,11 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
                           expiry=ln.expiry, owner=body.owner)
             db.add(batch)
             db.flush()                       # assign id before posting the movement
+        receipt_cost = po_cost.get(prod.id)
         post_movement(db, batch_id=batch.id, qty_delta=ln.qty, movement_type="receipt",
-                      ref_type="grn", ref_id=str(grn.id), actor_id=user.id)
+                      ref_type="grn", ref_id=str(grn.id), actor_id=user.id,
+                      unit_cost=receipt_cost,
+                      cost_source="po_receipt" if receipt_cost is not None else "uncosted")
         db.add(GoodsReceiptLine(grn_id=grn.id, product_id=prod.id, batch_id=batch.id, qty=ln.qty))
         out_lines.append(ReceivedLine(sku=ln.sku, batch_no=ln.batch_no, qty=ln.qty,
                                       batch_on_hand=batch.on_hand))
