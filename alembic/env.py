@@ -16,6 +16,7 @@ import app.models.users     # noqa: F401  roles, employees
 import app.models.tax       # noqa: F401  company_profile, tax_rates, discount_slabs
 import app.models.suppliers # noqa: F401  suppliers, goods_receipts
 import app.models.expenses  # noqa: F401  expenses, heads, settings
+import app.models.costs     # noqa: F401  cost_corrections
 
 config = context.config
 if config.config_file_name is not None:

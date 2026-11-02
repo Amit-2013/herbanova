@@ -1,0 +1,504 @@
+"""Stock cost capture: weighted average per product, company-wide.
+
+Cost is captured when the ledger row is written, not reconstructed at report
+time except by the explicit backfill and correction tools:
+
+* a receipt carries the purchase-order rate (freight and discounts are not in it,
+  because they are not recorded);
+* an issue carries the product's moving weighted average across every warehouse;
+* a return carries the cost at which the invoice issued the goods.
+
+The ledger stays append-only for quantities. Cost corrections are the one
+deliberate exception: an audited tool may replace the captured cost on a
+product's movements after a late purchase rate, then replays that product and
+reports exactly which invoices changed.
+
+A product whose on-hand stock includes any quantity with no cost cannot produce
+a clean issue cost. That issue is stored with `cost_source = 'partial'` (plus
+the best available average when there is one) and its invoice is reported as
+partially costed, never with a silent zero.
+
+Concurrent issues of the same product serialise on the product row
+(`lock_products`): the reader that computes the average holds the row until its
+issue rows are committed, so a second issue cannot compute from a stale ledger.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_HALF_UP
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..models.core import (Batch, Invoice, Product, PurchaseOrder,
+                           PurchaseOrderLine, StockMovement)
+from ..models.costs import CostCorrection
+from ..models.suppliers import GoodsReceipt, GoodsReceiptLine
+
+CENT = Decimal("0.01")
+ZERO = Decimal("0")
+PO_RECEIPT = "po_receipt"
+WEIGHTED_AVERAGE = "weighted_average"
+PARTIAL = "partial"
+RETURN = "return"
+UNCOSTED = "uncosted"
+COST_SOURCES = (PO_RECEIPT, WEIGHTED_AVERAGE, PARTIAL, RETURN, UNCOSTED)
+
+
+class LockedPeriodError(Exception):
+    """An accounting month is locked, so the correction must not run."""
+
+
+def money(value) -> Decimal:
+    return Decimal(value or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def lock_products(db: Session, product_ids) -> None:
+    """Serialise issue costing on the product rows, in a fixed order.
+
+    The caller reads the average and writes the issue cost in one transaction.
+    Holding `FOR UPDATE` on each product until commit means a second issue of the
+    same product replays a ledger that already includes the first one. Sorting the
+    ids keeps a multi-product dispatch from deadlocking with another.
+    """
+    for product_id in sorted(set(product_ids)):
+        db.execute(select(Product.id).where(Product.id == product_id)
+                   .with_for_update()).all()
+
+
+@dataclass
+class MovementCost:
+    movement_id: int
+    unit_cost: Decimal | None
+    cost_source: str
+    invoice_id: int | None
+    movement_type: str
+    qty: Decimal
+
+
+@dataclass
+class ReplayPlan:
+    product_id: int
+    costs: dict[int, MovementCost] = field(default_factory=dict)
+    qty_on_hand: Decimal = ZERO
+    costed_qty: Decimal = ZERO
+    costed_value: Decimal = ZERO
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def average(self) -> Decimal | None:
+        if self.costed_qty <= 0:
+            return None
+        return money(self.costed_value / self.costed_qty)
+
+    @property
+    def uncosted_on_hand(self) -> Decimal:
+        return max(self.qty_on_hand - self.costed_qty, ZERO)
+
+
+def _product_movements(db: Session, product_id: int) -> list[StockMovement]:
+    return list(db.scalars(
+        select(StockMovement)
+        .join(Batch, Batch.id == StockMovement.batch_id)
+        .where(Batch.product_id == product_id)
+        .order_by(StockMovement.created_at, StockMovement.id)).all())
+
+
+def _po_unit_cost(db: Session, product_id: int, ref_id: str, batch_id: int,
+                  cache: dict) -> Decimal | None:
+    """The purchase-order rate behind a goods-receipt movement, if recorded."""
+    key = (ref_id, batch_id)
+    if key in cache:
+        return cache[key]
+    cost = None
+    try:
+        grn_id = int(ref_id)
+    except (TypeError, ValueError):
+        cache[key] = None
+        return None
+    line = db.scalar(select(GoodsReceiptLine).where(
+        GoodsReceiptLine.grn_id == grn_id,
+        GoodsReceiptLine.batch_id == batch_id,
+        GoodsReceiptLine.product_id == product_id))
+    if line is not None:
+        grn = db.get(GoodsReceipt, grn_id)
+        if grn is not None:
+            po_line = db.scalar(select(PurchaseOrderLine).where(
+                PurchaseOrderLine.po_id == grn.po_id,
+                PurchaseOrderLine.product_id == product_id))
+            if po_line is not None and po_line.unit_cost is not None:
+                cost = money(po_line.unit_cost)
+    cache[key] = cost
+    return cost
+
+
+def _add_stock(plan: ReplayPlan, qty: Decimal, cost: Decimal | None) -> None:
+    plan.qty_on_hand += qty
+    if cost is not None:
+        plan.costed_qty += qty
+        plan.costed_value += qty * cost
+
+
+def _take_stock(plan: ReplayPlan, qty: Decimal) -> None:
+    average = plan.average
+    plan.qty_on_hand -= qty
+    if average is not None:
+        costed_take = min(qty, plan.costed_qty)
+        plan.costed_qty -= costed_take
+        plan.costed_value -= costed_take * average
+    if plan.costed_qty <= 0:
+        plan.costed_qty = ZERO
+        plan.costed_value = ZERO
+    if plan.qty_on_hand < 0:
+        plan.warnings.append("movement ledger goes negative")
+
+
+def replay(db: Session, product_id: int, *,
+           receipt_overrides: dict[int, Decimal] | None = None) -> ReplayPlan:
+    """Replay one product's movements through the weighted-average rule.
+
+    Stored costs are used when present. A legacy receipt row with no stored cost
+    is derived from its purchase order; a correction passes `receipt_overrides`
+    keyed by movement id.
+    """
+    overrides = receipt_overrides or {}
+    plan = ReplayPlan(product_id=product_id)
+    grn_cache: dict = {}
+    invoice_issues: dict[tuple[int, int], list[tuple[Decimal, Decimal, bool]]] = {}
+
+    for m in _product_movements(db, product_id):
+        qty = Decimal(m.qty_delta)
+        source = m.cost_source
+        cost = money(m.unit_cost) if m.unit_cost is not None else None
+
+        if m.movement_type == "receipt" and m.id in overrides:
+            cost, source = money(overrides[m.id]), PO_RECEIPT
+        elif qty < 0 and m.movement_type == "issue":
+            average = plan.average
+            cost = average
+            source = PARTIAL if (plan.uncosted_on_hand > 0 or average is None) \
+                else WEIGHTED_AVERAGE
+            if m.invoice_id:
+                invoice_issues.setdefault((m.invoice_id, product_id), []).append(
+                    (-qty, cost, source == PARTIAL))
+        elif qty > 0 and m.movement_type == "return":
+            if cost is None:
+                issued = invoice_issues.get((m.invoice_id, product_id)) if m.invoice_id else None
+                if issued and all(u is not None for _q, u, _p in issued):
+                    total_qty = sum(q for q, _u, _p in issued)
+                    cost = money(sum(q * (u or ZERO) for q, u, _p in issued) / total_qty) \
+                        if total_qty > 0 else None
+                    source = PARTIAL if any(p for _q, _u, p in issued) else RETURN
+                elif plan.average is not None:
+                    cost, source = plan.average, RETURN
+                else:
+                    source = PARTIAL
+            else:
+                source = source or RETURN
+        elif qty > 0:
+            if cost is None and m.ref_type == "grn":
+                cost = _po_unit_cost(db, product_id, m.ref_id, m.batch_id, grn_cache)
+            if cost is not None:
+                source = source or (PO_RECEIPT if m.ref_type == "grn" else WEIGHTED_AVERAGE)
+            else:
+                source = UNCOSTED
+        else:
+            cost = plan.average
+            source = source or (WEIGHTED_AVERAGE if cost is not None else UNCOSTED)
+
+        if qty > 0:
+            _add_stock(plan, qty, cost)
+        elif qty < 0:
+            _take_stock(plan, -qty)
+        else:
+            plan.warnings.append(f"movement {m.id} has zero quantity")
+
+        plan.costs[m.id] = MovementCost(
+            movement_id=m.id, unit_cost=money(cost) if cost is not None else None,
+            cost_source=source or UNCOSTED, invoice_id=m.invoice_id,
+            movement_type=m.movement_type, qty=qty)
+    return plan
+
+
+def issue_cost(db: Session, product_id: int) -> tuple[Decimal | None, str]:
+    """The cost and source an issue should carry, measured over all warehouses."""
+    plan = replay(db, product_id)
+    if plan.uncosted_on_hand > 0 or plan.average is None:
+        return plan.average, PARTIAL
+    return plan.average, WEIGHTED_AVERAGE
+
+
+def invoice_product_cost(db: Session, invoice_id: int,
+                         product_id: int) -> tuple[Decimal | None, str]:
+    """The cost at which an invoice issued a product, for crediting a return.
+
+    Uses the issue movements attributed to that invoice. When the invoice has no
+    attributed issue (a legacy invoice from before attribution), the product's
+    current average is offered but flagged partial, because the original cost is
+    not provable from the ledger.
+    """
+    rows = list(db.scalars(
+        select(StockMovement)
+        .join(Batch, Batch.id == StockMovement.batch_id)
+        .where(StockMovement.invoice_id == invoice_id,
+               StockMovement.movement_type == "issue",
+               StockMovement.qty_delta < 0,
+               Batch.product_id == product_id)).all())
+    if rows:
+        qty = sum(-Decimal(m.qty_delta) for m in rows)
+        if qty > 0 and all(m.unit_cost is not None for m in rows):
+            value = sum(-Decimal(m.qty_delta) * money(m.unit_cost) for m in rows)
+            clean = all(m.cost_source == WEIGHTED_AVERAGE for m in rows)
+            return money(value / qty), RETURN if clean else PARTIAL
+        return None, PARTIAL
+    average, _source = issue_cost(db, product_id)
+    return average, PARTIAL
+
+
+def apply_plan(db: Session, plan: ReplayPlan) -> list[StockMovement]:
+    """Write proposed costs onto movements that differ. The caller commits."""
+    changed = []
+    for m in _product_movements(db, plan.product_id):
+        proposed = plan.costs.get(m.id)
+        if proposed is None:
+            continue
+        stored = money(m.unit_cost) if m.unit_cost is not None else None
+        if stored != proposed.unit_cost or (m.cost_source or UNCOSTED) != proposed.cost_source:
+            m.unit_cost = proposed.unit_cost
+            m.cost_source = proposed.cost_source
+            changed.append(m)
+    db.flush()
+    return changed
+
+
+def _invoice_cogs(movements: list[StockMovement],
+                  costs: dict[int, MovementCost]) -> dict[int, dict]:
+    """COGS from a cost map. Issues add, stock returns subtract."""
+    out: dict[int, dict] = {}
+    for m in movements:
+        if not m.invoice_id:
+            continue
+        item = out.setdefault(m.invoice_id, {
+            "cogs": ZERO, "issue_qty": ZERO, "return_qty": ZERO,
+            "uncosted_issue_qty": ZERO, "clean": True})
+        proposed = costs.get(m.id)
+        cost = proposed.unit_cost if proposed else (
+            money(m.unit_cost) if m.unit_cost is not None else None)
+        source = proposed.cost_source if proposed else (m.cost_source or UNCOSTED)
+        qty = Decimal(m.qty_delta)
+        if m.movement_type == "issue" and qty < 0:
+            item["issue_qty"] += -qty
+            if cost is None:
+                item["uncosted_issue_qty"] += -qty
+                item["clean"] = False
+            else:
+                item["cogs"] += (-qty) * cost
+                if source == PARTIAL:
+                    item["clean"] = False
+        elif m.movement_type == "return" and qty > 0:
+            item["return_qty"] += qty
+            if cost is None:
+                item["clean"] = False
+            else:
+                item["cogs"] -= qty * cost
+                if source == PARTIAL:
+                    item["clean"] = False
+    for item in out.values():
+        item["cogs"] = money(item["cogs"])
+        if item["issue_qty"] <= 0:
+            item["clean"] = False
+    return out
+
+
+def invoice_cogs(db: Session, invoice_ids: list[int] | None = None) -> dict[int, dict]:
+    """Cost of goods for each invoice, with an explicit partial flag.
+
+    A clean invoice has at least one issue and every issue carried a cost.
+    Anything else is `costed = False` with a reason, so a gross profit can be
+    labelled "partial, X of Y invoices costed" rather than presented as complete.
+    """
+    stmt = select(Invoice.id, Invoice.invoice_number)
+    if invoice_ids:
+        stmt = stmt.where(Invoice.id.in_(invoice_ids))
+    invoices = {iid: number for iid, number in db.execute(stmt).all()}
+    if not invoices:
+        return {}
+    movements = list(db.scalars(select(StockMovement).where(
+        StockMovement.invoice_id.in_(list(invoices)))).all())
+    costs = {m.id: MovementCost(
+        m.id, money(m.unit_cost) if m.unit_cost is not None else None,
+        m.cost_source or UNCOSTED, m.invoice_id, m.movement_type,
+        Decimal(m.qty_delta)) for m in movements}
+    raw = _invoice_cogs(movements, costs)
+    result = {}
+    for iid, number in invoices.items():
+        item = raw.get(iid, {"cogs": ZERO, "issue_qty": ZERO, "return_qty": ZERO,
+                             "uncosted_issue_qty": ZERO, "clean": False})
+        reason = None
+        if item["issue_qty"] <= 0:
+            reason = "no stock issue is attributed to this invoice"
+        elif item["uncosted_issue_qty"] > 0:
+            reason = (f"{item['uncosted_issue_qty']:f} of {item['issue_qty']:f} "
+                      "issued units have no cost")
+        elif not item["clean"]:
+            reason = ("the captured cost is partial: some on-hand stock had no cost "
+                      "when the goods were issued")
+        result[iid] = {"invoice_id": iid, "invoice_number": number,
+                       "cogs": item["cogs"], "issue_qty": item["issue_qty"],
+                       "return_qty": item["return_qty"], "costed": item["clean"],
+                       "partial_reason": reason}
+    return result
+
+
+def backfill_plan(db: Session, product_ids: list[int] | None = None) -> dict:
+    """What a cost backfill would change, without changing anything.
+
+    Dry-run only in this phase: the proposal is printed so it can be checked
+    against a database copy before anything is written.
+    """
+    stmt = (select(Batch.product_id)
+            .join(StockMovement, StockMovement.batch_id == Batch.id).distinct())
+    if product_ids:
+        stmt = stmt.where(Batch.product_id.in_(product_ids))
+    products = sorted(db.scalars(stmt).all())
+    rows = []
+    for pid in products:
+        movements = _product_movements(db, pid)
+        plan = replay(db, pid)
+        would_set = would_change = same = 0
+        for m in movements:
+            proposed = plan.costs.get(m.id)
+            if proposed is None:
+                continue
+            stored = money(m.unit_cost) if m.unit_cost is not None else None
+            if stored == proposed.unit_cost and (m.cost_source or UNCOSTED) == proposed.cost_source:
+                same += 1
+            elif stored is None and proposed.unit_cost is not None:
+                would_set += 1
+            else:
+                would_change += 1
+        before = _invoice_cogs(movements, {
+            m.id: MovementCost(m.id, money(m.unit_cost) if m.unit_cost is not None else None,
+                               m.cost_source or UNCOSTED, m.invoice_id, m.movement_type,
+                               Decimal(m.qty_delta)) for m in movements})
+        after = _invoice_cogs(movements, plan.costs)
+        affected = []
+        for invoice_id in sorted(set(before) | set(after)):
+            b = before.get(invoice_id, {"cogs": ZERO, "clean": False})
+            a = after.get(invoice_id, {"cogs": ZERO, "clean": False})
+            if b["cogs"] != a["cogs"] or b["clean"] != a["clean"]:
+                affected.append({"invoice_id": invoice_id,
+                                 "before_cogs": b["cogs"], "after_cogs": a["cogs"],
+                                 "before_costed": b["clean"], "after_costed": a["clean"]})
+        rows.append({"product_id": pid, "movements": len(movements),
+                     "would_set_cost": would_set,
+                     "would_change_source": would_change,
+                     "already_matching": same,
+                     "uncosted_on_hand": plan.uncosted_on_hand,
+                     "average_after": plan.average,
+                     "affected_invoices": affected})
+    return {"products": rows,
+            "movements": sum(r["movements"] for r in rows),
+            "would_set_cost": sum(r["would_set_cost"] for r in rows),
+            "affected_invoices": sum(len(r["affected_invoices"]) for r in rows)}
+
+
+def correct_po_cost(db: Session, *, po_line_id: int, new_unit_cost: Decimal,
+                    reason: str, actor_id: int) -> dict:
+    """Apply a late purchase rate, replay the product and report what changed.
+
+    The caller commits. Quantities never change; only captured costs do.
+    """
+    line = db.get(PurchaseOrderLine, po_line_id, with_for_update=True)
+    if line is None:
+        raise ValueError("Purchase order line not found")
+    reason = (reason or "").strip()
+    if len(reason) < 3:
+        raise ValueError("Give a reason for the cost correction")
+    new_cost = money(new_unit_cost)
+    if new_cost < 0:
+        raise ValueError("The cost cannot be negative")
+    po = db.get(PurchaseOrder, line.po_id)
+    lock_products(db, [line.product_id])
+
+    grn_ids = [gid for (gid,) in db.execute(
+        select(GoodsReceipt.id).where(GoodsReceipt.po_id == line.po_id)).all()]
+    movement_ids = set(db.scalars(
+        select(StockMovement.id)
+        .join(Batch, Batch.id == StockMovement.batch_id)
+        .where(StockMovement.movement_type == "receipt",
+               StockMovement.ref_type == "grn",
+               StockMovement.ref_id.in_([str(g) for g in grn_ids]),
+               Batch.product_id == line.product_id)).all())
+
+    movements = _product_movements(db, line.product_id)
+    before = _invoice_cogs(movements, {
+        m.id: MovementCost(m.id, money(m.unit_cost) if m.unit_cost is not None else None,
+                           m.cost_source or UNCOSTED, m.invoice_id, m.movement_type,
+                           Decimal(m.qty_delta)) for m in movements})
+    plan = replay(db, line.product_id,
+                  receipt_overrides={mid: new_cost for mid in movement_ids})
+    after = _invoice_cogs(movements, plan.costs)
+
+    # A correction rewrites the cost of goods of every invoice whose issue cost
+    # changes. If any of those invoices sits in a locked accounting month, refuse
+    # before a single row is written, so a closed month cannot move.
+    changed_ids = [iid for iid in sorted(set(before) | set(after))
+                   if (before.get(iid, {"cogs": ZERO, "clean": False})["cogs"]
+                       != after.get(iid, {"cogs": ZERO, "clean": False})["cogs"]
+                       or before.get(iid, {"cogs": ZERO, "clean": False})["clean"]
+                       != after.get(iid, {"cogs": ZERO, "clean": False})["clean"])]
+    if changed_ids:
+        from .hr import active_period_lock
+        locked: dict[tuple[int, int], list[str]] = {}
+        for invoice_id, number, day in db.execute(
+                select(Invoice.id, Invoice.invoice_number, Invoice.invoice_date)
+                .where(Invoice.id.in_(changed_ids))).all():
+            lock = active_period_lock(db, "accounting", day)
+            if lock is not None:
+                locked.setdefault((lock.year, lock.month), []).append(number)
+        if locked:
+            periods = "; ".join(
+                f"{year}-{month:02d} ({', '.join(sorted(numbers))})"
+                for (year, month), numbers in sorted(locked.items()))
+            raise LockedPeriodError(
+                "The accounting period is locked, so this correction cannot move "
+                f"cost of goods in: {periods}. Unlock the month first.")
+
+    old_cost = money(line.unit_cost) if line.unit_cost is not None else None
+    old_remark = line.rate_remark
+    line.unit_cost = new_cost
+    line.rate_remark = None
+    changed = apply_plan(db, plan)
+
+    invoices = []
+    for invoice_id in sorted(set(before) | set(after)):
+        b = before.get(invoice_id, {"cogs": ZERO, "clean": False})
+        a = after.get(invoice_id, {"cogs": ZERO, "clean": False})
+        number = db.scalar(select(Invoice.invoice_number).where(Invoice.id == invoice_id))
+        invoices.append({"invoice_id": invoice_id, "invoice_number": number,
+                         "before_cogs": b["cogs"], "after_cogs": a["cogs"],
+                         "delta": money(a["cogs"] - b["cogs"]),
+                         "costed_before": b["clean"], "costed_after": a["clean"]})
+    sku = db.scalar(select(Product.sku).where(Product.id == line.product_id))
+    result = {
+        "product_id": line.product_id, "sku": sku,
+        "po_id": line.po_id, "po_number": po.po_number if po else None,
+        "po_line_id": line.id, "old_po_rate": old_cost, "new_po_rate": new_cost,
+        "old_rate_remark": old_remark,
+        "receipt_movements": len(movement_ids),
+        "movements_changed": len(changed),
+        "uncosted_on_hand": plan.uncosted_on_hand,
+        "average_after": plan.average,
+        "invoices": invoices,
+        "before_total": money(sum(i["before_cogs"] for i in invoices)),
+        "after_total": money(sum(i["after_cogs"] for i in invoices)),
+    }
+    db.add(CostCorrection(
+        product_id=line.product_id, po_id=line.po_id, po_line_id=line.id,
+        old_unit_cost=old_cost, new_unit_cost=new_cost, reason=reason,
+        actor_id=actor_id,
+        result={k: (str(v) if isinstance(v, Decimal) else v)
+                for k, v in result.items() if k != "invoices"}))
+    db.flush()
+    return result

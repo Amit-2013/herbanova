@@ -17,6 +17,10 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from sqlalchemy import select
+
+from app.core.db import SessionLocal
+from app.models.core import InvoiceLine
 from test_approvals import _invoice_for
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,7 +72,53 @@ def test_gst_register_and_accounts_endpoint_agree(client, world):
     totals = report["tables"][0]["totals"]
     for key in ("taxable", "cgst", "sgst", "igst", "total"):
         assert _dec(totals[key]) == _dec(accounts.json()["totals"][key]), key
-    assert len(report["tables"][0]["rows"]) == len(accounts.json()["b2b"])
+    # The report table also lists credit and debit notes; the accounts endpoint's
+    # `b2b` list is invoices only, so compare the invoice section with it.
+    invoice_rows = [r for r in report["tables"][0]["rows"] if r["section"] == "B2B invoice"]
+    assert len(invoice_rows) == len(accounts.json()["b2b"])
+
+
+def test_credit_notes_are_a_separate_gst_section_not_b2b(client, world):
+    """GSTR-1 reports a credit note as a credit note, never as a B2B invoice.
+
+    Both the report and the accounts endpoint return one register. The `b2b`
+    list holds invoices only; the note sits in `credit_notes` and reduces the
+    totals. Putting it in both would double-count the reduction.
+    """
+    invoice = _invoice_for(client, world)
+    with SessionLocal() as db:
+        line_id = db.scalar(select(InvoiceLine.id).where(
+            InvoiceLine.invoice_id == invoice["id"]))
+    note = client.as_user("admin").post("/api/credit-notes", json={
+        "invoice_id": invoice["id"], "reason": "GSTR-1 section check",
+        "lines": [{"invoice_line_id": line_id, "qty": "1"}]})
+    assert note.status_code == 201, note.text
+    note_number = note.json()["credit_note_number"]
+
+    report = _report(client, "gst_register", **WIDE)
+    accounts = client.as_user("admin").get("/api/accounts/gst-register").json()
+    rows = report["tables"][0]["rows"]
+
+    credit_rows = [r for r in rows if r["section"] == "Credit note"
+                   and r["number"] == note_number]
+    assert len(credit_rows) == 1
+    assert _dec(credit_rows[0]["taxable"]) == _dec(note.json()["taxable_value"])
+    assert _dec(credit_rows[0]["total"]) == _dec(note.json()["grand_total"])
+    # The same note is absent from both B2B lists: an invoice section holds
+    # invoices only, exactly as GSTR-1 section 4 does.
+    assert not any(r["number"] == note_number for r in rows
+                   if r["section"] == "B2B invoice")
+    assert not any(r["number"] == note_number for r in accounts["b2b"])
+    assert any(r["number"] == note_number for r in accounts["credit_notes"])
+    assert len([r for r in rows if r["section"] == "B2B invoice"]) == len(accounts["b2b"])
+
+    # The totals still agree because both paths net the note out.
+    totals = report["tables"][0]["totals"]
+    for key in ("taxable", "cgst", "sgst", "igst", "total"):
+        assert _dec(totals[key]) == _dec(accounts["totals"][key]), key
+    sign = {"B2B invoice": 1, "Debit note": 1, "Credit note": -1}
+    assert _dec(totals["taxable"]) == sum(
+        (sign[r["section"]] * _dec(r["taxable"]) for r in rows), Decimal("0"))
 
 
 def test_receivables_ageing_shows_the_four_buckets(client, world):

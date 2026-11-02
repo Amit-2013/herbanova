@@ -90,12 +90,26 @@ class Batch(Base):
     on_hand: Mapped[Decimal] = mapped_column(QTY, default=0)
 
 class StockMovement(Base):
-    """Append-only ledger. Corrections = new reversing rows, never UPDATE/DELETE."""
+    """Append-only ledger. Corrections = new reversing rows, never UPDATE/DELETE.
+
+    `unit_cost` is the cost captured when the row was written: the purchase
+    order rate for a receipt, the product's weighted average for an issue or a
+    transfer, and the original issue cost for a return. NULL means the cost was
+    not known at the time; an issue in that state carries `cost_source`
+    'partial' and its invoice is not presented with a clean cost of goods.
+    `invoice_id` attributes an issue or return to the invoice it serves, so a
+    sales order with more than one invoice gets a separate cost for each.
+    """
     __tablename__ = "stock_movements"
     __table_args__ = (
         UniqueConstraint("batch_id", "movement_type", "ref_type", "ref_id",
                          name="uq_movement_idempotency"),  # blocks duplicate receipt posting
         Index("ix_stock_movements_batch_created", "batch_id", "created_at"),
+        Index("ix_stock_movements_invoice", "invoice_id"),
+        CheckConstraint(
+            "cost_source IS NULL OR cost_source IN "
+            "('po_receipt','weighted_average','partial','return','uncosted')",
+            name="ck_stock_movement_cost_source"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     batch_id: Mapped[int] = mapped_column(ForeignKey("batches.id"))
@@ -103,6 +117,9 @@ class StockMovement(Base):
     qty_delta: Mapped[Decimal] = mapped_column(QTY)
     ref_type: Mapped[str] = mapped_column(String(30))
     ref_id: Mapped[str] = mapped_column(String(40))
+    unit_cost: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    cost_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), nullable=True)
     actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
