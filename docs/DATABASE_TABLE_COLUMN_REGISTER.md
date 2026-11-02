@@ -50,6 +50,7 @@
 - [`hr_approval_workflows`](#hr_approval_workflows) — Routing configuration for HR approval requests by request type.
 - [`hr_attendance`](#hr_attendance) — One attendance record per employee per day: status, check-in/out, geofence result, late minutes.
 - [`hr_attendance_corrections`](#hr_attendance_corrections) — Audited corrections to attendance records (old value, new value, reason, actor).
+- [`hr_attendance_rules`](#hr_attendance_rules) — Who must mark attendance: targets any mix of branch, office, designation and employee, with shift/mode overrides.
 - [`hr_branches`](#hr_branches) — Branch master for HR posting and report filters.
 - [`hr_departments`](#hr_departments) — Department master.
 - [`hr_holidays`](#hr_holidays) — Holiday calendar used by attendance and payroll.
@@ -857,11 +858,45 @@
 **Referenced by:** nothing
 
 
+### hr_attendance_rules
+
+**Purpose:** Decides whether an employee must mark attendance, which shift and which attendance mode apply, by targeting any combination of branch, office, designation and employee. The most specific active rule wins: employee 1000, office 100, designation 10, branch 1; ties fall back to `priority`, then the newest rule. No matching rule means attendance is required.
+
+**ORM:** `AttendanceRule` · **Rows (dev):** 0 · **Columns:** 16
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('hr_attendance_rules_id_seq') | PK |  | — |
+| 2 | `branch_id` | integer | yes | — | FK→hr_branches.id, IX |  | — |
+| 3 | `office_id` | integer | yes | — | FK→hr_work_locations.id, IX |  | — |
+| 4 | `designation` | varchar(80) | yes | — | — |  | — |
+| 5 | `employee_id` | integer | yes | — | FK→employees.id, IX |  | — |
+| 6 | `required` | boolean | no | true | — |  | — |
+| 7 | `self_service` | boolean | no | true | — |  | — |
+| 8 | `shift_id` | integer | yes | — | FK→hr_shifts.id |  | — |
+| 9 | `attendance_mode` | varchar(10) | yes | — | — |  | — |
+| 10 | `effective_from` | date | yes | — | — |  | — |
+| 11 | `effective_to` | date | yes | — | — |  | — |
+| 12 | `priority` | integer | no | 100 | — |  | — |
+| 13 | `active` | boolean | no | true | — |  | — |
+| 14 | `note` | varchar(200) | yes | — | — |  | — |
+| 15 | `created_by` | integer | yes | — | FK→users.id |  | — |
+| 16 | `created_at` | timestamp | no | now() | — |  | — |
+
+**Indexes:** `ix_hr_attendance_rules_branch` (branch_id); `ix_hr_attendance_rules_office` (office_id); `ix_hr_attendance_rules_employee` (employee_id)
+
+**Foreign keys:** (branch_id) → `hr_branches`(id); (created_by) → `users`(id); (employee_id) → `employees`(id); (office_id) → `hr_work_locations`(id); (shift_id) → `hr_shifts`(id)
+
+**Referenced by:** nothing
+
+**Check constraints:** `ck_hr_attendance_rule_mode`: `attendance_mode IS NULL OR attendance_mode IN ('office','gps','both')`; `ck_hr_attendance_rule_dates`: `effective_to IS NULL OR effective_from IS NULL OR effective_to >= effective_from`
+
+
 ### hr_branches
 
 **Purpose:** Branch master for HR posting and report filters.
 
-**ORM:** `Branch` · **Rows (dev):** 2 · **Columns:** 5
+**ORM:** `Branch` · **Rows (dev):** 2 · **Columns:** 6
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -870,12 +905,15 @@
 | 3 | `name` | varchar(120) | no | — | — |  | 227/375/30 |
 | 4 | `address` | varchar(300) | yes | — | — |  | 19/5/0 |
 | 5 | `status` | varchar(20) | no | 'active' | — |  | 430/170/49 |
+| 6 | `hr_admin_id` | integer | yes | — | FK→employees.id | Person responsible for HR at this branch; informational, grants no approval or data scope | — |
 
 **Unique constraints:** `hr_branches_code_key` (code)
 
 **Indexes:** `hr_branches_code_key` (code) unique; `ix_hr_branches_code` (code)
 
-**Referenced by:** `employees.branch_id`, `hr_holidays.branch_id`, `hr_work_locations.branch_id`
+**Foreign keys:** (hr_admin_id) → `employees`(id)
+
+**Referenced by:** `employees.branch_id`, `hr_attendance_rules.branch_id`, `hr_holidays.branch_id`, `hr_work_locations.branch_id`
 
 
 ### hr_departments
@@ -1256,7 +1294,7 @@
 
 **Purpose:** Office / work location master with geofence coordinates and radius.
 
-**ORM:** `WorkLocation` · **Rows (dev):** 2 · **Columns:** 10
+**ORM:** `WorkLocation` · **Rows (dev):** 2 · **Columns:** 11
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -1270,14 +1308,15 @@
 | 8 | `geofence_radius_m` | integer | yes | 200 | — |  | 5/0/0 |
 | 9 | `attendance_mode` | varchar(10) | no | 'office' | — |  | 5/0/0 |
 | 10 | `status` | varchar(20) | no | 'active' | — |  | 430/170/49 |
+| 11 | `hr_admin_id` | integer | yes | — | FK→employees.id | Person responsible for HR at this office; informational, grants no approval or data scope | — |
 
 **Unique constraints:** `hr_work_locations_code_key` (code)
 
 **Indexes:** `hr_work_locations_code_key` (code) unique; `ix_hr_work_locations_code` (code)
 
-**Foreign keys:** (branch_id) → `hr_branches`(id)
+**Foreign keys:** (branch_id) → `hr_branches`(id); (hr_admin_id) → `employees`(id)
 
-**Referenced by:** `employees.office_id`, `hr_attendance.office_id`, `hr_holidays.location_id`
+**Referenced by:** `employees.office_id`, `hr_attendance.office_id`, `hr_attendance_rules.office_id`, `hr_holidays.location_id`
 
 **Check constraints:** `ck_hr_lat`: `latitude IS NULL OR latitude >= '-90'::integer::numeric AND latitude <= 90::numeric`; `ck_hr_lon`: `longitude IS NULL OR longitude >= '-180'::integer::numeric AND longitude <= 180::numeric`; `ck_hr_mode`: `attendance_mode::text = ANY (ARRAY['office'::character varying, 'gps'::character varying, 'both'::character varying]::text[])`; `ck_hr_radius`: `geofence_radius_m IS NULL OR geofence_radius_m > 0`
 

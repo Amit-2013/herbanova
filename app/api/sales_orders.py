@@ -15,10 +15,11 @@ from ..core.rbac import require
 from ..core.rules import DISCOUNT_APPROVAL_PCT
 from ..models.core import (ApprovalRequest, Distributor, Product, SalesOrder, SalesOrderLine,
                            User, Warehouse)
+from ..services import capacity, costing
 from ..services.audit import audit
 from ..services.discounts import best_slab
 from ..services.inventory import post_movement
-from ..services.order_tax import CannotQuote, order_preview
+from ..services.order_tax import CannotQuote, discount_pct, order_preview
 from ..services.invoice import create_invoice_for_order
 from ..services.sales import allocate_fefo, available_stock, credit_exposure
 
@@ -28,10 +29,6 @@ CENT = Decimal("0.01")
 
 def _money(d: Decimal) -> Decimal:
     return d.quantize(CENT, ROUND_HALF_UP)
-
-
-def _discount_pct(mrp: Decimal, price: Decimal) -> Decimal:
-    return Decimal(0) if mrp <= 0 else ((mrp - price) / mrp * 100).quantize(Decimal("0.1"), ROUND_HALF_UP)
 
 
 # ---------------------------------------------------------------- schemas
@@ -113,9 +110,22 @@ class AllocOut(BaseModel):
     qty: Decimal
 
 
+class WarehousePositionOut(BaseModel):
+    id: int
+    name: str
+    used_units: Decimal
+    capacity_units: int | None = None
+    capacity_note: str | None = None
+    free_units: Decimal | None = None
+    utilisation_pct: float | None = None
+    capacity_state: str = "not_configured"
+
+
 class DispatchOut(BaseModel):
     order: SOOut
     allocations: list[AllocOut]
+    # The source warehouse after the issue, so the operator sees its position.
+    source_warehouse: WarehousePositionOut | None = None
 
 
 # ---------------------------------------------------------------- helpers
@@ -141,7 +151,7 @@ def _build(db: Session, orders: list[SalesOrder]) -> list[SOOut]:
             dispatched_at=o.dispatched_at, cancel_reason=o.cancel_reason,
             lines=[SOLineOut(sku=prods[ln.product_id].sku, product_name=prods[ln.product_id].name,
                              qty=ln.qty, unit_price=ln.unit_price, mrp=prods[ln.product_id].mrp,
-                             discount_pct=_discount_pct(prods[ln.product_id].mrp, ln.unit_price),
+                             discount_pct=discount_pct(prods[ln.product_id].mrp, ln.unit_price),
                              line_total=ln.line_total) for ln in o.lines],
             approval=ApprovalBrief(id=a.id, status=a.status, reasons=a.reasons) if a else None))
     return out
@@ -266,7 +276,7 @@ def submit_order(order_id: int, db: Session = Depends(get_db), user=Depends(requ
     # baseline percentage in core/rules.py applies.
     max_disc, disc_threshold = Decimal(0), DISCOUNT_APPROVAL_PCT
     for ln in so.lines:
-        line_disc = _discount_pct(prods[ln.product_id].mrp, ln.unit_price)
+        line_disc = discount_pct(prods[ln.product_id].mrp, ln.unit_price)
         slab = best_slab(db, on=date.today(), product_id=ln.product_id,
                          group_name=dist.group_name, qty=ln.qty, value=so.total)
         threshold = (Decimal(slab.approval_above)
@@ -346,6 +356,10 @@ def dispatch_order(order_id: int, body: DispatchIn, db: Session = Depends(get_db
 
     prods = {p.id: p for p in db.scalars(select(Product).where(
         Product.id.in_([ln.product_id for ln in so.lines]))).all()}
+    # Serialise issue costing per product before stock is allocated or an issue
+    # cost is read, so two dispatches cannot both replay a ledger that omits the
+    # other's issue rows. Sorted ids keep the lock order deadlock-free.
+    costing.lock_products(db, [ln.product_id for ln in so.lines])
     plan, short = [], []
     for ln in sorted(so.lines, key=lambda x: x.product_id):      # fixed lock order avoids deadlocks
         alloc, shortfall = allocate_fefo(db, ln.product_id, ln.qty, wh.id)
@@ -355,30 +369,40 @@ def dispatch_order(order_id: int, body: DispatchIn, db: Session = Depends(get_db
     if short:
         raise HTTPException(409, "Insufficient stock - " + "; ".join(short))
 
+    # The weighted average is measured once per product for this dispatch, before
+    # any of its issue rows exist, so every batch in the dispatch carries the
+    # same company-wide cost.
+    issue_costs = {}
+    for ln, _alloc in plan:
+        if ln.product_id not in issue_costs:
+            issue_costs[ln.product_id] = costing.issue_cost(db, ln.product_id)
+
+    try:
+        invoice = create_invoice_for_order(db, so, issued_by=user.id)
+    except ValueError as exc:
+        # No stock has moved yet, so a failure here leaves the order approved
+        # and the ledger untouched.
+        raise HTTPException(409, f"Invoice could not be issued: {exc}")
+
     out = []
     for ln, alloc in plan:
+        unit_cost, cost_source = issue_costs[ln.product_id]
         for batch, take in alloc:
             post_movement(db, batch_id=batch.id, qty_delta=-take, movement_type="issue",
-                          ref_type="so", ref_id=str(so.id), actor_id=user.id)
+                          ref_type="so", ref_id=str(so.id), actor_id=user.id,
+                          unit_cost=unit_cost, cost_source=cost_source,
+                          invoice_id=invoice.id)
             out.append(AllocOut(sku=prods[ln.product_id].sku, batch_no=batch.batch_no,
                                 expiry=batch.expiry, qty=take))
     so.status, so.dispatched_by = "dispatched", user.id
     so.dispatched_at = datetime.now(timezone.utc)
-    try:
-        invoice = create_invoice_for_order(db, so, issued_by=user.id)
-        # Store expiry from each allocation onto the matching invoice line
-        for alloc in out:
-            line = next((l for l in invoice.lines if l.sku == alloc.sku), None)
-            # one line can be filled from several batches: keep the earliest expiry
-            if line is not None and alloc.expiry is not None and (
-                    line.expiry is None or alloc.expiry < line.expiry):
-                line.expiry = alloc.expiry
-    except ValueError as exc:
-        # the stock issue above is in this same uncommitted transaction, so a
-        # failure here gives both the movement and the number back
-        db.rollback()
-        raise HTTPException(409, f"Invoice could not be issued: {exc}")
-    # Log expiry changes from batch allocations to invoice lines
+    # Store expiry from each allocation onto the matching invoice line
+    for alloc in out:
+        line = next((l for l in invoice.lines if l.sku == alloc.sku), None)
+        # one line can be filled from several batches: keep the earliest expiry
+        if line is not None and alloc.expiry is not None and (
+                line.expiry is None or alloc.expiry < line.expiry):
+            line.expiry = alloc.expiry
     expiry_changes = []
     for alloc in out:
         line = next((l for l in invoice.lines if l.sku == alloc.sku), None)
@@ -393,4 +417,5 @@ def dispatch_order(order_id: int, body: DispatchIn, db: Session = Depends(get_db
         audit_kw["expiry_changes"] = expiry_changes
     audit(db, user.id, "so.dispatch", f"so:{so.id}", audit_kw)
     db.commit()
-    return DispatchOut(order=_build(db, [so])[0], allocations=out)
+    return DispatchOut(order=_build(db, [so])[0], allocations=out,
+                       source_warehouse=capacity.warehouse_position(db, wh.id))

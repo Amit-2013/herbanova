@@ -23,6 +23,7 @@ from ..core.security import (hash_password, make_token, read_token_full,
                              validate_password, verify_password)
 from ..models.core import User
 from ..services.audit import audit
+from ..services.feature_store import enabled_keys
 from ..services.lockout import LOCK_MINUTES, clear_failures, is_locked, register_failure
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -49,6 +50,7 @@ class ChangePassword(BaseModel):
 def _identity(user: User, db: Session) -> dict:
     return {"username": user.username, "role": user.role,
             "permissions": sorted(role_permissions(db, user)),
+            "features": sorted(enabled_keys(db)),
             "must_change_password": bool(user.must_change_password)}
 
 

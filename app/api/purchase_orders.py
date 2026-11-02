@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..core.db import get_db
 from ..core.pagination import page_params, paginate
-from ..core.rbac import require
+from ..core.rbac import is_admin, require
 from ..core.rules import PO_RATE_REMARKS
 from ..models.core import (Batch, Product, PurchaseOrder, PurchaseOrderLine, Warehouse)
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
@@ -69,6 +69,9 @@ class POLineIn(BaseModel):
     def cost_or_remark(self):
         if self.unit_cost is None and not self.rate_remark:
             raise ValueError("enter a unit cost or choose a remark")
+        # A zero is a price, not a blank: it must still say why the goods are free.
+        if self.unit_cost is not None and self.unit_cost == 0 and not self.rate_remark:
+            raise ValueError("a zero unit cost needs a rate remark (for example Free of Cost (FOC))")
         return self
 
 
@@ -146,6 +149,9 @@ class ReceiveIn(BaseModel):
     owner: Literal["HERBANOVA", "MANUFACTURER"] = "HERBANOVA"
     delivery_note: str | None = Field(default=None, max_length=60)
     note: str | None = Field(default=None, max_length=300)
+    # Only an Administrator may accept a receipt that takes a measured
+    # warehouse over its capacity; the override is audited.
+    allow_over_capacity: bool = False
     lines: list[ReceiveLineIn] = Field(min_length=1)
 
     @field_validator("lines")
@@ -320,7 +326,26 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
     if unknown:
         raise HTTPException(422, f"Unknown SKU(s): {', '.join(sorted(unknown))}")
 
+    # Capacity is checked against the warehouse's measured usage before any row
+    # is written. A NULL capacity is "not configured", never zero.
+    receipt_units = sum((ln.qty for ln in body.lines), Decimal(0))
+    used = db.scalar(select(func.coalesce(func.sum(Batch.on_hand), 0))
+                     .where(Batch.warehouse_id == warehouse.id)) or Decimal(0)
+    projected = used + receipt_units
+    if warehouse.capacity_units is not None and projected > warehouse.capacity_units:
+        if not body.allow_over_capacity:
+            raise HTTPException(
+                409, f"{warehouse.name} holds {used:f} of {warehouse.capacity_units} "
+                     f"units; this receipt of {receipt_units:f} would take it to "
+                     f"{projected:f}, over the capacity of {warehouse.capacity_units} "
+                     f"units. An Administrator can allow the overage.")
+        if not is_admin(db, user):
+            raise HTTPException(403, "Only an Administrator can receive stock over a "
+                                     "warehouse's capacity")
+
     ordered = {ln.product_id: ln.qty for ln in po.lines}
+    po_cost = {ln.product_id: ln.unit_cost for ln in po.lines}
+    po_remark = {ln.product_id: ln.rate_remark for ln in po.lines}
     already = _received_by_product(db, po.id)
     running = dict(already)
     for ln in body.lines:
@@ -361,8 +386,15 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
                           expiry=ln.expiry, owner=body.owner)
             db.add(batch)
             db.flush()                       # assign id before posting the movement
+        # A line whose remark says FOC is free stock: store zero and the FOC
+        # source, so the costing replay keeps it out of the weighted average.
+        foc = (po_remark.get(prod.id) or "").strip().lower() == "foc"
+        receipt_cost = Decimal("0.00") if foc else po_cost.get(prod.id)
+        receipt_source = ("foc" if foc
+                          else "po_receipt" if receipt_cost is not None else "uncosted")
         post_movement(db, batch_id=batch.id, qty_delta=ln.qty, movement_type="receipt",
-                      ref_type="grn", ref_id=str(grn.id), actor_id=user.id)
+                      ref_type="grn", ref_id=str(grn.id), actor_id=user.id,
+                      unit_cost=receipt_cost, cost_source=receipt_source)
         db.add(GoodsReceiptLine(grn_id=grn.id, product_id=prod.id, batch_id=batch.id, qty=ln.qty))
         out_lines.append(ReceivedLine(sku=ln.sku, batch_no=ln.batch_no, qty=ln.qty,
                                       batch_on_hand=batch.on_hand))
@@ -375,6 +407,13 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
           {"po_number": po.po_number, "grn": grn.grn_number, "warehouse_id": warehouse.id,
            "owner": body.owner, "status": status, "delivery_note": body.delivery_note,
            "lines": [{"sku": r.sku, "batch_no": r.batch_no, "qty": str(r.qty)} for r in out_lines]})
+    if (warehouse.capacity_units is not None
+            and projected > warehouse.capacity_units and body.allow_over_capacity):
+        audit(db, user.id, "warehouse.capacity_override", f"warehouse:{warehouse.id}",
+              {"warehouse": warehouse.name, "capacity_units": warehouse.capacity_units,
+               "used_units": str(used), "receipt_units": str(receipt_units),
+               "projected_units": str(projected), "po_number": po.po_number,
+               "grn": grn.grn_number})
     db.commit()
     sku_by_product = {p.id: p.sku for p in pmap.values()}
     remaining = {sku_by_product[pid]: max(ordered[pid] - received.get(pid, Decimal(0)), Decimal(0))

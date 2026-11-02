@@ -8,5 +8,16 @@ __pycache__/
 venv/
 archive/
 
+# HR profile photos live outside the public static tree and are served by an
+# authenticated endpoint only.
+var/
+
+# Guarded database-reset artefacts, wherever DB_RESET_BACKUP_DIR points.
+*.dump.enc
+*.manifest.json
+*.result.json
+
 .cloud-attachments/
 *.dump
+demo_seed_manifest.json
+demo_seed_manifest.json.tmp

@@ -44,14 +44,14 @@ def fmt(v, typ: str) -> str:
     if v is None:
         return ""
     if typ == "money":
-        return f"{Decimal(v):.2f}"
+        return f"{Decimal(str(v)):.2f}"
     if typ == "qty":
-        d = Decimal(v)
+        d = Decimal(str(v))
         return format(d.quantize(Decimal(1)) if d == d.to_integral() else d.normalize(), "f")
     if typ == "pct":
-        return f"{Decimal(v):.1f}"
+        return f"{Decimal(str(v)):.1f}"
     if typ == "int":
-        return str(int(v))
+        return str(int(Decimal(str(v))))
     if typ == "date":
         return v.isoformat() if isinstance(v, date) else str(v)
     return safe_text(v)
@@ -100,12 +100,20 @@ def to_csv(rep, table_key: str, who: str) -> bytes:
 
 
 def _put(ws, row, col, v, typ, bold=False):
-    if v is None:
+    if v is None or v == "":
         return
     c = ws.cell(row=row, column=col)
     if typ in ("money", "qty", "int", "pct"):
-        c.value = Decimal(v)
-        c.number_format = NUM_FMT[typ]
+        try:
+            number = Decimal(str(v))
+        except (ArithmeticError, ValueError):
+            # A column typed numeric should never hold prose; if it does, keep
+            # the text rather than losing the cell (and never run it as a formula).
+            c.value = str(v)
+            c.data_type = "s"
+        else:
+            c.value = number
+            c.number_format = NUM_FMT[typ]
     elif typ == "date" and isinstance(v, date):
         c.value = v
         c.number_format = NUM_FMT["date"]
@@ -118,6 +126,11 @@ def _put(ws, row, col, v, typ, bold=False):
 
 def _sheet_name(wb, title: str) -> str:
     base = re.sub(r"[\[\]\*\?/\\:]", "", title)[:28] or "Sheet"
+    # The exporter adds its own Reconciliation and Notes sheets. A report table
+    # with the same title (the P&L's reconciliation table) must not claim those
+    # names, or the reader opens the wrong sheet.
+    if base in ("Reconciliation", "Notes"):
+        base = f"{base} (report)"
     name, n = base, 2
     while name in wb.sheetnames:
         name, n = f"{base} {n}", n + 1
@@ -161,7 +174,8 @@ def to_xlsx(rep, who: str) -> bytes:
                                        ("Agrees" if c["ok"] else "DIFFERS", "t")], 1):
             cell = ws.cell(row=i, column=j)
             if kind == "n":
-                cell.value, cell.number_format = Decimal(v), UNIT_FMT.get(c["unit"], "#,##0")
+                cell.value = Decimal(str(v))
+                cell.number_format = UNIT_FMT.get(c["unit"], "#,##0")
             else:
                 cell.value = str(v)
                 cell.data_type = "s"

@@ -158,7 +158,14 @@ def test_general_shift_is_assigned_and_late_and_early_are_calculated(client, wor
     assert shift_early_minutes(shift, datetime(2026, 1, 5, 18, 30, tzinfo=IST)) == 0
 
     # A check-in after the shift start records the lateness on the row.
-    start = (datetime.now(IST) - timedelta(hours=1)).strftime("%H:%M")
+    # "An hour ago" can fall on the previous calendar day just after midnight,
+    # and a shift starting yesterday is not today's shift. Stay inside today.
+    now = datetime.now(IST)
+    start_at = now - timedelta(hours=1)
+    if start_at.date() != now.date():
+        start_at = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = start_at.strftime("%H:%M")
+    expected_late = int((now - start_at).total_seconds() // 60)
     custom = admin.post("/api/hr/shifts", json={
         "name": f"Late {uuid4().hex[:4].upper()}", "start_time": start,
         "end_time": "23:59", "grace_minutes": 0})
@@ -170,7 +177,7 @@ def test_general_shift_is_assigned_and_late_and_early_are_calculated(client, wor
     viewer = client.as_user("viewer")
     checked = viewer.post("/api/hr/attendance/check-in", json={"source": "web"})
     assert checked.status_code == 201, checked.text
-    assert checked.json()["late_minutes"] >= 55
+    assert checked.json()["late_minutes"] >= max(expected_late - 5, 0)
 
 
 def test_shift_timings_can_be_edited_by_hr_only(client, world):
@@ -251,3 +258,63 @@ def test_staff_can_check_in_at_their_office(client, world):
                       json={"source": "web"}).status_code == 409
     # Self-service does not open the employee directory.
     assert sales.get("/api/hr/employees").status_code == 403
+
+
+def test_hr_decision_flag_follows_the_permission(client, world):
+    admin = client.as_user("admin")
+    created = admin.post("/api/hr/leave/types", json={
+        "code": f"SL{uuid4().hex[:3].upper()}", "name": "Sick leave (flag test)",
+        "kind": "paid", "default_days": "10"})
+    assert created.status_code == 201, created.text
+    # Leave is counted in working days, so pick a weekday rather than a weekend.
+    start = date.today() + timedelta(days=20)
+    while start.weekday() >= 5:
+        start += timedelta(days=1)
+
+    hr = client.as_user("hr_manager")
+    applied = hr.post("/api/hr/leave/applications", json={
+        "leave_type_id": created.json()["id"], "date_from": start.isoformat(),
+        "date_to": start.isoformat(), "reason": "Decision flag test"})
+    assert applied.status_code == 201, applied.text
+    application_id = applied.json()["id"]
+
+    def pending(actor):
+        rows = client.as_user(actor).get("/api/approvals", params={"status": "pending"}).json()
+        return next(a for a in rows if a["request_type"] == "hr_leave"
+                    and a["record_id"] == application_id)
+
+    # A payroll officer can open the queue but does not hold hr:leave_approve.
+    row = pending("payroll")
+    assert row["can_decide"] is False
+    assert client.post(f"/api/approvals/{row['id']}/decide",
+                       json={"decision": "approve", "reason": "not my call"}).status_code == 403
+
+    # The HR manager holds it, but raised this request.
+    assert pending("hr_manager")["can_decide"] is False
+    # The Administrator can decide it, and the form is offered.
+    assert pending("admin")["can_decide"] is True
+
+
+def test_employee_login_link_is_visible_to_both_screens(client, world):
+    admin = client.as_user("admin")
+    code = f"LNK{uuid4().hex[:4].upper()}"
+    emp = admin.post("/api/employees", json={"code": code, "full_name": "Link Test"})
+    assert emp.status_code == 201, emp.text
+    emp_id = emp.json()["id"]
+
+    created = admin.post("/api/users", json={
+        "username": f"lnk_{uuid4().hex[:6]}", "role": "viewer", "employee_id": emp_id})
+    assert created.status_code == 201, created.text
+
+    # The employee master and the HR list read the same link, so the New user
+    # dropdown (which lists employees without a login) skips this one.
+    row = next(e for e in admin.get("/api/employees").json() if e["id"] == emp_id)
+    assert row["user_id"] == created.json()["id"]
+    assert row["username"] == created.json()["username"]
+    hr_row = next(e for e in admin.get("/api/hr/employees").json() if e["id"] == emp_id)
+    assert hr_row["user_id"] == created.json()["id"]
+
+    # A second login for the same employee is refused.
+    again = admin.post("/api/users", json={
+        "username": f"lnk_{uuid4().hex[:6]}", "role": "viewer", "employee_id": emp_id})
+    assert again.status_code == 409

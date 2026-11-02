@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from ..core.india_states import is_union_territory, state_name
 from ..models.core import CreditNote, DebitNote, Invoice, PrintLog
+from ..services import pdf_fonts
 from ..services.qr import SHORT_HASH_LEN, matrix, parse_print_code
 from ..services.words import amount_in_words
 
@@ -154,12 +155,13 @@ def _rate_text(value) -> str:
 
 def _wrap(text: str, max_width: float, size: float = 8) -> list[str]:
     """Split a value into lines that fit a column, so free text cannot run off the page."""
+    pdf_fonts.register()  # stringWidth needs the face even when build() has not run
     words = str(text or "—").split()
     lines: list[str] = []
     current = ""
     for word in words:
         trial = f"{current} {word}".strip()
-        if not current or stringWidth(trial, "Helvetica", size) <= max_width:
+        if not current or stringWidth(trial, pdf_fonts.FONT, size) <= max_width:
             current = trial
         else:
             lines.append(current)
@@ -304,21 +306,24 @@ def _close_page(doc: Doc, seller: str, y: float, annexure: bool = False,
         y = doc.continue_page()
         c = doc.canvas
     anchor = SIGNATURE_ANCHOR
+    # The company line and the designation are one block: both sit on the
+    # centre of the same signature line, so they align on paper.
+    signature_x = PAGE_W - MARGIN - 75
     if terms:
         c.setFont("Helvetica-Bold", 7)
         c.drawString(MARGIN, anchor, "Terms and conditions")
         c.setFont("Helvetica", 7)
-        c.drawRightString(PAGE_W - MARGIN, anchor, f"For {seller or 'the supplier'}")
+        c.drawCentredString(signature_x, anchor, f"For {seller or 'the supplier'}")
     else:
         c.setFont("Helvetica", 7)
         c.setFillColor(colors.HexColor("#444444"))
-        c.drawRightString(PAGE_W - MARGIN, anchor, f"For {seller or 'the supplier'}")
+        c.drawCentredString(signature_x, anchor, f"For {seller or 'the supplier'}")
         c.setFillColor(colors.black)
     y = anchor - 10
     c.setStrokeColor(colors.HexColor("#666666"))
     c.line(PAGE_W - MARGIN - 150, y, PAGE_W - MARGIN, y)
     c.setFont("Helvetica", 7)
-    c.drawCentredString(PAGE_W - MARGIN - 75, y - 10, "Authorised signatory")
+    c.drawCentredString(signature_x, y - 10, "Authorised signatory")
     y = anchor - 28
     if terms:
         width = (PAGE_W - 2 * MARGIN) / 2 - 10
@@ -614,19 +619,20 @@ def build(kind: str, doc, copy: str, printed_by: str, verify_code: str,
     ``verify_code`` is the print reference drawn on every page of it.
     """
     stamp = datetime.now(IST)
+    pdf_fonts.register()
     # One watermark, not two: a cancelled document is stamped CANCELLED instead
     # of its copy name, so the two stamps never sit on top of each other.
     watermark = "CANCELLED" if getattr(doc, "status", "") == "cancelled" else copy
     number = getattr(doc, NUMBER_FIELD[kind], "")
     doc_id = f"{kind.upper()}-{number}-{copy}"
 
-    measure = Doc(canvas.Canvas(BytesIO(), pagesize=A4), DOC_LABEL[kind], stamp,
+    measure = Doc(pdf_fonts.ShapedCanvas(BytesIO(), pagesize=A4), DOC_LABEL[kind], stamp,
                   printed_by, verify_code, watermark, doc_id=doc_id, page_total=None)
     _draw_document(measure, kind, doc, copy, invoice)
     measure.finish_page()
 
     buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
+    c = pdf_fonts.ShapedCanvas(buffer, pagesize=A4)
     c.setTitle(f"{number} {copy}")
     c.setAuthor("HERBANOVA Business Control")
     surface = Doc(c, DOC_LABEL[kind], stamp, printed_by, verify_code, watermark,

@@ -5,6 +5,7 @@ the catalogue is the single source of truth, the seeded baseline roles match the
 frozen sets, and no route or report can guard a permission the catalogue does
 not define.
 """
+import ast
 import re
 from pathlib import Path
 
@@ -32,11 +33,27 @@ def _live_roles() -> dict[str, set[str]]:
                 for r in db.scalars(select(Role)).all()}
 
 
+def _catalogue_literals() -> list[str]:
+    """The keys written inside the PERMISSIONS dict literal only.
+
+    Parsing the AST matters because the file also holds the parent map, whose
+    keys repeat the catalogue; a plain regex over the file would count them
+    twice and hide a real duplicate in the catalogue itself.
+    """
+    source = (Path(__file__).resolve().parent.parent / "app" / "core" / "permissions.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        target = getattr(node, "target", None)
+        if isinstance(node, ast.AnnAssign) and getattr(target, "id", "") == "PERMISSIONS":
+            return [key.value for key in node.value.keys
+                    if isinstance(key, ast.Constant)]
+    raise AssertionError("PERMISSIONS dict literal not found")
+
+
 def test_catalogue_has_no_duplicate_keys():
     # PERMISSIONS is a dict, so a duplicate literal would be silently lost;
     # comparing the parsed source count catches an accidental redefinition.
-    source = (Path(__file__).resolve().parent.parent / "app" / "core" / "permissions.py").read_text(encoding="utf-8")
-    literal_keys = re.findall(r'^\s*"([a-z]+:[a-z_]+)":', source, flags=re.MULTILINE)
+    literal_keys = _catalogue_literals()
     assert len(literal_keys) == len(set(literal_keys)) == len(PERMISSIONS)
 
 

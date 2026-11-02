@@ -6,7 +6,7 @@
 <title>HERBANOVA Business Control</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -63,27 +63,48 @@
   <aside class="side">
     <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
     <nav aria-label="Modules">
-      <a class="nav on" href="#/dash" data-v="dash">Overview</a>
-      <a class="nav" href="#/leads" data-v="leads" id="navLeads">Leads<span class="count hide" id="ldCount"></span></a>
-      <a class="nav" href="#/lost" data-v="lost">Lost leads</a>
-      <a class="nav" href="#/followups" data-v="followups">Today's follow-ups</a>
-      <a class="nav" href="#/customers" data-v="customers">Customers</a>
-      <a class="nav" href="#/sales" data-v="sales">Sales orders<span class="count hide" id="soCount"></span></a>
-      <a class="nav hide" href="#/billing" data-v="billing" id="navBilling">Billing</a>
-      <a class="nav" href="#/purchasing" data-v="purchasing">Purchases<span class="count hide" id="poCount"></span></a>
-      <a class="nav" href="#/products" data-v="products">Products</a>
-      <a class="nav" href="#/inventory" data-v="inventory">Inventory</a>
-      <a class="nav hide" href="#/suppliers" data-v="suppliers" id="navSuppliers">Suppliers</a>
-      <a class="nav" href="#/distributors" data-v="distributors">Distributors</a>
-      <a class="nav" href="#/approvals" data-v="approvals">Approvals<span class="count hide" id="apCount"></span></a>
-      <a class="nav hide" href="#/accounts" data-v="accounts" id="navAccounts">Accounting &amp; Finance</a>
-      <a class="nav" href="#/reports" data-v="reports" id="navReports">Reports</a>
-      <a class="nav hide" href="#/hr" data-v="hr" id="navHr">HR Management</a>
-      <a class="nav hide" href="#/settings" data-v="settings" id="navSettings">Settings &amp; Administration</a>
+      <div class="nav-group">
+        <a class="nav on" href="#/dash" data-v="dash">Overview</a>
+      </div>
+      <div class="nav-group">
+        <p class="nav-grp">Sales and customers</p>
+        <a class="nav" href="#/leads" data-v="leads" id="navLeads">Leads<span class="count hide" id="ldCount"></span></a>
+        <a class="nav" href="#/lost" data-v="lost">Lost leads</a>
+        <a class="nav" href="#/followups" data-v="followups">Today's follow-ups</a>
+        <a class="nav" href="#/customers" data-v="customers">Customers &amp; distributors</a>
+        <a class="nav" href="#/sales" data-v="sales">Sales orders<span class="count hide" id="soCount"></span></a>
+        <a class="nav hide" href="#/billing" data-v="billing" id="navBilling">Billing</a>
+        <a class="nav" href="#/approvals" data-v="approvals">Approvals<span class="count hide" id="apCount"></span></a>
+      </div>
+      <div class="nav-group">
+        <p class="nav-grp">Stock and supply</p>
+        <a class="nav" href="#/purchasing" data-v="purchasing">Purchases<span class="count hide" id="poCount"></span></a>
+        <a class="nav" href="#/products" data-v="products">Products</a>
+        <a class="nav" href="#/inventory" data-v="inventory">Inventory</a>
+        <a class="nav" href="#/foc" data-v="foc">Free samples</a>
+        <a class="nav hide" href="#/suppliers" data-v="suppliers" id="navSuppliers">Suppliers</a>
+      </div>
+      <div class="nav-group">
+        <p class="nav-grp">Finance and insight</p>
+        <a class="nav hide" href="#/accounts" data-v="accounts" id="navAccounts">Accounting &amp; Finance</a>
+        <a class="nav hide" href="#/expenses" data-v="expenses" id="navExpenses">Expenses</a>
+        <a class="nav" href="#/reports" data-v="reports" id="navReports">Reports</a>
+        <a class="nav hide" href="#/geo" data-v="geo" id="navGeo">Geography</a>
+      </div>
+      <div class="nav-group">
+        <p class="nav-grp">People and admin</p>
+        <a class="nav hide" href="#/hr" data-v="hr" id="navHr">HR Management</a>
+        <a class="nav hide" href="#/roles" data-v="roles" id="navRoles">Roles &amp; Permissions</a>
+        <a class="nav hide" href="#/settings" data-v="settings" id="navSettings">Settings &amp; Administration</a>
+        <a class="nav hide" href="#/scheduled" data-v="scheduled" id="navScheduled">Scheduled reports</a>
+      </div>
     </nav>
     <div class="who">
       <div class="who-id"><b id="who"></b><span class="pill" id="role"></span></div>
-      <button class="link-btn" id="out" type="button">Sign out</button>
+      <div class="who-actions">
+        <button class="link-btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
+        <button class="link-btn" id="out" type="button">Sign out</button>
+      </div>
       <div class="env" id="env">Demo build</div>
     </div>
   </aside>
@@ -98,26 +119,323 @@
     </header>
 
     <!-- Overview -->
-    <section id="v-dash" class="view">
+    <section id="v-dash" class="view dash">
+      <div class="dash-hero">
+        <div class="dash-hello">
+          <h1 class="dash-greet" id="dashGreet">Overview</h1>
+          <p class="dash-date" id="dashDate"></p>
+        </div>
+        <div class="dash-tools">
+          <button class="dash-search" type="button" data-act="open-search" aria-label="Search everything, keyboard shortcut Control or Command and K">
+            <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
+            <span>Search everything</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+          <div class="dash-dates" role="group" aria-label="Date range">
+            <label for="dashFrom">From <input id="dashFrom" type="date" aria-label="From date"></label>
+            <label for="dashTo">To <input id="dashTo" type="date" aria-label="To date"></label>
+          </div>
+          <div class="seg compact" role="group" aria-label="Date presets">
+            <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
+            <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
+            <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
+            <button type="button" data-dash-preset="month" aria-pressed="true">This month</button>
+            <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
+            <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
+          </div>
+          <button class="btn ghost hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
+          <button class="btn ghost" id="dashTheme" type="button" aria-pressed="false">Dark theme</button>
+          <a class="btn" id="dashCompare" href="#/compare">MoM &amp; YoY dashboard</a>
+        </div>
+      </div>
+      <p class="dash-updated" id="dashUpdated">Loading figures…</p>
+      <p class="dash-dateerr hide" id="dashDateErr" role="alert"></p>
+
       <div class="callout hide" id="whCallout">
         <div><b>No warehouse has been added yet.</b> Goods cannot be received until one exists.</div>
         <a class="btn sm" href="#/inventory/warehouses">Add a warehouse</a>
       </div>
-      <div class="stats" id="stats"></div>
-      <div class="cols">
-        <div class="panel">
-          <div class="panel-h"><h2>Stock to watch</h2><span class="muted" id="watchNote"></span></div>
-          <ul class="rows" id="watch"></ul>
+
+      <div id="dashSkeleton" class="dash-skeleton" aria-hidden="true">
+        <div class="sk sk-att"></div>
+        <div class="sk-row">
+          <div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div>
+          <div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div>
         </div>
-        <div class="panel">
-          <div class="panel-h"><h2>Waiting to be received</h2><a class="link-btn" href="#/purchasing">All purchase orders</a></div>
-          <ul class="rows" id="openpos"></ul>
+        <div class="sk-row"><div class="sk sk-chart"></div><div class="sk sk-chart"></div></div>
+      </div>
+
+      <div id="dashError" class="dash-error hide" role="alert">
+        <div><b>The dashboard could not be loaded.</b><span id="dashErrText"></span></div>
+        <button class="btn ghost" type="button" data-act="reload-dash">Try again</button>
+      </div>
+
+      <div id="dashContent" class="dash-content hide" aria-busy="false">
+        <div class="attention-head"><h2>Needs attention</h2><span class="muted" id="attNote"></span></div>
+        <ul class="attention" id="attention" aria-label="Needs attention"></ul>
+
+        <div class="kpis" id="stats"></div>
+
+        <div class="panel flush hide" id="accOverviewPanel">
+          <div class="panel-h"><h2>Accounts</h2><span class="muted" id="accOverviewNote"></span></div>
+          <div class="kpis" id="accOverview"></div>
+        </div>
+
+        <div class="dash-grid dash-chart-grid">
+          <div class="panel dash-panel" id="chartPanel">
+            <div class="panel-h">
+              <div><h2 id="chartTitle">Sales and purchases</h2><span class="muted" id="chartNote"></span></div>
+              <div class="legend" id="chartLegend"></div>
+            </div>
+            <div class="chart-wrap">
+              <svg id="salesChart" class="chart" viewBox="0 0 760 260" role="img" tabindex="0" aria-label="Sales and purchases by day. Use the left and right arrow keys to read each day."></svg>
+              <div class="chart-tip hide" id="chartTip" role="status"></div>
+            </div>
+            <div class="chart-totals" id="chartTotals"></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Receivables ageing</h2><span class="muted" id="ageNote"></span></div>
+            <div id="ageing" class="ageing"></div>
+          </div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Stock to watch</h2><span class="muted" id="watchNote"></span></div>
+            <div class="seg compact" role="group" aria-label="Expiry window" id="expiryFilters">
+              <button type="button" data-eb="all" aria-pressed="true">All</button>
+              <button type="button" data-eb="expired" aria-pressed="false">Expired</button>
+              <button type="button" data-eb="lt30" aria-pressed="false">30 days or less</button>
+              <button type="button" data-eb="lt90" aria-pressed="false">31 to 90 days</button>
+            </div>
+            <ul class="rows" id="watch"></ul>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Stock by warehouse</h2><span class="muted">Share of units on hand</span></div>
+            <ul class="wh-list" id="whList"></ul>
+          </div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Waiting to be received</h2><a class="link-btn" href="#/purchasing">All purchase orders</a></div>
+            <p class="muted panel-note" id="poNote"></p>
+            <ul class="rows" id="openpos"></ul>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Approvals waiting</h2><a class="link-btn" href="#/approvals">Open the queue</a></div>
+            <p class="muted panel-note" id="apNote"></p>
+            <ul class="rows" id="approvalList"></ul>
+          </div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top products</h2><span class="muted" id="topNote"></span></div>
+            <ul class="rows" id="topProducts"></ul>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Sales by category</h2><span class="muted">Not available</span></div>
+            <div id="category"></div>
+          </div>
+        </div>
+
+        <div id="insights" class="dash-grid insights">
+          <div class="panel dash-panel hide" id="pipePanel">
+            <div class="panel-h"><h2>Pipeline</h2><span class="muted">Current status, all dates</span></div>
+            <div id="pipeBody" class="ins-cols"></div>
+          </div>
+          <div class="panel dash-panel hide" id="custPanel">
+            <div class="panel-h"><h2>Customers and credit</h2><span class="muted" id="custNote"></span></div>
+            <ul class="rows" id="custTop"></ul>
+            <div id="custOutWrap" class="hide"><h3 class="ins-h">Outstanding, all dates</h3><ul class="rows" id="custOut"></ul></div>
+            <div id="custCreditWrap" class="hide"><h3 class="ins-h">Credit in use</h3><ul class="rows" id="custCredit"></ul></div>
+          </div>
+          <div class="panel dash-panel hide" id="purPanel">
+            <div class="panel-h"><h2>PO ageing</h2><span class="muted" id="purNote"></span></div>
+            <ul class="rows" id="purAge"></ul>
+            <p class="gap-note" id="purGap"></p>
+          </div>
+          <div class="panel dash-panel hide" id="corrPanel">
+            <div class="panel-h"><h2>Corrections after billing</h2><span class="muted" id="corrNote"></span></div>
+            <ul class="rows" id="corrNotes"></ul>
+            <div id="postWrap" class="hide"><h3 class="ins-h">Post-billing requests</h3><ul class="rows" id="corrPosts"></ul></div>
+          </div>
+          <div class="panel dash-panel hide" id="hrPanel">
+            <div class="panel-h"><h2>HR today</h2><span class="muted" id="hrNote"></span></div>
+            <div class="stats-mini" id="hrStats"></div>
+            <ul class="rows" id="hrAtt"></ul>
+          </div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Recent activity</h2><a class="link-btn" href="#/audit">Audit trail</a></div>
+            <p class="muted panel-note" id="actNote"></p>
+            <ul class="activity" id="activity"></ul>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>System health</h2><span class="muted" id="prog"></span></div>
+            <div class="meter" aria-hidden="true"><i id="barfill"></i></div>
+            <div id="health" class="health"></div>
+            <details class="mods"><summary>Modules and totals</summary><ul class="rows" id="mods"></ul></details>
+          </div>
         </div>
       </div>
-      <div class="panel">
-        <div class="panel-h"><h2>Module status</h2><span class="muted" id="prog"></span></div>
-        <div class="meter" aria-hidden="true"><i id="barfill"></i></div>
-        <ul class="rows" id="mods"></ul>
+    </section>
+
+    <!-- MoM & YoY dashboard -->
+    <section id="v-compare" class="view compare hide">
+      <div class="panel cmp-toolbar">
+        <div class="cmp-controls">
+          <div class="seg" role="group" aria-label="Comparison mode">
+            <button type="button" data-cmp-mode="full_month" aria-pressed="true">Full month</button>
+            <button type="button" data-cmp-mode="mtd" aria-pressed="false">Month to date</button>
+          </div>
+          <label class="cmp-month" for="cmpMonth">Month
+            <input type="month" id="cmpMonth" aria-label="Month to compare">
+          </label>
+          <a class="btn ghost sm" href="#/dash">Back to Overview</a>
+        </div>
+        <p class="muted" id="cmpNote">Loading figures from the server…</p>
+      </div>
+
+      <div id="cmpError" class="dash-error hide" role="alert">
+        <div><b>This comparison could not be loaded.</b><span id="cmpErrText"></span></div>
+        <button class="btn ghost" type="button" data-act="reload-compare">Try again</button>
+      </div>
+
+      <div id="cmpSkeleton" class="dash-skeleton" aria-hidden="true">
+        <div class="sk-row">
+          <div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div>
+        </div>
+        <div class="sk-row"><div class="sk sk-chart"></div><div class="sk sk-chart"></div></div>
+      </div>
+
+      <div id="cmpContent" class="dash-content hide" aria-busy="false">
+        <div class="cmp-ranges" id="cmpRanges"></div>
+        <div class="kpis cmp-cards" id="cmpCards"></div>
+
+        <div class="panel dash-panel cmp-trend-panel" id="cmpTrendPanel">
+          <div class="panel-h">
+            <h2>Twelve-month trend</h2>
+            <div class="cmp-h-tools">
+              <span class="muted" id="cmpTrendNote"></span>
+              <button class="btn ghost sm" type="button" data-act="cmp-csv">Export CSV</button>
+            </div>
+          </div>
+          <div class="tw"><table id="cmpTrend" class="cmp-table"></table></div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Movement</h2><span class="muted">Month on month and year on year</span></div>
+            <div id="cmpGrowth" class="cmp-moves"></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Best, worst and seasonality</h2><span class="muted">Twelve months shown</span></div>
+            <ul class="rows" id="cmpExtremes"></ul>
+            <h3 class="ins-h">Seasonality index</h3>
+            <div class="cmp-season" id="cmpSeason"></div>
+          </div>
+        </div>
+
+        <div class="dash-grid" id="cmpBreakdowns">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top products</h2><span class="muted" id="cmpProdNote"></span></div>
+            <div class="tw"><table id="cmpProducts" class="cmp-table"></table></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top distributors</h2><span class="muted" id="cmpDistNote"></span></div>
+            <div class="tw"><table id="cmpDists" class="cmp-table"></table></div>
+          </div>
+        </div>
+
+        <div class="panel dash-panel" id="cmpProjectionPanel">
+          <div class="panel-h"><h2>Run-rate</h2><span class="muted" id="cmpProjLabel"></span></div>
+          <div class="cmp-proj" id="cmpProjection"></div>
+          <p class="gap-note" id="cmpProjNote"></p>
+        </div>
+
+        <p class="muted cmp-foot" id="cmpFooter"></p>
+        <ul class="cmp-notes" id="cmpNotes"></ul>
+      </div>
+    </section>
+
+    <!-- Geography -->
+    <section id="v-geo" class="view geo hide">
+      <div class="panel cmp-toolbar">
+        <div class="cmp-controls">
+          <label class="cmp-month" for="geoFrom">From
+            <input type="date" id="geoFrom" aria-label="From date">
+          </label>
+          <label class="cmp-month" for="geoTo">To
+            <input type="date" id="geoTo" aria-label="To date">
+          </label>
+          <a class="btn ghost sm" href="#/compare">MoM &amp; YoY</a>
+          <a class="btn ghost sm" href="#/dash">Back to Overview</a>
+        </div>
+        <p class="muted" id="geoNote">Loading figures from the server…</p>
+      </div>
+      <p class="dash-dateerr hide" id="geoDateErr" role="alert"></p>
+
+      <div id="geoError" class="dash-error hide" role="alert">
+        <div><b>Geography could not be loaded.</b><span id="geoErrText"></span></div>
+        <button class="btn ghost" type="button" data-act="reload-geo">Try again</button>
+      </div>
+
+      <div id="geoSkeleton" class="dash-skeleton" aria-hidden="true">
+        <div class="sk-row">
+          <div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div><div class="sk sk-kpi"></div>
+        </div>
+        <div class="sk-row"><div class="sk sk-chart"></div><div class="sk sk-chart"></div></div>
+      </div>
+
+      <div id="geoContent" class="dash-content hide" aria-busy="false">
+        <div class="geo-levels" id="geoLevels"></div>
+        <div class="kpis" id="geoKpis"></div>
+
+        <div class="dash-grid geo-map-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h">
+              <h2>State tile map</h2>
+              <span class="muted">Shaded by sales · not to scale</span>
+            </div>
+            <div id="geoMap" class="geo-map" role="group" aria-label="State tile map shaded by sales"></div>
+            <p class="gap-note" id="geoMapNote">Tiles are a fixed local layout, not a geographic outline. Select a tile to highlight its row in the table.</p>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Top and bottom states</h2><span class="muted">By sales in the selected window</span></div>
+            <h3 class="ins-h">Top 5</h3>
+            <ol class="geo-rank" id="geoTop"></ol>
+            <h3 class="ins-h">Lowest 5 with a recorded sale</h3>
+            <ol class="geo-rank" id="geoBottom"></ol>
+          </div>
+        </div>
+
+        <div class="panel dash-panel">
+          <div class="panel-h">
+            <div><h2>Sales by state</h2><span class="muted" id="geoTableNote"></span></div>
+            <div class="cmp-h-tools">
+              <button class="btn ghost sm" type="button" data-act="geo-csv">Export CSV</button>
+            </div>
+          </div>
+          <div class="tw"><table id="geoTable" class="cmp-table"></table></div>
+        </div>
+
+        <div class="dash-grid">
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>Returns by state</h2><span class="muted">Issued credit notes</span></div>
+            <div id="geoReturns"></div>
+          </div>
+          <div class="panel dash-panel">
+            <div class="panel-h"><h2>GST state split</h2><span class="muted">As printed on issued invoices</span></div>
+            <div id="geoGst"></div>
+          </div>
+        </div>
+
+        <p class="muted cmp-foot" id="geoFooter"></p>
+        <ul class="cmp-notes" id="geoNotes"></ul>
       </div>
     </section>
 
@@ -171,7 +489,7 @@
 
       <div id="i-warehouses" role="tabpanel" aria-labelledby="t-warehouses" class="panel flush hide">
         <div class="tw"><table>
-          <thead><tr><th>Warehouse</th><th class="n">Batches in stock</th><th class="n">Units on hand</th></tr></thead>
+          <thead><tr><th>Warehouse</th><th class="n">Batches in stock</th><th class="n">Units on hand</th><th class="n">Capacity (units)</th><th class="n">Free (units)</th><th class="n">Utilisation</th><th></th></tr></thead>
           <tbody id="wrows"></tbody>
         </table></div>
         <div class="empty hide" id="wempty"></div>
@@ -280,6 +598,58 @@
 
     <!-- Accounting and finance -->
     <section id="v-accounts" class="view hide">
+      <div class="panel hide" id="accPerfPanel">
+        <div class="panel-h"><h2>Accounts performance</h2><span class="muted" id="accPerfNote">Loading figures…</span></div>
+        <div class="toolbar">
+          <label for="accFrom">From <input id="accFrom" type="date" aria-label="From date"></label>
+          <label for="accTo">To <input id="accTo" type="date" aria-label="To date"></label>
+          <select id="accState" aria-label="Filter by buyer state"><option value="">All states</option></select>
+          <button class="btn ghost" type="button" data-act="load-acc-report">Refresh</button>
+          <button class="btn ghost" type="button" data-act="export-acc">Export CSV</button>
+        </div>
+        <p class="err hide" id="accPerfErr" role="alert"></p>
+        <div class="kpis" id="accKpis"></div>
+        <p class="muted panel-note" id="accPerfGaps"></p>
+      </div>
+
+      <div class="panel flush hide" id="accPnlPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Profit and loss</h2><span class="muted">Only what the documents can prove. A figure that is not captured says so.</span></div>
+        <div id="accPnl"></div>
+      </div>
+
+      <div class="panel flush hide" id="accCmpPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Month on month and year on year</h2><span class="muted" id="accCmpNote"></span></div>
+        <div class="toolbar">
+          <div class="seg compact" role="group" aria-label="Comparison mode">
+            <button type="button" data-acc-mode="full_month" aria-pressed="true">Full month</button>
+            <button type="button" data-acc-mode="mtd" aria-pressed="false">Month to date</button>
+          </div>
+          <input id="accMonth" type="month" aria-label="Comparison month">
+        </div>
+        <div id="accCmp"></div>
+      </div>
+
+      <div class="panel flush hide" id="accTrendPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Monthly trend</h2><span class="muted">Revenue, collections, payments, net cash and output GST by calendar month.</span></div>
+        <div id="accTrend"></div>
+      </div>
+
+      <div class="panel flush hide" id="accStatePanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>By state</h2><span class="muted">Buyer state as frozen on each issued invoice. Select a state to filter the window above.</span></div>
+        <div id="accStates"></div>
+      </div>
+
+      <div class="panel flush hide" id="accDrillPanel">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables by distributor</h2><span class="muted" id="accDrillNote"></span></div>
+        <div id="accDrill"></div>
+      </div>
+
+      <div class="panel hide" id="accGapPanel">
+        <div class="panel-h"><h2>Data gaps</h2><span class="muted">What Accounts cannot report yet, and why. Each gap links to the screen that fixes it.</span></div>
+        <div id="accGaps"></div>
+      </div>
+
+      <div id="accStatements">
       <div class="panel flush">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables</h2><span class="muted" id="recvSub">What distributors still owe on issued invoices.</span></div>
         <div class="tw"><table>
@@ -349,6 +719,75 @@
         </table></div>
         <div class="empty hide" id="tbempty"></div>
       </div>
+      </div>
+    </section>
+
+    <!-- Free samples (FOC) -->
+    <section id="v-foc" class="view hide">
+      <div class="panel" id="focPanel">
+        <div class="panel-h"><h2>Free samples (FOC)</h2><span class="muted" id="focNote"></span></div>
+        <div class="toolbar">
+          <button class="btn ghost" type="button" data-act="foc-refresh">Refresh</button>
+          <button class="btn hide" id="focNewBtn" type="button" data-act="new-foc">New free-sample note</button>
+        </div>
+        <p class="err hide" id="focErr" role="alert"></p>
+        <p class="muted panel-note">Free stock is held apart from purchased stock, so a zero-rate sample never changes the weighted average. A note names one recipient and carries no invoice, revenue or GST. It needs a second Administrator to approve.</p>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>FOC on hand</h2><span class="muted">Known free stock, separate from costed stock.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>SKU</th><th>Product</th><th class="n">On hand</th><th class="n">FOC</th><th class="n">Costed</th><th class="n">Average cost (₹)</th></tr></thead>
+          <tbody id="focStockRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="focStockEmpty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Free-sample notes</h2><span class="muted">One recipient per note; the quantity never reaches revenue.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Number</th><th>Date</th><th>Recipient</th><th>Warehouse</th><th>Reason</th><th class="n">Qty</th><th class="n">Notional (₹)</th><th>Status</th><th></th></tr></thead>
+          <tbody id="focNoteRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="focNoteEmpty"></div>
+      </div>
+    </section>
+
+    <!-- Expenses -->
+    <section id="v-expenses" class="view hide">
+      <div class="panel" id="expPanel">
+        <div class="panel-h"><h2>Expenses</h2><span class="muted" id="expSettingsNote"></span></div>
+        <div class="toolbar">
+          <div class="seg compact" role="group" aria-label="Filter expenses by status">
+            <button type="button" data-exp-status="" aria-pressed="true">All</button>
+            <button type="button" data-exp-status="pending_approval" aria-pressed="false">Waiting</button>
+            <button type="button" data-exp-status="approved" aria-pressed="false">Approved</button>
+            <button type="button" data-exp-status="reversed" aria-pressed="false">Reversed</button>
+            <button type="button" data-exp-status="rejected" aria-pressed="false">Rejected</button>
+          </div>
+          <select id="expHead" aria-label="Filter by expense head"><option value="">All heads</option></select>
+          <input id="expq" type="search" placeholder="Search reference or note" aria-label="Search expenses">
+          <button class="btn ghost" type="button" data-act="exp-refresh">Refresh</button>
+          <button class="btn ghost hide" id="expHeadsBtn" type="button" data-act="exp-heads">Expense heads</button>
+          <button class="btn ghost hide" id="expSettingsBtn" type="button" data-act="exp-settings">Settings</button>
+          <button class="btn hide" id="expNewBtn" type="button" data-act="new-expense">New expense</button>
+        </div>
+        <p class="err hide" id="expErr" role="alert"></p>
+        <p class="muted panel-note" id="expTot"></p>
+      </div>
+
+      <div class="panel flush">
+        <div class="tw"><table>
+          <thead><tr><th>Number</th><th>Date</th><th>Head</th><th class="n">Amount (₹)</th><th class="n">GST (₹)</th><th class="n">Cost in P&amp;L (₹)</th><th>Status</th><th>Paid by</th><th>Note</th><th></th></tr></thead>
+          <tbody id="expRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="expEmpty"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-h"><h2>How an expense reaches profit</h2><span class="muted">Only approved, non-reversed entries count.</span></div>
+        <p class="muted panel-note">GST that can be claimed as input credit is excluded from cost; GST that cannot is added to the expense. An entry above the approval amount waits for a second person in Approvals. A mistake is reversed with a reason and the original row stays on file. An entry is never edited or deleted.</p>
+      </div>
     </section>
 
     <section id="v-approvals" class="view hide">
@@ -368,16 +807,6 @@
       </div>
     </section>
 
-    <!-- Distributors -->
-    <section id="v-distributors" class="view hide">
-      <div class="panel flush">
-        <div class="tw"><table>
-          <thead><tr><th>Code</th><th>Distributor</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th class="n">Available (₹)</th><th></th></tr></thead>
-          <tbody id="drows"></tbody>
-        </table></div>
-        <div class="empty hide" id="dempty"></div>
-      </div>
-    </section>
     <!-- Tax and discounts (Module Phase 3) -->
     <section id="v-tax" class="view hide">
       <div class="panel flush">
@@ -498,14 +927,25 @@
       </div>
     </section>
 
-    <!-- Customers (same master as distributors) -->
+    <!-- Customers and distributors: one master, one list.
+         A distributor is the buyer record; the old #/distributors address opens
+         this same screen so links and bookmarks keep working. -->
     <section id="v-customers" class="view hide">
       <div class="panel flush">
         <div class="toolbar">
-          <input id="cuq" type="search" placeholder="Search customer code, name, GSTIN or territory" aria-label="Search customers">
+          <input id="cuq" type="search" placeholder="Search code, name, GSTIN or territory" aria-label="Search customers and distributors">
+          <select id="cuFilter" aria-label="Filter by status">
+            <option value="all">All</option>
+            <option value="incomplete">Needs completion</option>
+            <option value="active">Active</option>
+            <option value="draft">Draft</option>
+            <option value="pending verification">Pending verification</option>
+            <option value="blocked">Blocked</option>
+            <option value="inactive">Inactive</option>
+          </select>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>Code</th><th>Customer</th><th>Territory</th><th>GSTIN</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Code</th><th>Customer / distributor</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th class="n">Available (₹)</th><th>Status</th><th></th></tr></thead>
           <tbody id="curows"></tbody>
         </table></div>
         <div class="empty hide" id="cuempty"></div>
@@ -514,24 +954,106 @@
 
     <!-- HR Management (people, attendance, leave, payroll) -->
     <section id="v-hr" class="view hide">
-      <div class="stats" id="hrStats"></div>
-      <div class="panel flush">
-        <div class="panel-h"><h2>HR workspace</h2><span class="muted">Employee records, attendance, leave, on-duty and payroll.</span></div>
+      <div class="dash-hero">
+        <div>
+          <div class="dash-greet">HR workspace</div>
+          <div class="dash-date" id="hrRangeNote">This month to today</div>
+          <div class="muted" id="hrSiteNote"></div>
+        </div>
+        <div class="dash-tools">
+          <div class="dash-dates" id="hrDateTools">
+            <label for="hrFrom">From <input id="hrFrom" type="date"></label>
+            <label for="hrTo">To <input id="hrTo" type="date"></label>
+            <button class="btn ghost" type="button" data-act="hr-range-apply">Apply</button>
+            <div class="seg compact" role="group" aria-label="Quick ranges">
+              <button type="button" data-hrr="month" aria-pressed="true">This month</button>
+              <button type="button" data-hrr="30" aria-pressed="false">Last 30 days</button>
+            </div>
+          </div>
+          <div class="dash-dates" id="hrSiteTools">
+            <label for="hrBranchFilter">Branch <select id="hrBranchFilter"><option value="">All branches</option></select></label>
+            <label for="hrOfficeFilter">Office <select id="hrOfficeFilter"><option value="">All offices</option></select></label>
+          </div>
+          <button class="btn ghost hide" id="hrExport" type="button" data-act="hr-export">Export CSV</button>
+          <button class="btn ghost hide" id="hrImport" type="button" data-act="hr-import">Import</button>
+          <button class="btn hide" id="hrAdd" type="button" data-act="hr-new-emp">New employee</button>
+        </div>
+      </div>
+      <div class="dash-dateerr hide" id="hrDateError" role="alert"></div>
+      <div class="kpis" id="hrKpis"></div>
+      <div class="dash-grid hr-team-only">
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Needs attention</h2><span class="muted" id="hrAttentionNote"></span></div>
+          <ul class="attention" id="hrAttention" aria-label="Items that need attention"></ul>
+        </div>
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Attendance</h2><span class="muted" id="hrTrendNote"></span></div>
+          <div id="hrTrend"></div>
+          <div id="hrLeaveMix"></div>
+        </div>
+      </div>
+      <div class="dash-grid hr-team-only">
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Celebrations and holidays</h2><span class="muted">Next 30 days</span></div>
+          <div id="hrCalendar"></div>
+        </div>
+        <div class="panel dash-panel">
+          <div class="panel-h"><h2>Team shape</h2><span class="muted">Active employees</span></div>
+          <div id="hrShape"></div>
+        </div>
+      </div>
+      <div class="panel flush" id="hrDirectory">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>People</h2><span class="muted" id="hrDirNote"></span></div>
         <div class="toolbar">
-          <button class="btn" data-act="hr-employees" type="button">Employees</button>
-          <button class="btn ghost" data-act="hr-attendance" type="button">Attendance</button>
-          <button class="btn ghost" data-act="hr-leave" type="button">Leave</button>
-          <button class="btn ghost" data-act="hr-od" type="button">On duty</button>
-          <button class="btn ghost" data-act="hr-payroll" type="button">Payroll</button>
-          <button class="btn ghost hide" data-act="hr-shifts" type="button">Shift settings</button>
+          <input id="hrq" type="search" placeholder="Search name, code, department" aria-label="Search employees">
+          <select id="hrStatus" aria-label="Filter by status"><option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          <select id="hrDept" aria-label="Filter by department"><option value="">All departments</option></select>
+          <button class="btn ghost" type="button" data-act="hr-refresh">Refresh</button>
         </div>
-        <div id="hrDirectory">
-          <div class="tw"><table>
-            <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Status</th></tr></thead>
-            <tbody id="hrrows"></tbody>
-          </table></div>
-          <div class="empty hide" id="hrempty"></div>
+        <div class="toolbar hr-saved">
+          <select id="hrSaved" aria-label="Saved filters"><option value="">Saved filters</option></select>
+          <button class="btn ghost sm" type="button" data-act="hr-filter-apply">Apply</button>
+          <button class="btn ghost sm" type="button" data-act="hr-filter-save">Save current</button>
+          <button class="btn ghost sm" type="button" data-act="hr-filter-delete">Delete</button>
         </div>
+        <div id="hrSavedBox"></div>
+        <div class="tw"><table>
+          <thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Location</th><th>Joined</th><th>Status</th><th></th></tr></thead>
+          <tbody id="hrrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="hrempty"></div>
+      </div>
+      <div class="panel" id="hrTasks">
+        <div class="panel-h"><h2>HR tasks</h2><span class="muted">Every screen checks your role on the server.</span></div>
+        <div class="toolbar">
+          <button class="btn ghost" type="button" data-act="hr-attendance">Attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-monthly">Monthly attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-leave">Leave</button>
+          <button class="btn ghost" type="button" data-act="hr-calendar">Leave calendar</button>
+          <button class="btn ghost" type="button" data-act="hr-od">On duty</button>
+          <button class="btn ghost hide" type="button" data-act="hr-payroll">Payroll</button>
+          <button class="btn ghost hide" type="button" data-act="hr-shifts">Shift settings</button>
+          <button class="btn ghost hide" type="button" data-act="hr-sites">Branches, offices &amp; attendance policy</button>
+          <button class="btn ghost hide" type="button" data-act="hr-reports">HR reports</button>
+          <button class="btn ghost hide" type="button" data-act="hr-notices">Announcements</button>
+          <button class="btn ghost hide" type="button" data-act="hr-locks">Period locks</button>
+          <button class="btn ghost hide" type="button" data-act="hr-letters">Letter templates</button>
+          <button class="btn ghost" type="button" data-act="hr-notifications">Notifications <span class="chip hide" id="hrUnread">0</span></button>
+        </div>
+      </div>
+      <div class="panel hide" id="hrSelf">
+        <div class="panel-h"><h2>My workspace</h2><span class="muted">Only your own records; every call is scoped on the server.</span></div>
+        <div class="toolbar">
+          <button class="btn ghost" type="button" data-act="hr-attendance">My attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-monthly">My monthly attendance</button>
+          <button class="btn ghost" type="button" data-act="hr-leave">Leave</button>
+          <button class="btn ghost" type="button" data-act="hr-od">On duty</button>
+          <button class="btn ghost" type="button" data-act="hr-payslips">My payslips</button>
+          <button class="btn ghost" type="button" data-act="hr-card">My ID card</button>
+          <button class="btn ghost" type="button" data-act="hr-statement">My leave statement</button>
+          <button class="btn ghost" type="button" data-act="hr-notifications">Notifications</button>
+        </div>
+        <div id="hrSelfBody"></div>
       </div>
     </section>
 
@@ -540,12 +1062,22 @@
       <div class="panel">
         <div class="panel-h"><h2>Settings &amp; Administration</h2><span class="muted">Configuration and controlled records.</span></div>
         <div class="toolbar">
-          <a class="btn ghost" href="#/users">Users, roles and employees</a>
+          <a class="btn ghost" href="#/roles">Roles &amp; Permissions</a>
+          <a class="btn ghost" href="#/users">Logins and employees</a>
           <a class="btn ghost" href="#/tax">Tax, discounts and company profile</a>
           <a class="btn ghost" href="#/audit">Audit trail</a>
+          <a class="btn ghost" href="#/scheduled">Scheduled reports</a>
           <a class="btn ghost" href="#/hr">HR policies and offices</a>
         </div>
         <div class="note">Each area enforces its own permissions on the server. A link is hidden only as a convenience; the backend refuses an unauthorised request.</div>
+      </div>
+      <div class="panel hide" id="dbResetPanel">
+        <div class="panel-h"><h2>Database reset</h2><span class="muted" id="dbResetState">Administrator only.</span></div>
+        <div id="dbResetBody"><p class="muted">Checking availability…</p></div>
+      </div>
+      <div class="panel" id="emailPanel">
+        <div class="panel-h"><h2>Email and SMTP</h2><span class="muted" id="emStatus">Administrator only.</span></div>
+        <div id="emBody"><p class="muted">Loading email settings…</p></div>
       </div>
       <div class="panel flush">
         <div class="panel-h"><h2>Employees</h2><span class="muted">The same master used by HR.</span></div>
@@ -584,7 +1116,41 @@
       <div id="rpBody"></div>
     </section>
 
-    <!-- Users and rights (Module Phase 1) -->
+    <!-- Roles and permissions (Module Phase 1, consolidated) -->
+    <section id="v-roles" class="view hide">
+      <div class="panel">
+        <div class="panel-h"><h2>Roles and permissions</h2><span class="muted">Changes take effect on the next request.</span></div>
+        <div class="note">A parent permission is a module gate. Checking it makes its children selectable but grants none of them; only a ticked child is granted. Unchecking a parent removes its children. A child can never work without its parent, and the server enforces the same rules on every request.</div>
+      </div>
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Roles</h2><span class="muted">Built-in roles keep their names; custom roles are created here.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Role</th><th class="n">Permissions</th><th class="n">Users</th><th>Type</th><th></th></tr></thead>
+          <tbody id="rrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="rempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Feature availability</h2><span class="muted">One central switch per module. Switching a module off denies its permissions to every role and hides it everywhere.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Module</th><th>Permissions it controls</th><th>State</th><th></th></tr></thead>
+          <tbody id="frows"></tbody>
+        </table></div>
+        <div class="empty hide" id="fempty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Access control</h2><span class="muted">Every permission in the catalogue, its parent and whether it is reserved for the Administrator. A child can depend on a parent listed under another module.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Module</th><th>Parent permission</th><th>Child permissions</th><th>Administrator only</th></tr></thead>
+          <tbody id="acrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="acempty"></div>
+      </div>
+    </section>
+
+    <!-- Logins and employees (Module Phase 1) -->
     <section id="v-users" class="view hide">
       <div class="panel flush">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Logins</h2><span class="muted" id="userNote"></span></div>
@@ -595,13 +1161,9 @@
         <div class="empty hide" id="uempty"></div>
       </div>
 
-      <div class="panel flush">
-        <div class="panel-h" style="padding:14px 18px 0"><h2>Roles and permissions</h2><span class="muted">Changes take effect on the next request.</span></div>
-        <div class="tw"><table>
-          <thead><tr><th>Role</th><th class="n">Permissions</th><th class="n">Users</th><th>Type</th><th></th></tr></thead>
-          <tbody id="rrows"></tbody>
-        </table></div>
-        <div class="empty hide" id="rempty"></div>
+      <div class="panel">
+        <div class="panel-h"><h2>Roles &amp; Permissions</h2><span class="muted">Role permissions and module switches live on their own screen.</span></div>
+        <div class="toolbar"><a class="btn ghost" href="#/roles">Open Roles &amp; Permissions</a></div>
       </div>
 
       <div class="panel flush">
@@ -632,6 +1194,71 @@
         <div class="empty hide" id="audempty"></div>
       </div>
     </section>
+    <!-- Scheduled reports (Administrator only) -->
+    <section id="v-scheduled" class="view hide">
+      <div id="srBanner"></div>
+      <div class="panel">
+        <div class="panel-h"><h2>Scheduled reports</h2><span class="muted" id="srHeadNote"></span></div>
+        <div class="seg compact" role="tablist" aria-label="Scheduled reports sections" id="srTabs">
+          <button type="button" role="tab" data-sr-tab="schedules" aria-selected="true">Schedules</button>
+          <button type="button" role="tab" data-sr-tab="recipients" aria-selected="false">Recipients</button>
+          <button type="button" role="tab" data-sr-tab="log" aria-selected="false">Delivery log</button>
+        </div>
+        <div class="note">Nothing is sent until SMTP is configured, sending is enabled and the scheduler screen is approved. In test mode every message goes only to the Administrator. Every change and every send is written to the audit log.</div>
+      </div>
+
+      <section id="sr-schedules">
+        <div class="panel flush">
+          <div class="toolbar">
+            <span class="muted" id="srSchedNote"></span>
+            <button class="btn" data-act="sr-new" type="button">New schedule</button>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Schedule</th><th>Content</th><th>When</th><th>Next run</th><th>Last run</th><th>Status</th><th></th></tr></thead>
+            <tbody id="srSchedRows"></tbody>
+          </table></div>
+          <div class="empty hide" id="srSchedEmpty"></div>
+        </div>
+      </section>
+
+      <section id="sr-recipients" class="hide">
+        <div class="panel flush">
+          <div class="toolbar">
+            <span class="muted" id="srRecNote"></span>
+            <button class="btn" data-act="sr-recipient-new" type="button">Add recipient</button>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Email</th><th>Name</th><th>Group</th><th>Status</th><th>Used by</th><th></th></tr></thead>
+            <tbody id="srRecRows"></tbody>
+          </table></div>
+          <div class="empty hide" id="srRecEmpty"></div>
+        </div>
+      </section>
+
+      <section id="sr-log" class="hide">
+        <div class="panel flush">
+          <div class="toolbar">
+            <select id="srLogStatus" aria-label="Filter by delivery status">
+              <option value="">All statuses</option>
+              <option value="queued">Queued</option>
+              <option value="sending">Sending</option>
+              <option value="sent">Sent</option>
+              <option value="retry">Retry</option>
+              <option value="failed">Failed</option>
+              <option value="skipped">Skipped</option>
+            </select>
+            <select id="srLogPack" aria-label="Filter by report pack"><option value="">All packs</option></select>
+            <button class="btn ghost sm" data-act="sr-refresh-log" type="button">Refresh</button>
+            <span class="muted" id="srLogNote"></span>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Created</th><th>Pack</th><th>Trigger</th><th>Period</th><th class="n">Recipients</th><th>Status</th><th>Attachments</th><th>Error</th><th></th></tr></thead>
+            <tbody id="srLogRows"></tbody>
+          </table></div>
+          <div class="empty hide" id="srLogEmpty"></div>
+        </div>
+      </section>
+    </section>
   </main>
 </div>
 
@@ -641,6 +1268,20 @@
   <div class="drawer-b" id="dbody"></div>
 </aside>
 <div id="toast" class="hide" role="status" aria-live="polite"></div>
+
+<!-- Command palette -->
+<div id="palette" class="palette hide" role="dialog" aria-modal="true" aria-labelledby="paletteTitle">
+  <div class="palette-box">
+    <div class="palette-top">
+      <h2 id="paletteTitle" class="sr-only">Search everything</h2>
+      <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
+      <input id="paletteQ" type="search" placeholder="Search products, orders, invoices, parties…" aria-label="Search everything" autocomplete="off" spellcheck="false" role="combobox" aria-controls="paletteResults" aria-expanded="true" aria-autocomplete="list">
+      <kbd>Esc</kbd>
+    </div>
+    <div id="paletteResults" class="palette-results" role="listbox" aria-label="Search results"></div>
+    <div class="palette-foot" id="paletteNote">Type at least two characters.</div>
+  </div>
+</div>
 
 <script src="js/app.js"></script>
 </body>

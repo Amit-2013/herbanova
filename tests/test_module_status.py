@@ -14,7 +14,10 @@ EVIDENCE = {
     "MOD-11": "app/api/suppliers.py",
     "MOD-12": "app/api/tax.py",
     "MOD-13": "app/api/printing.py",
+    "MOD-14": "app/api/accounts.py",
     "MOD-16": "app/api/hr.py",
+    "MOD-17": "app/api/accounts.py",
+    "MOD-18": "app/api/email_reports.py",
 }
 
 

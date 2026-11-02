@@ -72,6 +72,7 @@ class GoodsReceipt(Base):
         Index("uq_grn_delivery_note", "po_id", "delivery_note", unique=True,
               postgresql_where=text("delivery_note IS NOT NULL")),
         CheckConstraint("owner IN ('HERBANOVA','MANUFACTURER')", name="ck_grn_owner"),
+        Index("ix_goods_receipts_received_at", "received_at"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     grn_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)

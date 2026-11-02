@@ -100,8 +100,18 @@ MODULES: tuple[Module, ...] = (
     Module("MOD-15", "E-invoice and e-way bill",
            "Only if the business turnover requires it", CONDITIONAL, PHASES),
     Module("MOD-16", "HR management, attendance and payroll",
-           "Employee master, office/geofence attendance, leave, OD, central HR approvals, "
-           "configurable payroll and HR reports", WORKING, PHASES),
+           "Employee master with saved views and bulk import, self-service attendance and "
+           "leave, team scoping, documents/assets/history, letters and ID cards, payroll "
+           "with locks, statutory heads and bank file, HR reports and report pack",
+           WORKING, PHASES),
+    Module("MOD-17", "Accounts reporting and comparison",
+           "Accounts dashboard, ageing and trial-balance report pack, month and"
+           "region comparison, and the Accounts e-mail block",
+           WORKING, PHASES),
+    Module("MOD-18", "Scheduled e-mail reports",
+           "Recipients, schedules with holiday rules, HTML and text packs, attachments, "
+           "DB-backed worker with retries and a delivery log; test mode until approved",
+           WORKING, PHASES),
 )
 
 
