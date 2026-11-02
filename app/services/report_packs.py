@@ -658,8 +658,9 @@ def _summary_rep(data: dict) -> dict:
             "checks": checks,
             "tables": tables,
             "limitations": data["notes"] + [
-                "Accounting months can be locked against cost corrections; there is "
-                "no year-end close (GAP-A03)."]}
+                "A locked accounting month refuses cost corrections and expense "
+                "creation or reversal; invoice changes, credit notes, receipts, "
+                "payments and year-end close are not covered (GAP-A03)."]}
 
 
 def build_attachments(db: Session, data: dict, pack_key: str) -> list[dict]:

@@ -449,7 +449,7 @@ Both checks are server-side (`require("accounts:reports")` and `require("account
 
 **Captured now (no longer gaps):** GAP-A01 expenses and heads (expense table, heads, approval, reversal, receipts, settings) and GAP-A02 cost of goods (append-only stock cost, weighted average per product, invoice attribution and audited corrections).
 
-**Still not captured:** GAP-A03 year-end close and period locks (accounting months can be locked for cost corrections; there is no year-end close) · GAP-A04 invoice due dates · GAP-A05 input GST and net payable · GAP-A06 GSTR-1/3B reconciliation · GAP-A07 TDS and statutory dues · GAP-A08 vouchers and day book · GAP-A09 bank reconciliation · GAP-A10 opening balances and balance sheet.
+**Still not captured:** GAP-A03 year-end close and whole-book period locks (a locked accounting month refuses cost corrections and expense creation or reversal; invoice changes, credit notes, receipts, payments and year-end close are not covered) · GAP-A04 invoice due dates · GAP-A05 input GST and net payable · GAP-A06 GSTR-1/3B reconciliation · GAP-A07 TDS and statutory dues · GAP-A08 vouchers and day book · GAP-A09 bank reconciliation · GAP-A10 opening balances and balance sheet.
 
 **Gaps raised only when the data is missing for the selected window:**
 
@@ -479,7 +479,7 @@ Every remaining gap appears in the screen's Data gaps panel and in the email acc
 1. **Role for the MD.** There is no seeded MD login. Create an `md` role, grant `accounts:reports` (and `accounts:read` if the statements should be visible), and assign it to the MD user.
 2. **Region scope.** Only flows that carry a buyer state can be filtered. A state filter does not narrow balances or cash; the screen says so. If you need a balance split by state, outstanding must be grouped on the distributor state at invoice time, which needs a stored snapshot.
 3. **Expense tracking start.** Expenses count only from `expense_settings.tracked_from`; a window that starts earlier raises GAP-P02 rather than treating untracked months as zero. Payroll likewise counts whole approved months only and is never prorated.
-4. **Year-end close.** Accounting months can be locked against cost corrections (the HR period-lock pattern, scope `accounting`), but there is no year-end close that freezes every document (GAP-A03).
+4. **Year-end close.** Accounting months can be locked (the HR period-lock pattern, scope `accounting`). A locked month refuses purchase-cost corrections and expense creation or reversal. Invoice changes, credit notes, receipts, payments and a year-end close that freezes every document are not covered (GAP-A03).
 5. **Vouchers** remain receipts and payments; the party ledger is the drill-down, and it links the document rather than a voucher (GAP-A08).
 6. **Exports.** The Accounts screen exports CSV; the P&L report exports CSV, XLSX and PDF with its reconciliation table and notes; the email pack uses the same attachment builder.
 

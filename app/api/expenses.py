@@ -32,6 +32,7 @@ from ..models.expenses import (APPROVED, PENDING, REJECTED, REVERSED, STATUSES,
                                Expense, ExpenseHead, ExpenseSettings,
                                SYSTEM_PAYROLL_HEAD)
 from ..services.audit import audit
+from ..services.hr import active_period_lock
 
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
@@ -185,6 +186,15 @@ def _settings(db: Session) -> ExpenseSettings:
     return row
 
 
+def _refuse_locked_month(db: Session, day: date, action: str) -> None:
+    lock = active_period_lock(db, "accounting", day)
+    if lock is not None:
+        raise HTTPException(
+            423,
+            f"The accounting period {lock.year}-{lock.month:02d} is locked, so an "
+            f"expense cannot be {action}. Unlock the month first.")
+
+
 def _head(db: Session, head_id: int) -> ExpenseHead:
     head = db.get(ExpenseHead, head_id)
     if head is None:
@@ -332,6 +342,7 @@ def create_expense(body: ExpenseIn, db: Session = Depends(get_db),
         raise HTTPException(
             422, "The payroll head is filled from the HR payroll register; "
                  "a manual entry is not allowed")
+    _refuse_locked_month(db, body.entry_date, "recorded")
 
     amount, gst = _money(body.amount), _money(body.gst_amount)
     total = amount + gst
@@ -387,6 +398,7 @@ def reverse_expense(expense_id: int, body: ReverseIn, db: Session = Depends(get_
         raise HTTPException(409, "This expense is already reversed")
     if expense.status != APPROVED:
         raise HTTPException(409, f"Only an approved expense can be reversed; it is {expense.status}")
+    _refuse_locked_month(db, expense.entry_date, "reversed")
     expense.status = REVERSED
     expense.reversed_by = user.id
     expense.reversed_at = datetime.now(timezone.utc)
