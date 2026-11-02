@@ -2169,12 +2169,19 @@ function renderDashAccounts(a) {
      "Receipts minus payments in the selected window; opening balances are not captured."],
     ["Output GST", a.output_gst, "#/accounts",
      "Output only; purchase-side tax is not captured."],
-    ["Net profit", null, "#/accounts", a.net_profit_note || "Cost and expenses are not captured.",
-     a.net_profit_gap || "GAP-A02"],
+    ["Gross profit", a.gross_profit, "#/accounts",
+     a.gross_profit_partial
+       ? `${a.invoices_costed} of ${a.invoices_total} invoices fully costed; the rest are named in the gaps.`
+       : "Net revenue less cost of goods sold.", null, a.gross_profit_label],
+    ["Expenses", a.expenses, "#/expenses",
+     "Approved entries in the window; non-creditable GST is part of the cost.",
+     a.expenses_gap],
+    ["Net profit", a.net_profit, "#/accounts", a.net_profit_note || "Cost, expenses and payroll are not all complete.",
+     a.net_profit_gap],
   ];
-  el.innerHTML = tiles.map(([label, value, href, note, gap]) => gap
+  el.innerHTML = tiles.map(([label, value, href, note, gap, shown]) => gap
     ? `<a class="kpi cmp-card-gap" href="${esc(href)}"><span class="kpi-label">${esc(label)}<span class="chip off">Gap ${esc(gap)}</span></span><span class="kpi-value">No data yet</span><span class="kpi-note">${esc(note)}</span></a>`
-    : `<a class="kpi" href="${esc(href)}"><span class="kpi-label">${esc(label)}</span><span class="kpi-value">${esc(accMoney(value))}</span><span class="kpi-note">${esc(note)}</span></a>`).join("");
+    : `<a class="kpi" href="${esc(href)}"><span class="kpi-label">${esc(shown || label)}</span><span class="kpi-value">${esc(accMoney(value))}</span><span class="kpi-note">${esc(note)}</span></a>`).join("");
 }
 
 function openAccountsReports() {
@@ -2248,13 +2255,15 @@ function renderAccountsReport() {
     return;
   }
 
-  const gap = r.net_profit;
-  $("#accKpis").innerHTML = r.cards.map(c =>
-    `<div class="kpi"><span class="kpi-label">${esc(c.label)}</span>`
-    + `<span class="kpi-value">${esc(accMoney(c.value))}</span>`
-    + `<span class="kpi-note">${esc(c.note)}</span></div>`).join("")
-    + `<div class="kpi cmp-card-gap"><span class="kpi-label">${esc(gap.label || "Net profit")}<span class="chip off">Gap ${esc(gap.gap)}</span></span>`
-    + `<span class="kpi-value">No data yet</span><span class="kpi-note">${esc(gap.note)}</span></div>`;
+  $("#accKpis").innerHTML = r.cards.map(c => {
+    if (c.available === false) {
+      return `<a class="kpi cmp-card-gap" href="${esc(c.href || "#/accounts")}"><span class="kpi-label">${esc(c.label)}<span class="chip off">Gap ${esc(c.gap)}</span></span>`
+        + `<span class="kpi-value">No data yet</span><span class="kpi-note">${esc(c.note)}</span></a>`;
+    }
+    return `<a class="kpi" href="${esc(c.href || "#/accounts")}"><span class="kpi-label">${esc(c.label)}</span>`
+      + `<span class="kpi-value">${esc(accMoney(c.value))}</span>`
+      + `<span class="kpi-note">${esc(c.note)}</span></a>`;
+  }).join("");
   $("#accPerfGaps").textContent = r.notes && r.notes.length ? r.notes.join(" ") : "";
 
   renderAccPnl(r.profit_and_loss);
@@ -2267,13 +2276,20 @@ function renderAccountsReport() {
 
 function renderAccPnl(pnl) {
   if (!pnl) return;
-  const rows = (pnl.rows || []).map(row => row.available
-    ? `<tr><td class="strong">${esc(row.label)}</td><td class="n strong">${esc(accMoney(row.value))}</td></tr>`
-    : `<tr><td class="strong">${esc(row.label)}</td><td class="n"><span class="chip off">Gap ${esc(row.gap)}</span> <span class="gap-note">No data yet. ${esc(row.note || "")}</span></td></tr>`).join("");
+  const rows = (pnl.rows || []).map(row => {
+    if (row.available === false) {
+      const fix = row.fix ? ` <a class="link-btn" href="${esc(row.fix)}">Fix this</a>` : "";
+      return `<tr><td class="strong">${esc(row.label)}</td><td class="n"><span class="chip off">Gap ${esc(row.gap)}</span> <span class="gap-note">No data yet. ${esc(row.note || "")}</span>${fix}</td></tr>`;
+    }
+    const note = row.note ? ` <small>${esc(row.note)}</small>` : "";
+    return `<tr><td class="strong">${esc(row.label)}</td><td class="n strong">${esc(accMoney(row.value))}${note}</td></tr>`;
+  }).join("");
+  const notes = (pnl.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
   $("#accPnl").innerHTML = `<div class="tw"><table>
       <thead><tr><th>Line</th><th class="n">Amount</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-      <p class="muted panel-note">${esc(pnl.note || "")}</p>`;
+      <p class="muted panel-note">${esc(pnl.note || "")}</p>`
+    + (notes ? `<div class="panel-note"><b>Notes</b><ul class="gaps">${notes}</ul></div>` : "");
 }
 
 function renderAccTrend(r) {
@@ -2335,7 +2351,9 @@ function renderAccDrill(drill) {
 function renderAccGaps(gaps) {
   const rows = gaps || [];
   $("#accGaps").innerHTML = rows.length
-    ? `<ul class="gaps">${rows.map(g => `<li><b>${esc(g.code)}</b> ${esc(g.label)} <span>${esc(g.detail)}</span></li>`).join("")}</ul>`
+    ? `<ul class="gaps">${rows.map(g => `<li><b>${esc(g.code)}</b> ${esc(g.label)} <span>${esc(g.detail)}</span>`
+        + (g.fix ? ` <a class="link-btn" href="${esc(g.fix)}">${esc(g.fix_label || "Fix this")}</a>` : "")
+        + `</li>`).join("")}</ul>`
     : `<p class="muted">No gaps recorded.</p>`;
 }
 
@@ -2353,7 +2371,8 @@ function renderAccountsCompare(cmp) {
   const unit = m => v => m.unit === "amount" ? accMoney(v) : qty(v);
   const rows = (d.metrics || []).map(m => {
     if (!m.available) {
-      return `<tr><td class="strong">${esc(m.label)}</td><td colspan="5"><span class="chip off">Gap ${esc(m.gap || "")}</span> <span class="gap-note">No data yet. ${esc(m.note || "")}</span></td></tr>`;
+      const fix = m.fix ? ` <a class="link-btn" href="${esc(m.fix)}">Fix this</a>` : "";
+      return `<tr><td class="strong">${esc(m.label)}</td><td colspan="5"><span class="chip off">Gap ${esc(m.gap || "")}</span> <span class="gap-note">No data yet. ${esc(m.note || "")}</span>${fix}</td></tr>`;
     }
     const f = unit(m);
     return `<tr><td class="strong">${esc(m.label)}</td><td class="n">${esc(f(m.current))}</td>`
@@ -2393,8 +2412,12 @@ function exportAccCsv() {
   if (!r) return;
   const rows = [["HERBANOVA accounts report"], ["From", r.from], ["To", r.to],
                 ["Region", r.region ? r.region.label : "All states"], ["Metric", "Amount (INR)"]];
-  (r.cards || []).forEach(c => rows.push([c.label, c.value]));
-  rows.push(["Net profit", "No data yet (GAP-A02)"], [],
+  (r.cards || []).forEach(c => rows.push([c.label,
+    c.available === false ? `No data yet (${c.gap})` : c.value]));
+  rows.push([], ["Profit and loss (statement)", "Amount (INR)"]);
+  (r.profit_and_loss && r.profit_and_loss.rows || []).forEach(x => rows.push([x.label,
+    x.available === false ? `No data yet (${x.gap})` : x.value]));
+  rows.push(["Note", "GST is excluded from profit; non-creditable GST is part of an expense."], [],
     ["Month", "Revenue", "Collections", "Payments", "Net cash", "Output GST", "Returns"],
     ...(r.trend || []).map(m => [m.label, m.revenue, m.collections, m.payments, m.net_cash, m.output_gst, m.returns]),
     [], ["State", "Invoices", "Revenue", "Output GST", "Returns", "Outstanding"],
@@ -2446,8 +2469,8 @@ function renderExpenses() {
   $("#expSettingsBtn").classList.toggle("hide", state.user.role !== "admin");
   const st = s.settings;
   $("#expSettingsNote").textContent = st
-    ? `Tracked from ${fmtDate(st.tracked_from)} Â· approval ${st.approval_enabled ? `on above â‚¹ ${money(st.approval_threshold)}` : "off"}`
-    : s.loading ? "Loading settingsâ€¦" : "";
+    ? `Tracked from ${fmtDate(st.tracked_from)} · approval ${st.approval_enabled ? `on above ₹ ${money(st.approval_threshold)}` : "off"}`
+    : s.loading ? "Loading settings…" : "";
   $("#expErr").classList.toggle("hide", !s.error);
   $("#expErr").textContent = s.error || "";
 
@@ -2480,15 +2503,15 @@ function renderExpenses() {
       + `<td><span class="pill">${esc(EXP_STATUS[x.status] || x.status)}</span>`
       + (x.reversal_reason ? `<small>${esc(x.reversal_reason)}</small>` : "") + `</td>`
       + `<td>${esc(x.mode)}</td><td>${esc(x.note || x.reference || "")}</td>`
-      + `<td class="rowacts">${acts.join(" ") || "â€“"}</td></tr>`;
+      + `<td class="rowacts">${acts.join(" ") || "–"}</td></tr>`;
   }).join("");
   $("#expEmpty").classList.toggle("hide", rows.length > 0);
-  $("#expEmpty").textContent = s.loading ? "Loading expensesâ€¦"
+  $("#expEmpty").textContent = s.loading ? "Loading expenses…"
     : s.loaded && !rows.length ? "No expense matches this filter." : "";
   const deductible = rows.filter(x => x.status === "approved")
     .reduce((sum, x) => sum + Number(x.deductible_amount || 0), 0);
   $("#expTot").textContent = rows.length
-    ? `${plural(rows.length, "entry")} Â· â‚¹ ${money(deductible)} carried by approved entries shown` : "";
+    ? `${plural(rows.length, "entry")} · ₹ ${money(deductible)} carried by approved entries shown` : "";
 }
 
 function openExpenseForm() {
@@ -2512,8 +2535,8 @@ function openExpenseForm() {
         <div><label for="x-date">Date</label><input id="x-date" name="entry_date" type="date" value="${dayIso(new Date())}" max="${dayIso(new Date())}" required></div>
       </div>
       <div class="row2">
-        <div><label for="x-amount">Amount before GST (â‚¹)</label><input id="x-amount" name="amount" inputmode="decimal" required autocomplete="off"></div>
-        <div><label for="x-gst">GST (â‚¹)</label><input id="x-gst" name="gst_amount" inputmode="decimal" value="0" autocomplete="off"></div>
+        <div><label for="x-amount">Amount before GST (₹)</label><input id="x-amount" name="amount" inputmode="decimal" required autocomplete="off"></div>
+        <div><label for="x-gst">GST (₹)</label><input id="x-gst" name="gst_amount" inputmode="decimal" value="0" autocomplete="off"></div>
       </div>
       <div class="row2">
         <div><label for="x-mode">Paid by</label><select id="x-mode" name="mode">
@@ -2575,7 +2598,7 @@ function expenseReceiptForm(id) {
   if (!can("expense:write")) return;
   const x = (state.exp.rows || []).find(r => r.id === Number(id));
   if (!x) return;
-  openDrawer(`Receipt Â· ${x.number}`, "The file is private and served only to a signed-in role.",
+  openDrawer(`Receipt · ${x.number}`, "The file is private and served only to a signed-in role.",
     `<form id="expReceiptForm" data-id="${x.id}">
       <label for="xr-file">Receipt (JPEG, PNG, WebP or PDF, 5 MB)</label>
       <input id="xr-file" name="receipt" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required>
@@ -2603,7 +2626,7 @@ function expenseReverseForm(id) {
   openDrawer(`Reverse ${x.number}`,
     "The entry keeps its amount and stays on file; the profit and loss stops counting it.", `
     <form id="expReverseForm" data-id="${x.id}">
-      <p>${esc(x.head)} Â· ${esc(fmtDate(x.entry_date))} Â· â‚¹ ${esc(money(x.amount))}</p>
+      <p>${esc(x.head)} · ${esc(fmtDate(x.entry_date))} · ₹ ${esc(money(x.amount))}</p>
       <label for="xr-reason">Reason</label><input id="xr-reason" name="reason" maxlength="300" required autocomplete="off">
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">Reverse expense</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
@@ -2634,7 +2657,7 @@ function openExpenseHeads() {
     </form>
     <div class="tw"><table><thead><tr><th>Head</th><th>Status</th><th></th></tr></thead><tbody>
       ${rows.map(h => `<tr><td class="strong">${esc(h.name)}${h.is_system ? ' <span class="chip">Payroll</span>' : ""}</td>`
-        + `<td>${h.is_active ? "Active" : "Inactive"}</td><td>${h.is_system ? "â€“"
+        + `<td>${h.is_active ? "Active" : "Inactive"}</td><td>${h.is_system ? "–"
           : `<button class="rowbtn" type="button" data-act="exp-head-toggle" data-id="${h.id}" data-on="${h.is_active ? "0" : "1"}">${h.is_active ? "Deactivate" : "Activate"}</button>`}</td></tr>`).join("")}
     </tbody></table></div>`, true);
 }
@@ -2672,7 +2695,7 @@ function openExpenseSettings() {
       <label>Approval threshold
         <input type="checkbox" name="approval_enabled"${st.approval_enabled ? " checked" : ""}> Ask for approval above the amount
       </label>
-      <label for="xs-threshold">Approval amount (â‚¹)</label>
+      <label for="xs-threshold">Approval amount (₹)</label>
       <input id="xs-threshold" name="approval_threshold" inputmode="decimal" value="${esc(st.approval_threshold)}">
       <label for="xs-from">Track expenses from</label>
       <input id="xs-from" name="tracked_from" type="date" value="${esc(st.tracked_from)}" max="${dayIso(new Date())}">

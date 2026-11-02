@@ -76,7 +76,9 @@ def test_overview_accounts_tiles_match_the_accounts_report(client, world):
     assert Decimal(dash["accounts"]["payable_total"]) == Decimal(report["payables"]["total"])
     assert Decimal(dash["accounts"]["cash_bank_net"]) == Decimal(report["cash_bank_net"])
     assert dash["accounts"]["net_profit"] is None
-    assert dash["accounts"]["net_profit_gap"] == "GAP-A02"
+    # The tile names the same first gap as the statement it was built from.
+    assert dash["accounts"]["net_profit_gap"] \
+        == report["profit_and_loss"]["gaps"][0]["code"]
 
 
 def test_region_filter_narrows_flows_and_leaves_balances(client, world):
@@ -110,13 +112,19 @@ def test_states_and_trend_carry_the_same_money(client, world):
 def test_missing_expenses_and_profit_are_gaps_not_zeroes(client, world):
     report = _report(client)
     rows = {r["key"]: r for r in report["profit_and_loss"]["rows"]}
-    for key, gap in (("expenses", "GAP-A01"), ("net_profit", "GAP-A02")):
-        assert rows[key]["available"] is False
-        assert rows[key]["value"] is None
-        assert rows[key]["gap"] == gap
+    assert rows["expenses"]["available"] is False
+    assert rows["expenses"]["value"] is None
+    assert rows["expenses"]["gap"] == "GAP-P02"
+    assert rows["net_profit"]["available"] is False
+    assert rows["net_profit"]["value"] is None
+    pl_gaps = report["profit_and_loss"]["gaps"]
+    assert rows["net_profit"]["gap"] == pl_gaps[0]["code"]
     assert report["net_profit"]["available"] is False
-    codes = {g["code"] for g in report["gaps"]}
-    assert {"GAP-A01", "GAP-A02", "GAP-A03"} <= codes
+    codes = {g["code"] for g in pl_gaps}
+    # Expenses and payroll are incomplete; an earlier invoice without a stock
+    # issue also leaves cost incomplete, and that gap comes first.
+    assert {"GAP-P02", "GAP-P03"} <= codes
+    assert not {"GAP-A01", "GAP-A02"} & codes
 
 
 # --- month on month and year on year ---------------------------------------
@@ -135,8 +143,8 @@ def test_compare_reports_both_modes_and_no_percentage_against_zero(client, world
         assert revenue["previous_change"] is None
         assert revenue["last_year_change"] is None
         gaps = {m["key"]: m.get("gap") for m in body["metrics"]}
-        assert gaps["expenses"] == "GAP-A01"
-        assert gaps["net_profit"] == "GAP-A02"
+        assert gaps["expenses"] == "GAP-P02"
+        assert gaps["net_profit"] == "GAP-P02"
         assert body["current"]["trial_balance"]["balanced"] is True
 
 

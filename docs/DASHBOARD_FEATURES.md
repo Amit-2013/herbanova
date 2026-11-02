@@ -394,21 +394,24 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 | `GET /api/accounts/report?from_date&to_date&state` | `accounts:reports` | Window figures, 12-month trend, by-state table, receivables by distributor, gaps |
 | `GET /api/accounts/report/compare?mode=full_month\|mtd&month=YYYY-MM` | `accounts:reports` | Current window vs previous month vs same month last year |
 | `GET /api/accounts/outstanding`, `/ageing`, `/trial-balance`, `/gst-register`, `/payments`, ledgers | `accounts:read` | Existing statements, unchanged |
-| Overview `GET /api/dashboard` → `accounts` | `accounts:reports` | Receivables, payables, cash and bank, output GST, net-profit gap for the selected dates |
+| `GET /api/reports/profit_and_loss?from&to` | `accounts:reports` | P&L statement, eight reconciliation checks (nine when net profit is available) and notes; export also needs `report:export` |
+| `GET /api/reports/profit_and_loss/export?format=csv\|xlsx\|pdf&table=` | `accounts:reports` + `report:export` | The P&L statement, reconciliation table or checks as a file |
+| `GET/POST/PATCH /api/expenses`, `/heads`, `/settings` | `expense:read` / `expense:write` | Expense entries, heads, approval, reversal, receipts and tracking settings |
+| Overview `GET /api/dashboard` → `accounts` | `accounts:reports` | Receivables, payables, cash and bank, output GST, gross profit (partial when needed), expenses and net profit for the selected dates |
 
-**Overview section.** Five tiles (Receivables, Payables, Cash and bank (net), Output GST, Net profit) under the KPI row. The first four open Accounting & Finance; Net profit reads "No data yet" with GAP-A02. The section is absent for any role without `accounts:reports`.
+**Overview section.** Seven tiles (Receivables, Payables, Cash and bank (net), Output GST, Gross profit, Expenses, Net profit) under the KPI row. Gross profit is live and labelled "partial, X of Y invoices costed" when some invoices lack a captured cost. Net profit is live only when every invoice is costed, expenses are tracked for the whole window and payroll is complete; otherwise it shows its first gap code and opens the fix link. The section is absent for any role without `accounts:reports`.
 
 **Accounting & Finance screen.** Above the existing statements when the role holds `accounts:reports`:
 
 | Section | What it shows | Source |
 |---|---|---|
 | Accounts performance | Date window, region filter, eight KPI tiles, notes | `accounting.window()` |
-| Profit and loss | Revenue, returns, collections; Expenses and Net profit as explicit gaps | `accounting.report()` |
+| Profit and loss | Revenue and returns on taxable value; COGS from the stock ledger; approved expenses by head; payroll gross by month; gross profit labelled partial when needed; net profit only when complete | `profit_loss.statement()` via `accounting.report()` |
 | Month on month and year on year | Both modes; current / previous / last year / change; no percentage against zero | `accounting.compare()` |
 | Monthly trend | Revenue, collections, payments, net cash, output GST, returns for 12 months | `accounting.monthly_series()` |
 | By state | Invoices, revenue, share, output GST, returns, outstanding; Filter button | `accounting.state_breakdown()` |
 | Receivables by distributor | Outstanding per party, opening the append-only party ledger | `accounting.receivables_by_distributor()` + `/api/accounts/ledger/distributors/{id}` |
-| Data gaps | GAP-A01 to GAP-A10 with the missing input | `accounting.GAPS` |
+| Data gaps | GAP-A03 to GAP-A10 for what is still not captured, plus GAP-P01/P02/P03 when cost, expenses or payroll are incomplete, each with a fix link | `accounting.GAPS` + `profit_loss.statement()` |
 
 ## 15. Accounts metric definitions
 
@@ -424,7 +427,11 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 | Payables outstanding | Goods received at order cost less payments | Snapshot; due dates estimated from current supplier terms |
 | Payable within 7 days | Outstanding whose estimated due date falls in the next seven days | Snapshot |
 | Cash and bank (net) | Receipts minus supplier payments | Flow; opening balances not captured (GAP-A10) |
-| Net profit | **No data yet** | GAP-A02: cost and expenses are not captured |
+| Cost of goods sold | Captured issue cost from `costing.invoice_cogs()`, less the cost of stock actually returned; a price-only credit note does not reduce it | Flow; an invoice with no attributed issue is not costed |
+| Gross profit | Net revenue (revenue less returns plus debit notes) minus COGS | Always shown; labelled "partial, X of Y invoices costed" when any invoice is not costed |
+| Expenses | Approved, non-reversed entries by head, dated in the window; non-creditable GST is added to cost, creditable GST is not | Flow; incomplete before `expense_settings.tracked_from` (GAP-P02) |
+| Payroll cost | Gross salary of approved, processed or paid payroll periods for whole calendar months; employer contributions are not included | Whole months only, never prorated (GAP-P03) |
+| Net profit | Gross profit minus expenses and payroll | Shown only when every invoice is costed, expenses cover the window and payroll is complete; otherwise the first gap is shown (GAP-P01/P02/P03) |
 | Region filter | Narrows revenue, returns, output GST and distributor receipts by buyer state | Balances and trial balance stay company-wide |
 
 ## 16. Permissions
@@ -432,34 +439,49 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 | Right | Who has it by default | Effect |
 |---|---|---|
 | `accounts:read` | Administrator, sales desk | Statements, ledgers, ageing, GST register, trial balance |
-| `accounts:reports` | Administrator only (grantable) | Accounts performance section, Overview Accounts tiles, Accounts email block |
+| `accounts:reports` | Administrator only (grantable) | Accounts performance section, Overview Accounts tiles, P&L report and exports, Accounts email block |
 | `accounts:write` | Administrator | Record receipts and payments |
+| `expense:read` / `expense:write` | Administrator | Expenses screen, entries, heads, settings, approval and reversal; the Expenses sidebar entry is shown under the Accounting feature switch only when `expense:read` is held |
 
 Both checks are server-side (`require("accounts:reports")` and `require("accounts:read")`). The screen hides what the API would refuse; it never substitutes for the API check.
 
 ## 17. Data gaps
 
-GAP-A01 expenses and heads · GAP-A02 cost of goods and net profit · GAP-A03 financial-year and period locks · GAP-A04 invoice due dates · GAP-A05 input GST and net payable · GAP-A06 GSTR-1/3B reconciliation · GAP-A07 TDS and statutory dues · GAP-A08 vouchers and day book · GAP-A09 bank reconciliation · GAP-A10 opening balances and balance sheet.
+**Captured now (no longer gaps):** GAP-A01 expenses and heads (expense table, heads, approval, reversal, receipts, settings) and GAP-A02 cost of goods (append-only stock cost, weighted average per product, invoice attribution and audited corrections).
 
-Every one of these appears in the screen's Data gaps panel and in the email accounts block; none is drawn as zero.
+**Still not captured:** GAP-A03 year-end close and period locks (accounting months can be locked for cost corrections; there is no year-end close) · GAP-A04 invoice due dates · GAP-A05 input GST and net payable · GAP-A06 GSTR-1/3B reconciliation · GAP-A07 TDS and statutory dues · GAP-A08 vouchers and day book · GAP-A09 bank reconciliation · GAP-A10 opening balances and balance sheet.
+
+**Gaps raised only when the data is missing for the selected window:**
+
+| Code | Meaning | Fix link |
+|---|---|---|
+| GAP-P01 | One or more invoices are not fully costed (no attributed stock issue, uncosted units, or a partial issue) | `#/inventory/ledger` |
+| GAP-P02 | Expenses are not tracked for the whole window (window starts before `tracked_from`, or no start date is configured) | `#/expenses` |
+| GAP-P03 | A payroll month in the window is absent, draft or only partly inside the window | `#/hr` |
+
+Every remaining gap appears in the screen's Data gaps panel and in the email accounts block; none is drawn as zero. A figure that can be proved is shown even when another input is missing; gross profit is labelled partial and net profit is withheld.
 
 ## 18. Verification
 
 | Check | Result |
 |---|---|
-| Accounts report tests | 9 tests in `tests/test_accounts_reports.py`: role gate (`accounts:read` is refused), dates and state validation, ageing and trial-balance reconciliation, Overview tiles equal the report, region filter scope, state and trend sums, gap semantics, both comparison modes with a zero base, email accounts block equal to the report |
+| Accounts report tests | 9 tests in `tests/test_accounts_reports.py`: role gate (`accounts:read` is refused), dates and state validation, ageing and trial-balance reconciliation, Overview tiles equal the report, region filter scope, state and trend sums, gap semantics, both comparison modes with a zero base, email accounts block equal to the report. `test_missing_expenses_and_profit_are_gaps_not_zeroes` asserts GAP-A01/A02 are gone and GAP-P02/P03 are raised instead. |
+| Profit and loss tests | 11 tests in `tests/test_profit_loss.py`: the hand-calculated month (revenue 1,000, returns 100, COGS 400, expenses 150, payroll 200, net profit 150) with GST present and proved not to change profit; non-creditable GST added to expense cost; GAP-P01, GAP-P02 and GAP-P03 cases; CSV, reconciliation CSV, XLSX and PDF opened and parsed; server-side 403s for sales, viewer and employee; sidebar mapping and role visibility |
+| Costing tests | 18 tests in `tests/test_costing.py`: PO rate on receipt, company-wide weighted average, two invoices on one order, partial dispatch, price-only and stock-return credit notes, partial/NULL cost when no cost exists (never zero), product-row lock and concurrency, transfer/adjustment rows store NULL, audited correction with period lock (HTTP 423), dry-run backfill |
+| Expense tests | 8 tests in `tests/test_expenses.py`: heads, entries, approval threshold switch and amount, non-creditable GST flag, creator cannot decide, reversal, receipts and settings |
+| Reconciliation | The report's nine checks compare the statement with independent SQL over invoices, notes, expenses and payroll; `reconciled` is the conjunction, not a self-comparison |
 | Trial balance | Debits equal credits on every report; the equality is asserted, not hidden |
-| Email figures | `report_packs.build` and `/api/accounts/report` call the same `accounting.window()`; the test compares revenue, outstanding and output GST |
-| Browser check | Isolated helper on 127.0.0.1:8765, headless Chrome at 1440 px: Overview Accounts tiles rendered; Accounting & Finance showed eight KPI tiles, P&L gaps, both comparison modes (November incomplete vs October vs November 2025), trend, By state with a Filter button, receivables drill with Open ledger, and all ten gaps; no console errors. Desktop layout has no horizontal overflow. The helper and its temporary profile were deleted; no real email was sent. |
+| Email figures | `report_packs.build` and `/api/accounts/report` call the same `accounting.window()` and `profit_loss.statement()`; the tests compare revenue, outstanding, output GST, gross profit, expenses and net profit |
+| Browser check | **Re-run 2 Nov 2026** on a temp server (127.0.0.1:8011) against `herbanova_bcs_test`, never the production server. Admin: Overview showed live gross profit "partial, 9 of 38 invoices costed", live expenses and net profit withheld with GAP-P01; the Expenses screen rendered with heads, settings and non-creditable GST shown as cost; P&L report returned eight agreeing checks and CSV (2,743 bytes), XLSX (9,205) and PDF (32,176) downloads. Sales, viewer and employee: no Expenses menu, and `/api/expenses`, `/api/expenses/settings`, the P&L report and its export all returned 403; forcing `#/expenses` did not render the screen. |
 
 ## 19. What is skipped or needs your decision
 
 1. **Role for the MD.** There is no seeded MD login. Create an `md` role, grant `accounts:reports` (and `accounts:read` if the statements should be visible), and assign it to the MD user.
 2. **Region scope.** Only flows that carry a buyer state can be filtered. A state filter does not narrow balances or cash; the screen says so. If you need a balance split by state, outstanding must be grouped on the distributor state at invoice time, which needs a stored snapshot.
-3. **Expenses and net profit** stay "No data yet" until an expense table with heads is added (GAP-A01/A02).
-4. **Period locks** are not enforced because no lock date is stored (GAP-A03). Adding a lock is a schema and workflow decision.
+3. **Expense tracking start.** Expenses count only from `expense_settings.tracked_from`; a window that starts earlier raises GAP-P02 rather than treating untracked months as zero. Payroll likewise counts whole approved months only and is never prorated.
+4. **Year-end close.** Accounting months can be locked against cost corrections (the HR period-lock pattern, scope `accounting`), but there is no year-end close that freezes every document (GAP-A03).
 5. **Vouchers** remain receipts and payments; the party ledger is the drill-down, and it links the document rather than a voucher (GAP-A08).
-6. **CSV only.** The Accounts screen exports CSV; PDF is produced by the email pack's attachment builder.
+6. **Exports.** The Accounts screen exports CSV; the P&L report exports CSV, XLSX and PDF with its reconciliation table and notes; the email pack uses the same attachment builder.
 
 ## 20. Scheduled email reports
 

@@ -57,13 +57,19 @@ def test_missing_inputs_are_marked_and_never_invented(client, world):
     day = TODAY - timedelta(days=1)
     with SessionLocal() as db:
         data = report_packs.build(db, "daily", day, day)
-    for key in ("gross_margin", "net_profit"):
-        kpi = next(k for k in data["kpis"] if k["key"] == key)
-        assert kpi["available"] is False
-        assert kpi["display"] == "No data yet"
-        assert kpi["gap"]
+    # Cost is captured, so gross profit is printed (partial or complete);
+    # net profit still has no input for expenses and payroll.
+    gross = next(k for k in data["kpis"] if k["key"] == "gross_margin")
+    assert gross["available"] is True
+    assert gross["display"].startswith("₹")
+    assert not gross["gap"]
+    net = next(k for k in data["kpis"] if k["key"] == "net_profit")
+    assert net["available"] is False
+    assert net["display"] == "No data yet"
+    assert net["gap"]
     codes = {gap["code"] for gap in data["gaps"]}
-    assert {"GAP-A01", "GAP-A02"} <= codes
+    assert {"GAP-P02", "GAP-P03"} <= codes
+    assert not {"GAP-A01", "GAP-A02"} & codes
     assert data["accounts"]["trial_balance"]["balanced"] is True
 
 
@@ -90,7 +96,10 @@ def test_html_and_plain_text_carry_the_same_figures_and_the_test_marker(world):
     assert "Sales" in rendered["subject"]
     sales = next(k for k in data["kpis"] if k["key"] == "sales")
     assert sales["display"] in rendered["text"]
-    assert "Gross margin: No data yet" in rendered["text"]          # never invented
+    # Cost is captured now: gross profit is printed (partial while the invoice
+    # has no issue), and net profit still says No data yet rather than guessing.
+    assert "Gross profit" in rendered["text"]
+    assert "Net profit: No data yet" in rendered["text"]
     assert "cid:sales_chart" in rendered["html"]                    # inline PNG chart
     assert "The same figures are in the table below" in rendered["html"]
     assert "View full dashboard" in rendered["html"]
