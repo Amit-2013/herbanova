@@ -1714,9 +1714,12 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
     if "accounts:reports" in perms:
         # One computation shared with the Accounts report, so the Overview tile
         # and the Accounts screen can never disagree for the same dates (D-40).
-        from ..services import accounting
+        from ..services import accounting, profit_loss
 
         summary = accounting.window(db, start, end)
+        pl = profit_loss.statement(db, start, end)
+        net_available = pl["net_profit"]["available"]
+        first_gap = pl["gaps"][0] if pl["gaps"] else None
         out["accounts"] = {
             "from": start.isoformat(), "to": end.isoformat(),
             "receivable_total": summary["outstanding"]["total"],
@@ -1725,8 +1728,20 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
             "payable_due_this_week": summary["payables"]["due_this_week"],
             "cash_bank_net": summary["cash_bank_net"],
             "output_gst": summary["output_gst"]["total"],
-            "net_profit": None, "net_profit_gap": "GAP-A02",
-            "net_profit_note": "Cost of goods and expenses are not captured.",
+            "gross_profit": _money(pl["gross_profit"]["value"]),
+            "gross_profit_partial": pl["gross_profit"]["partial"],
+            "gross_profit_label": pl["gross_profit"]["label"],
+            "invoices_costed": pl["cogs"]["invoices_costed"],
+            "invoices_total": pl["cogs"]["invoices_total"],
+            "expenses": (_money(pl["expenses"]["total"])
+                         if pl["expenses"]["complete"] else None),
+            "expenses_gap": None if pl["expenses"]["complete"] else "GAP-P02",
+            "net_profit": _money(pl["net_profit"]["value"]) if net_available else None,
+            "net_profit_gap": (None if net_available else
+                               (first_gap["code"] if first_gap else "GAP-P02")),
+            "net_profit_note": ("Gross profit less expenses and payroll." if net_available
+                                else (first_gap["detail"] if first_gap else
+                                      "Cost, expenses and payroll are not all complete.")),
             "note": ("Receivables, payables and cash use the same wordings as the "
                      "Accounts screen for this window."),
         }

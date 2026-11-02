@@ -111,17 +111,22 @@ register), `accounts` (receivables, ageing, payables, GST register, trial
 balance), `alerts` (none), `custom` (the reports ticked on the schedule).
 
 Every pack that includes Accounts content also carries the Accounts summary block
-(revenue, collections, returns, output GST, receivables, payables, and the gaps
-for expenses, net profit and the balance sheet).
+(revenue, collections, returns, output GST, receivables, payables, gross profit,
+expenses, net profit and the gaps that remain). Gross profit is labelled
+"partial, X of Y invoices costed" when some invoices have no captured cost.
+Net profit appears only when every invoice is costed, expenses cover the window
+and payroll is complete; otherwise its first gap (GAP-P01/P02/P03) is shown.
 
 ### Where the figures come from
 
 `report_packs.build()` calls the same services as the screens: the dashboard's
 period helpers for sales, purchases, orders and returns; `ledger.ageing_rows()`
 for receivables; `accounting.window()` for payables, GST, cash movement and the
-trial balance; the report catalog for attached registers. It does not copy a
+trial balance; `profit_loss.statement()` for gross profit, expenses, payroll and
+net profit; the report catalog for attached registers. It does not copy a
 query. A missing input is `available: false` with a gap code and renders as
-"No data yet" — never as zero.
+"No data yet" — never as zero; a partial gross profit is still shown, clearly
+labelled.
 
 The previous period is the equally long window immediately before the pack's
 window, and last year is the same window shifted back one year. A change against
@@ -293,9 +298,9 @@ Green header with company and period → greeting and headline → KPI tiles →
 Needs attention → Comparison table (current, previous, same period last year) →
 Sales vs purchases chart and table → Receivables ageing chart and table →
 Top products / top customers / top states → Accounts summary (revenue,
-collections, returns, output GST, receivables, payables; expenses, net profit and
-balance sheet as "No data yet" with their gaps) → Attached reports table →
-dashboard button → footer.
+collections, returns, output GST, receivables, payables, gross profit, expenses
+and net profit, with a gap only where an input is missing) → Attached reports
+table → dashboard button → footer.
 
 ---
 
@@ -438,5 +443,5 @@ so the installation returns to the environment-only defaults.
 | Secure expiring download link for oversized attachments | No tokenised public dashboard exists (GAP-E05); the email names the files and points to Reports. |
 | In-process scheduler | Would duplicate sends per web worker; a separate DB-backed worker is used. |
 | Automatic retention deletion | Deleting delivery rows destroys evidence of what was sent; retention is left to the owner. |
-| Expense, cost and profit figures | Not captured (GAP-A01/A02); shown as "No data yet" with the gap code. |
+| Expense, cost and profit figures | Included when the inputs are complete. Gross profit is live and labelled partial when invoices are uncosted (GAP-P01); expenses before `tracked_from` are GAP-P02; a missing or draft payroll month is GAP-P03. Net profit is withheld until all three are complete rather than estimated. |
 | Holiday calendar maintenance | The worker reads `hr_holidays`; keeping it current is an HR task. |

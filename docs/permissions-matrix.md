@@ -4,7 +4,7 @@
 **Stage:** 3 — audit registers, refreshed after the Phase 3 verification
 **Date:** 31 October 2026; role grants and guard counts refreshed 1 November 2026
 **Sources:** `app/core/permissions.py` (`PERMISSIONS`, `BASELINE_ROLE_PERMS`), the live `roles` table (read-only query), `app/core/rbac.py`, and every `require(...)` / `require_admin(...)` / `is_admin(...)` call site under `app/api/`.
-**Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand. The 1 November refresh adds `accounts:reports` and `email:manage` to the matrices and recounts the literal guards after the HR and Accounts reporting work.
+**Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand. The 1 November refresh adds `accounts:reports` and `email:manage` to the matrices and recounts the literal guards after the HR and Accounts reporting work. The 2 November refresh adds `expense:read`/`expense:write` (46 keys, 12 groups) after the expense backend; the expense rows are still Administrator-only and the UI is Stage 3. The Stage 2 cost work adds no key: the audited PO cost correction is a second `accounts:write` route (`POST /api/accounts/costs/correction`).
 
 ## How permissions are enforced
 
@@ -32,7 +32,7 @@ Two endpoints add their own administrator checks rather than relying on `require
 | Feature availability | One on/off switch per module. The Users and rights module is locked on, so the screen that switches the others back on can never be disabled | `GET /api/features`, `PATCH /api/features/{key}` |
 | Access control | The whole catalogue grouped by module: each top-level gate, each child with the parent it needs, and the keys reserved for the Administrator | `GET /api/roles/permissions` |
 
-The editor renders all 44 keys in 12 groups and applies these rules:
+The editor renders all 46 keys in 12 groups and applies these rules:
 
 | Rule | Browser | Server |
 |---|---|---|
@@ -46,13 +46,13 @@ The editor renders all 44 keys in 12 groups and applies these rules:
 | Administrator-only rights stay with the Administrator | Inputs are locked for every role except `admin` | `validate_permissions` refuses the key on any other role; the Administrator role cannot save without them |
 | Feature switches are central | Overview shows module status read-only; only Roles & Permissions has switches | `_feature_gate` refuses the module's API prefixes and removes its permissions from the effective set; only the Administrator role may call `/api/features` |
 
-`tests/test_permission_tree.py` (11 tests) locks the catalogue, parent map and admin-only set together with the server rules; `tests/test_feature_switches.py` (10 tests) covers the module switches and the API gate. The browser was also checked: a viewer opening `#/roles` is returned to Overview with the link hidden, and the editor for the `sales` role showed 44 inputs, 12 groups, 4 disabled admin-only rights and HR children disabled because `sales` lacks `hr:read` (`docs/VERIFICATION_REPORT.md` §5).
+`tests/test_permission_tree.py` (11 tests) locks the catalogue, parent map and admin-only set together with the server rules; `tests/test_feature_switches.py` (10 tests) covers the module switches and the API gate. The browser was also checked: a viewer opening `#/roles` is returned to Overview with the link hidden, and the editor for the `sales` role showed 44 inputs, 12 groups, 4 disabled admin-only rights and HR children disabled because `sales` lacks `hr:read` (`docs/VERIFICATION_REPORT.md` §5). The 2 November refresh adds the two expense keys; the editor now renders 46 inputs, still in 12 groups, and the 4 Administrator-only rights are unchanged.
 
 ## Roles
 
 | Role | Live permissions | Origin | Intended use |
 |---|---:|---|---|
-| `admin` | 44 | baseline + seeded | Administrator. Holds the entire catalogue, including `db:reset`, `user:manage`, `approval:credit_limit`, `invoice:edit_post_billing`, `accounts:reports`, `email:manage` and `hr:payroll_approve`. |
+| `admin` | 46 | baseline + seeded | Administrator. Holds the entire catalogue, including `db:reset`, `user:manage`, `approval:credit_limit`, `invoice:edit_post_billing`, `accounts:reports`, `email:manage`, `hr:payroll_approve` and the expense keys. |
 | `sales` | 15 | baseline | Sales desk: leads, sales orders, distributors, notes, challan/e-way, own attendance, read-only accounts. |
 | `inventory` | 12 | baseline | Stores and dispatch: products, stock, purchasing receipts, dispatch, invoice movement, own attendance. |
 | `viewer` | 4 | baseline | Read-only products, stock, sales; own attendance. |
@@ -63,7 +63,7 @@ The editor renders all 44 keys in 12 groups and applies these rules:
 
 The four **baseline** roles are the frozen parity sets in `app/core/permissions.py:66-110`. The four **live only** roles exist in the development database but not in the baseline constant; users assigned to them must carry a `role_id`, because the string fallback (`ROLE_PERMS.get(user.role, set())`) would otherwise return an empty set. Verified read-only against the `roles` table on 31 October 2026.
 
-The live Administrator set matches the 44-key catalogue exactly: no catalogue key is missing and no unknown key is present.
+The live Administrator set matches the 46-key catalogue exactly: no catalogue key is missing and no unknown key is present.
 
 ## Permission catalogue and role grants
 
@@ -153,8 +153,12 @@ The live Administrator set matches the 44-key catalogue exactly: no catalogue ke
 | `accounts:read` | Y | Y |  |  |  |  |  |  |
 | `accounts:write` | Y |  |  |  |  |  |  |  |
 | `accounts:reports` | Y |  |  |  |  |  |  |  |
+| `expense:read` | Y |  |  |  |  |  |  |  |
+| `expense:write` | Y |  |  |  |  |  |  |  |
 
 `accounts:reports` gates the Accounts dashboard, the `report` and report-pack downloads and the Accounts e-mail block. It is granted only to the Administrator in the live data; `accounts:read` alone does not open them (verified live in `docs/VERIFICATION_REPORT.md` §5).
+
+`expense:read` is the parent gate for the expense screens and exports; `expense:write` is its child and covers recording an expense, reversing an approved one, uploading its receipt and editing the heads. Editing the approval switch and threshold additionally needs the Administrator role (`require_admin("expense:write")`). No non-Administrator baseline role holds either key, so the module stays closed to other staff until a role is granted them. Recording and reversal are audit events (`expense.create`, `expense.reverse`, `expense.approval`, `expense.attachment`).
 
 ### Leads
 
@@ -204,21 +208,22 @@ Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1
 | `user:manage` | 10 | Users, roles, secondary password, employee login link |
 | `accounts:read` | 7 | Outstanding, party ledgers, GST register, trial balance, receipts/payments reads |
 | `note:write` / `stock:read` / `hr:attendance_self` / `tax:read` | 6 each | Notes; stock and warehouses; own check-in/out and requests; rate master and slabs |
-| `stock:write` / `lead:write` / `print:document` / `tax:write` | 5 each | Warehouses and POs; leads; PDFs; settings and rates |
+| `stock:write` / `lead:write` / `print:document` / `tax:write` / `expense:read` / `expense:write` | 5 each | Warehouses and POs; leads; PDFs; settings and rates; expense reads and writes |
 | `audit:read` | 4 | Audit trail and activity feed |
 | `lead:read` / `sales:write` / `supplier:read` | 3 each | Leads; sales orders; suppliers |
 | `accounts:reports` | 2 | Accounts dashboard and report export |
+| `accounts:write` | 2 | Receipts/payments and the audited PO cost correction |
 | `email:manage` | 2 | Scheduled recipients/schedules and delivery administration |
 | `employee:read` / `employee:write` / `approval:read` / `invoice:write` / `invoice:cancel` / `hr:attendance_manage` / `hr:payroll_approve` / `hr:reports` / `distributor:write` / `product:read` / `product:write` / `supplier:write` | 2 each | Respective masters, approvals and HR actions |
-| `accounts:write` / `db:reset` / `credit:manage` / `hr:confidential` / `lead:assign` / `report:export` / `dispatch:write` / `approval:decide` / `supplier:bank` | 1 each | Receipts/payments; reset; credit limits; confidential reads (most use `_can` inside); reassignment; export; dispatch; decisions; bank-change request |
+| `db:reset` / `credit:manage` / `hr:confidential` / `lead:assign` / `report:export` / `dispatch:write` / `approval:decide` / `supplier:bank` | 1 each | Reset; credit limits; confidential reads (most use `_can` inside); reassignment; export; dispatch; decisions; bank-change request |
 
-The catalogue has **44** keys. `accounts:reports` and `email:manage` are Administrator-only in the live data; no baseline role carries them.
+The catalogue has **46** keys. `accounts:reports`, `email:manage` and the two expense keys are Administrator-only in the live data; no non-Administrator baseline role carries them.
 
 ## Verification status
 
 | Claim | Status | Evidence |
 |---|---|---|
-| 44 permission keys are defined | VERIFIED | `PERMISSIONS` count, `app/core/permissions.py` |
+| 46 permission keys are defined | VERIFIED | `PERMISSIONS` count, `app/core/permissions.py` |
 | Live Administrator set equals the catalogue | VERIFIED | read-only `roles` query, 1 November 2026 |
 | Role grants shown above match the live database | VERIFIED | same query; regenerated, not hand-typed |
 | `require` / `require_admin` / forced-password / revocation semantics | VERIFIED (code) | `app/core/rbac.py` |

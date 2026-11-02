@@ -32,7 +32,8 @@ from ..models.tax import CompanyProfile
 from ..api.dashboard import (_period_stats as period_stats,
                              _purchases_by_day as purchases_by_day,
                              _sales_by_day as sales_by_day)
-from ..services import accounting, capacity, exports, ledger, reports, reports_pdf
+from ..services import (accounting, capacity, exports, ledger, profit_loss, reports,
+                        reports_pdf)
 
 ZERO = Decimal("0.00")
 IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -127,6 +128,39 @@ def _window_label(start: date, end: date) -> str:
 
 def _money(value) -> str:
     return str(Decimal(value or 0).quantize(Decimal("0.01")))
+
+
+def _profit_data(statement: dict | None) -> dict | None:
+    """The profit lines an email or attachment can print, already formatted."""
+    if not statement:
+        return None
+
+    def s(value):
+        return _money(value) if isinstance(value, Decimal) else value
+
+    return {
+        "revenue": s(statement["revenue"]["taxable"]),
+        "returns": s(statement["returns"]["taxable"]),
+        "net_revenue": s(statement["net_revenue"]),
+        "cogs": s(statement["cogs"]["value"]),
+        "gross_profit": s(statement["gross_profit"]["value"]),
+        "gross_profit_label": statement["gross_profit"]["label"],
+        "gross_profit_partial": statement["gross_profit"]["partial"],
+        "invoices_costed": statement["cogs"]["invoices_costed"],
+        "invoices_total": statement["cogs"]["invoices_total"],
+        "expenses": (s(statement["expenses"]["total"])
+                     if statement["expenses"]["complete"] else None),
+        "expenses_complete": statement["expenses"]["complete"],
+        "expenses_tracked_from": statement["expenses"]["tracked_from"],
+        "payroll": (s(statement["payroll"]["total"])
+                    if statement["payroll"]["complete"] else None),
+        "payroll_complete": statement["payroll"]["complete"],
+        "net_profit": (s(statement["net_profit"]["value"])
+                       if statement["net_profit"]["available"] else None),
+        "net_profit_available": statement["net_profit"]["available"],
+        "gaps": statement["gaps"],
+        "notes": statement["notes"],
+    }
 
 
 def change(current, previous) -> float | None:
@@ -333,6 +367,9 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
 
     accounts = (accounting.window(db, start, end)
                 if include_accounts and meta["accounts"] else None)
+    profit = profit_loss.statement(db, start, end) if accounts else None
+    prev_profit = profit_loss.statement(db, *previous) if profit else None
+    year_profit = profit_loss.statement(db, *last_year) if profit else None
     ageing_window = accounts["outstanding"] if accounts else _ageing(db, end)
     position = _attendance(db)
 
@@ -341,6 +378,11 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
     series = _weekly_buckets(start, end, sales_days, purchase_days)
     ageing = ageing_window
     overdue_60 = ageing["overdue_60"] if "overdue_60" in ageing else _overdue_60(db, end)
+
+    gross = profit["gross_profit"] if profit else None
+    expense = profit["expenses"] if profit else None
+    net = profit["net_profit"] if profit else None
+    first_gap = (profit["gaps"][0]["code"] if profit and profit["gaps"] else "GAP-P01")
 
     kpis = [
         _kpi("sales", "Sales", stats["sales"], _inr(stats["sales"]), prev_stats["sales"],
@@ -356,10 +398,26 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
              prev_stats["returns"], good_when_up=False, note="Issued credit notes."),
         _kpi("outstanding", "Receivables outstanding", ageing["total"],
              _inr(ageing["total"]), None, note="As at the window end."),
-        _kpi("gross_margin", "Gross margin", None, "No data yet", None,
-             gap="GAP-A02", note="Cost of goods is not captured."),
-        _kpi("net_profit", "Net profit", None, "No data yet", None,
-             gap="GAP-A02", note="Cost and expenses are not captured."),
+        _kpi("gross_margin", "Gross profit",
+             float(gross["value"]) if gross else None,
+             _inr(gross["value"]) if gross else "No data yet", None,
+             note=(gross["label"] + "; revenue less returns and cost of goods."
+                   if gross else "Cost of goods is not captured."),
+             gap=None if gross else "GAP-P01"),
+        _kpi("expenses", "Expenses",
+             float(expense["total"]) if expense and expense["complete"] else None,
+             _inr(expense["total"]) if expense and expense["complete"] else "No data yet",
+             None, note=("Approved entries; non-creditable GST is cost."
+                         if expense and expense["complete"] else
+                         "Expenses are not tracked for the whole window."),
+             gap=None if expense and expense["complete"] else "GAP-P02"),
+        _kpi("net_profit", "Net profit",
+             float(net["value"]) if net and net["available"] else None,
+             _inr(net["value"]) if net and net["available"] else "No data yet", None,
+             note=("Gross profit less expenses and payroll."
+                   if net and net["available"] else
+                   "Not shown until cost, expenses and payroll are complete."),
+             gap=None if net and net["available"] else first_gap),
     ]
 
     comparison = []
@@ -381,11 +439,39 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
                            "last_year_change": change(cur, year) if year is not None else None,
                            "direction": _direction(change(cur, prev), good_up)
                            if prev is not None else _direction(None)})
-    if accounts:
-        comparison.append({"key": "gross_margin", "label": "Gross margin", "current": None,
-                           "previous": None, "last_year": None, "gap": "GAP-A02"})
-        comparison.append({"key": "net_profit", "label": "Net profit", "current": None,
-                           "previous": None, "last_year": None, "gap": "GAP-A02"})
+    if profit:
+        def profit_value(statement, key):
+            if statement is None:
+                return None
+            if key == "expenses":
+                return (float(statement["expenses"]["total"])
+                        if statement["expenses"]["complete"] else None)
+            if key == "net_profit":
+                return (float(statement["net_profit"]["value"])
+                        if statement["net_profit"]["available"] else None)
+            return float(statement["gross_profit"]["value"])
+
+        for key, label in (("gross_profit", "Gross profit"),
+                           ("expenses", "Expenses"),
+                           ("net_profit", "Net profit")):
+            cur = profit_value(profit, key)
+            prev = profit_value(prev_profit, key)
+            year = profit_value(year_profit, key)
+            comparison.append({
+                "key": key, "label": label,
+                "current": _money(cur) if cur is not None else None,
+                "previous": _money(prev) if prev is not None else None,
+                "last_year": _money(year) if year is not None else None,
+                "previous_change": (change(cur, prev)
+                                    if cur is not None and prev is not None else None),
+                "last_year_change": (change(cur, year)
+                                     if cur is not None and year is not None else None),
+                "direction": (_direction(change(cur, prev))
+                              if cur is not None and prev is not None
+                              else _direction(None)),
+                "gap": None if cur is not None else (
+                    "GAP-P02" if key == "expenses" else first_gap),
+            })
 
     ageing_rows = [
         {"key": b["key"], "label": b["label"], "total": b["total"], "count": b["count"],
@@ -406,18 +492,19 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
         "ageing": {**ageing, "buckets": ageing_rows},
         "top_products": top_products, "top_customers": _top_customers(db, start, end),
         "states": _states(db, start, end), "accounts": accounts,
+        "profit": _profit_data(profit),
         "credit": accounts["credit"] if accounts else None,
         "position": position,
         "unavailable": accounting.UNAVAILABLE if include_accounts else [],
-        "notes": (accounts["notes"] if accounts else [
-            "Sales are tax-inclusive; purchases are valued at order cost, exclusive of tax.",
-            "Gross margin and net profit cannot be computed: cost and expenses are not captured.",
-        ]),
-        "gaps": (accounts["gaps"] if accounts else [
-            {"code": "GAP-A01", "label": "Expenses", "detail": "No expense record exists."},
-            {"code": "GAP-A02", "label": "Cost and profit",
-             "detail": "Cost of goods and expenses are not captured."},
-        ]),
+        "notes": ((accounts["notes"] + (profit["notes"] if profit else []))
+                  if accounts else [
+                      "Sales are tax-inclusive; purchases are valued at order cost, "
+                      "exclusive of tax.",
+                      "Profit and loss is not included because the Accounts section "
+                      "is switched off for this pack.",
+                  ]),
+        "gaps": ((accounts["gaps"] + (profit["gaps"] if profit else []))
+                 if accounts else []),
         "custom_reports": custom_reports or [],
         "attachments": [],
         "base_url": base_url or settings.app_base_url,
@@ -506,6 +593,13 @@ def _summary_rep(data: dict) -> dict:
                        "rows": attention, "totals": None})
     if data.get("accounts"):
         acc = data["accounts"]
+        profit = data.get("profit") or {}
+        gaps = profit.get("gaps") or []
+        first_gap = gaps[0]["code"] if gaps else "GAP-P01"
+
+        def shown(key):
+            return profit.get(key) if profit.get(key) is not None else "No data yet"
+
         tables.append({"key": "accounts", "title": "Accounts summary",
                        "columns": [{"key": "metric", "label": "Metric", "type": "text"},
                                    {"key": "value", "label": "Value", "type": "text"},
@@ -517,25 +611,55 @@ def _summary_rep(data: dict) -> dict:
                            {"metric": "Output GST", "value": acc["output_gst"]["total"], "gap": ""},
                            {"metric": "Receivables outstanding", "value": acc["outstanding"]["total"], "gap": ""},
                            {"metric": "Payables outstanding", "value": acc["payables"]["total"], "gap": ""},
-                           {"metric": "Expenses", "value": "No data yet", "gap": "GAP-A01"},
-                           {"metric": "Net profit", "value": "No data yet", "gap": "GAP-A02"},
+                           {"metric": profit.get("gross_profit_label", "Gross profit"),
+                            "value": shown("gross_profit"),
+                            "gap": "" if profit.get("gross_profit") is not None else "GAP-P01"},
+                           {"metric": "Expenses", "value": shown("expenses"),
+                            "gap": "" if profit.get("expenses") is not None else "GAP-P02"},
+                           {"metric": "Payroll (gross)", "value": shown("payroll"),
+                            "gap": "" if profit.get("payroll") is not None else "GAP-P03"},
+                           {"metric": "Net profit", "value": shown("net_profit"),
+                            "gap": ("" if profit.get("net_profit") is not None
+                                    else first_gap)},
                            {"metric": "Balance sheet", "value": "No data yet", "gap": "GAP-A10"},
                        ], "totals": None})
+
+    checks = []
+    if data.get("accounts"):
+        checks.append({"name": "Trial balance debits equal credits",
+                       "report_label": "Debits",
+                       "report_value": data["accounts"]["trial_balance"]["debit_total"],
+                       "record_label": "Credits",
+                       "record_value": data["accounts"]["trial_balance"]["credit_total"],
+                       "unit": "amount",
+                       "ok": bool(data["accounts"]["trial_balance"]["balanced"])})
+    profit = data.get("profit")
+    if profit:
+        gross = Decimal(profit["gross_profit"])
+        expected_gross = Decimal(profit["net_revenue"]) - Decimal(profit["cogs"])
+        checks.append({"name": "Gross profit arithmetic",
+                       "report_label": "Gross profit", "report_value": gross,
+                       "record_label": "Net revenue less cost of goods",
+                       "record_value": expected_gross, "unit": "amount",
+                       "ok": gross == expected_gross})
+        if profit.get("net_profit_available"):
+            net = Decimal(profit["net_profit"])
+            expected_net = (gross - Decimal(profit["expenses"] or 0)
+                            - Decimal(profit["payroll"] or 0))
+            checks.append({"name": "Net profit arithmetic",
+                           "report_label": "Net profit", "report_value": net,
+                           "record_label": "Gross profit less expenses and payroll",
+                           "record_value": expected_net, "unit": "amount",
+                           "ok": net == expected_net})
     return {"title": f"{data['company']} — {data['label']}",
             "kind": "period", "period_from": date.fromisoformat(data["from"]),
             "period_to": date.fromisoformat(data["to"]),
             "as_at": date.fromisoformat(data["to"]),
-            "checks": [{"name": "Trial balance debits equal credits",
-                        "report_label": "Debits",
-                        "report_value": data["accounts"]["trial_balance"]["debit_total"],
-                        "record_label": "Credits",
-                        "record_value": data["accounts"]["trial_balance"]["credit_total"],
-                        "unit": "amount",
-                        "ok": bool(data["accounts"]["trial_balance"]["balanced"])}]
-            if data.get("accounts") else [],
+            "checks": checks,
             "tables": tables,
             "limitations": data["notes"] + [
-                "No financial-year or period lock is configured (GAP-A03)."]}
+                "Accounting months can be locked against cost corrections; there is "
+                "no year-end close (GAP-A03)."]}
 
 
 def build_attachments(db: Session, data: dict, pack_key: str) -> list[dict]:

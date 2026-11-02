@@ -3375,11 +3375,11 @@ def payroll_reconciliation(period_id: int, db: Session = Depends(get_db),
             "bank_file": {"rows": len(rows), "skipped": len(skipped),
                           "total": _m(bank_total), "held_back": _m(held_total)},
             "gaps": gaps,
-            "accounts_note": "Payroll is not posted to an accounts ledger: the project has "
-                             "no expense or journal table (GAP-A01 and GAP-A08 in the "
-                             "Accounts module). The bank file total is the figure Accounts "
-                             "can match against the bank statement; no ledger balance "
-                             "exists to reconcile it to."}
+            "accounts_note": "Payroll is carried into the profit and loss as gross salary "
+                             "for this approved period, so it is never also recorded as an "
+                             "expense. There is no journal or voucher posting (GAP-A08). "
+                             "The bank file total is the figure Accounts can match against "
+                             "the bank statement; no ledger balance exists to reconcile it to."}
 
 
 @router.get("/me/payslips")

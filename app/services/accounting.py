@@ -1,11 +1,12 @@
 """Accounts reporting: what the documents can prove, and what they cannot.
 
-There is no chart of accounts, no expense table, no purchase-side tax, no due
-date on an invoice and no period lock. This module therefore computes revenue,
-collections, returns, outstanding and ageing, payables, output GST, credit use,
-cash/bank movement and the derived trial balance. Everything else is returned as
-an unavailable metric with a gap code, so a screen or an email can say
-"No data yet" instead of inventing a figure.
+There is no chart of accounts, no purchase-side tax, no due date on an invoice
+and no opening balance. This module therefore computes revenue, collections,
+returns, outstanding and ageing, payables, output GST, credit use, cash/bank
+movement and the derived trial balance. Profit and loss is built by
+`profit_loss.statement` from captured costs, approved expenses and payroll.
+Everything else is returned as an unavailable metric with a gap code, so a
+screen or an email can say "No data yet" instead of inventing a figure.
 
 Payables are measured as at a date: the cost of goods received on or before it,
 minus payments made on or before it. A supplier's `payment_terms_days` is used
@@ -26,18 +27,15 @@ from ..models.accounts import Payment
 from ..models.core import (CreditNote, DebitNote, Distributor, Invoice, PurchaseOrder,
                            PurchaseOrderLine, SalesOrder)
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
-from . import ledger
+from . import ledger, profit_loss
 from .sales import EXPOSURE_STATUSES
 
 ZERO = Decimal("0.00")
 
 GAPS = (
-    ("GAP-A01", "Expenses and expense heads",
-     "No expense table or head exists, so expenses and an expense-by-head breakdown cannot be reported."),
-    ("GAP-A02", "Cost of goods, gross profit and net profit",
-     "Stock and invoice lines carry no cost, and expenses are not captured. Gross and net profit are not computed."),
-    ("GAP-A03", "Financial-year and period locks",
-     "No lock date is stored on any document. Every dated record is reported as recorded; no period is treated as locked."),
+    ("GAP-A03", "Financial-year close",
+     "Accounting months can be locked for cost corrections, and are refused when "
+     "locked, but there is no year-end close that freezes every document."),
     ("GAP-A04", "Invoice due dates",
      "An invoice carries no due date. Payables due dates are estimated from the supplier's current payment terms and the latest receipt."),
     ("GAP-A05", "Input GST and net GST payable",
@@ -55,9 +53,6 @@ GAPS = (
 )
 
 UNAVAILABLE = (
-    ("expenses", "Expenses", "GAP-A01", "No expense record exists."),
-    ("gross_profit", "Gross profit", "GAP-A02", "Cost of goods is not captured."),
-    ("net_profit", "Net profit", "GAP-A02", "Cost and expenses are not captured."),
     ("balance_sheet", "Balance sheet", "GAP-A10", "Opening balances and assets are not captured."),
     ("input_gst", "Input GST / net payable", "GAP-A05", "Purchase-side tax is not captured."),
     ("tds", "TDS and statutory dues", "GAP-A07", "No TDS record exists."),
@@ -221,7 +216,8 @@ def window(db: Session, start: date, end: date, as_of: date | None = None,
             "Payables are the cost of goods received on or before the date minus payments made by then.",
             "Cash and bank is the net movement recorded in the window; opening balances are not captured (GAP-A10).",
             "Output GST only: purchase-side tax is not captured (GAP-A05).",
-            "No financial-year or period lock is configured (GAP-A03).",
+            "Accounting months can be locked against cost corrections; there is no "
+            "year-end close (GAP-A03).",
         ] + ([f"Region filter: {state_name(state) or state}. It narrows revenue, returns, "
               "output GST and distributor receipts; balances and cash stay company-wide."]
              if state else []),
@@ -471,21 +467,86 @@ def report(db: Session, start: date, end: date, state: str | None = None) -> dic
     out["trend"] = monthly_series(db, end.replace(day=1))
     out["states"] = state_breakdown(db, start, end)
     out["receivables_by_distributor"] = receivables_by_distributor(db)
+    pl = profit_loss.statement(db, start, end)
+    net_available = pl["net_profit"]["available"]
+    first_gap = pl["gaps"][0] if pl["gaps"] else None
+
+    rows = [
+        {"key": "revenue", "label": "Revenue (taxable)",
+         "value": _s(pl["revenue"]["taxable"]), "available": True},
+        {"key": "returns", "label": "Less returns (taxable)",
+         "value": _s(pl["returns"]["taxable"]), "available": True,
+         "good_when_up": False},
+        {"key": "debit_notes", "label": "Add debit notes (taxable)",
+         "value": _s(pl["revenue"]["debit_notes"]), "available": True},
+        {"key": "net_revenue", "label": "Net revenue",
+         "value": _s(pl["net_revenue"]), "available": True},
+        {"key": "cogs", "label": "Cost of goods sold",
+         "value": _s(pl["cogs"]["value"]), "available": True,
+         "note": (f"{pl['cogs']['invoices_costed']} of "
+                  f"{pl['cogs']['invoices_total']} invoices fully costed.")},
+        {"key": "gross_profit", "label": pl["gross_profit"]["label"],
+         "value": _s(pl["gross_profit"]["value"]), "available": True,
+         "partial": pl["gross_profit"]["partial"],
+         "note": ("Complete for every invoice in the window."
+                  if not pl["gross_profit"]["partial"] else
+                  "Costed invoices only; the rest are named in the gaps.")},
+    ]
+    for head in pl["expenses"]["by_head"]:
+        rows.append({"key": f"expense_head_{head['head_id']}",
+                     "label": f"Expense · {head['head']}",
+                     "value": _s(head["amount"]), "available": True,
+                     "note": (f"{head['count']} entry(s); non-creditable GST "
+                              f"{_s(head['gst_noncreditable'])} included.")})
+    if pl["expenses"]["complete"]:
+        rows.append({"key": "expenses", "label": "Total expenses",
+                     "value": _s(pl["expenses"]["total"]), "available": True,
+                     "note": "Approved, non-reversed entries; non-creditable GST included."})
+    else:
+        rows.append({"key": "expenses", "label": "Total expenses", "value": None,
+                     "available": False, "gap": "GAP-P02",
+                     "note": "Expenses are not tracked for the whole window.",
+                     "fix": "#/expenses"})
+    if pl["payroll"]["complete"]:
+        rows.append({"key": "payroll", "label": "Payroll (gross)",
+                     "value": _s(pl["payroll"]["total"]), "available": True,
+                     "note": "Gross salary; employer contributions are not included."})
+    else:
+        rows.append({"key": "payroll", "label": "Payroll (gross)", "value": None,
+                     "available": False, "gap": "GAP-P03",
+                     "note": "A payroll month is missing or only partly in the window.",
+                     "fix": "#/hr"})
+    if net_available:
+        rows.append({"key": "net_profit", "label": "Net profit",
+                     "value": _s(pl["net_profit"]["value"]), "available": True})
+    else:
+        rows.append({"key": "net_profit", "label": "Net profit", "value": None,
+                     "available": False, "gap": first_gap["code"] if first_gap else "GAP-P02",
+                     "note": (first_gap["detail"] if first_gap else
+                              "Cost, expenses and payroll are not all complete."),
+                     "fix": first_gap["fix"] if first_gap else "#/accounts"})
+
     out["profit_and_loss"] = {
-        "rows": [
-            {"key": "revenue", "label": "Revenue (taxable)", "value": out["revenue"]["taxable"],
-             "available": True},
-            {"key": "returns", "label": "Less returns", "value": out["returns"]["value"],
-             "available": True, "good_when_up": False},
-            {"key": "collections", "label": "Collected in the window",
-             "value": out["collections"]["total"], "available": True},
-            {"key": "expenses", "label": "Expenses", "value": None, "available": False,
-             "gap": "GAP-A01", "note": "No expense record or expense head exists."},
-            {"key": "net_profit", "label": "Net profit", "value": None, "available": False,
-             "gap": "GAP-A02", "note": "Cost of goods and expenses are not captured."},
-        ],
-        "note": ("Revenue and returns come from issued documents. Expenses and net "
-                 "profit cannot be shown until they are captured; no figure is inferred."),
+        "rows": rows,
+        "note": ("Revenue and returns are taxable value. Cost of goods comes from the "
+                 "captured stock ledger, expenses from approved entries and payroll "
+                 "from approved monthly periods. GST never changes profit."),
+        "gaps": pl["gaps"],
+        "notes": pl["notes"],
+        "statement": {
+            "from": pl["from"], "to": pl["to"],
+            "net_revenue": _s(pl["net_revenue"]),
+            "cogs": {k: (_s(v) if isinstance(v, Decimal) else v)
+                     for k, v in pl["cogs"].items()},
+            "gross_profit": {k: (_s(v) if isinstance(v, Decimal) else v)
+                             for k, v in pl["gross_profit"].items()},
+            "expenses": {k: (_s(v) if isinstance(v, Decimal) else v)
+                         for k, v in pl["expenses"].items() if k != "by_head"},
+            "payroll": {k: (_s(v) if isinstance(v, Decimal) else v)
+                        for k, v in pl["payroll"].items() if k not in ("periods",)},
+            "net_profit": {k: (_s(v) if isinstance(v, Decimal) else v)
+                           for k, v in pl["net_profit"].items()},
+        },
     }
     out["cards"] = [
         {"key": "revenue", "label": "Revenue", "value": out["revenue"]["taxable"],
@@ -505,9 +566,33 @@ def report(db: Session, start: date, end: date, state: str | None = None) -> dic
          "href": "#/accounts", "note": "Output only; input tax is not captured (GAP-A05)."},
         {"key": "cash_bank", "label": "Cash and bank (net)", "value": out["cash_bank_net"],
          "href": "#/accounts", "note": "Receipts minus payments in the window."},
+        {"key": "expenses", "label": "Expenses",
+         "value": (_s(pl["expenses"]["total"]) if pl["expenses"]["complete"] else None),
+         "href": "#/expenses", "available": pl["expenses"]["complete"],
+         "gap": None if pl["expenses"]["complete"] else "GAP-P02",
+         "note": ("Approved entries in the window; non-creditable GST is cost."
+                  if pl["expenses"]["complete"] else
+                  "Expenses are not tracked for the whole window.")},
+        {"key": "net_profit", "label": "Net profit",
+         "value": (_s(pl["net_profit"]["value"]) if net_available else None),
+         "href": "#/accounts", "available": net_available,
+         "gap": None if net_available else (first_gap["code"] if first_gap else "GAP-P02"),
+         "note": ("Gross profit less expenses and payroll."
+                  if net_available else
+                  (first_gap["detail"] if first_gap else
+                   "Cost, expenses and payroll are not all complete."))},
     ]
-    out["net_profit"] = {"available": False, "value": None, "gap": "GAP-A02",
-                         "note": "Cost of goods and expenses are not captured."}
+    out["net_profit"] = {
+        "available": net_available,
+        "value": _s(pl["net_profit"]["value"]) if net_available else None,
+        "gap": None if net_available else (first_gap["code"] if first_gap else "GAP-P02"),
+        "note": ("Gross profit less expenses and payroll." if net_available else
+                 (first_gap["detail"] if first_gap else
+                  "Cost, expenses and payroll are not all complete.")),
+        "gross_partial": pl["gross_profit"]["partial"],
+        "invoices_costed": pl["cogs"]["invoices_costed"],
+        "invoices_total": pl["cogs"]["invoices_total"],
+    }
     return out
 
 
@@ -516,15 +601,20 @@ def compare(db: Session, mode: str, first: date, today: date) -> dict:
     from ..api.dashboard import _compare_windows, _shift_month  # same window maths
 
     windows = _compare_windows(mode, first, today)
-    summaries = {}
+    summaries, statements = {}, {}
     for name in ("current", "previous", "last_year"):
         w = windows[name]
         start, end = date.fromisoformat(w["from"]), date.fromisoformat(w["to"])
-        summaries[name] = window(db, start, end) if start <= end else None
+        if start <= end:
+            summaries[name] = window(db, start, end)
+            statements[name] = profit_loss.statement(db, start, end)
+        else:
+            summaries[name] = None
+            statements[name] = None
 
     def metric(key, label, unit, read, note=""):
-        values = [read(summaries[n]) if summaries[n] else None for n in
-                  ("current", "previous", "last_year")]
+        values = [read(summaries[n], statements[n]) if summaries[n] else None
+                  for n in ("current", "previous", "last_year")]
         return {"key": key, "label": label, "unit": unit,
                 "current": values[0], "previous": values[1], "last_year": values[2],
                 "previous_change": _change(values[0], values[1])
@@ -533,42 +623,71 @@ def compare(db: Session, mode: str, first: date, today: date) -> dict:
                 if values[0] is not None and values[2] is not None else None,
                 "available": values[0] is not None, "note": note}
 
+    def pl_value(reader):
+        def read(_summary, statement):
+            if statement is None:
+                return None
+            value = reader(statement)
+            return float(value) if value is not None else None
+        return read
+
     metrics = [
         metric("revenue", "Revenue (taxable)", "amount",
-               lambda s: s["revenue"]["taxable"], "Issued invoices, before GST."),
+               lambda s, st: s["revenue"]["taxable"], "Issued invoices, before GST."),
         metric("invoiced", "Invoiced (with GST)", "amount",
-               lambda s: s["revenue"]["gross"]),
+               lambda s, st: s["revenue"]["gross"]),
         metric("collections", "Collections", "amount",
-               lambda s: s["collections"]["total"], "Receipts dated in the window."),
-        metric("returns", "Returns", "amount", lambda s: s["returns"]["value"],
+               lambda s, st: s["collections"]["total"], "Receipts dated in the window."),
+        metric("returns", "Returns", "amount", lambda s, st: s["returns"]["value"],
                "Issued credit notes."),
         metric("output_gst", "Output GST", "amount",
-               lambda s: s["output_gst"]["total"], "Output only; input tax is not captured."),
+               lambda s, st: s["output_gst"]["total"],
+               "Output only; input tax is not captured."),
         metric("outstanding", "Receivables outstanding", "amount",
-               lambda s: s["outstanding"]["total"], "As at the window end."),
+               lambda s, st: s["outstanding"]["total"], "As at the window end."),
         metric("overdue_60", "Receivables over 60 days", "amount",
-               lambda s: s["outstanding"]["overdue_60"], "As at the window end."),
+               lambda s, st: s["outstanding"]["overdue_60"], "As at the window end."),
         metric("payables", "Payables outstanding", "amount",
-               lambda s: s["payables"]["total"],
+               lambda s, st: s["payables"]["total"],
                "As at the window end, estimated due dates."),
         metric("cash_bank", "Cash and bank (net movement)", "amount",
-               lambda s: s["cash_bank_net"], "Receipts minus payments in the window."),
-        {"key": "expenses", "label": "Expenses", "unit": "amount",
-         "current": None, "previous": None, "last_year": None,
-         "previous_change": None, "last_year_change": None,
-         "available": False, "gap": "GAP-A01",
-         "note": "No expense record or expense head exists, so expenses cannot be compared."},
-        {"key": "net_profit", "label": "Net profit", "unit": "amount",
-         "current": None, "previous": None, "last_year": None,
-         "previous_change": None, "last_year_change": None,
-         "available": False, "gap": "GAP-A02",
-         "note": "Cost of goods and expenses are not captured."},
+               lambda s, st: s["cash_bank_net"], "Receipts minus payments in the window."),
+        metric("gross_profit", "Gross profit", "amount",
+               pl_value(lambda st: st["gross_profit"]["value"]),
+               "Revenue less returns and cost of goods; partial when invoices are uncosted."),
+        metric("expenses", "Expenses", "amount",
+               pl_value(lambda st: st["expenses"]["total"]
+                        if st["expenses"]["complete"] else None),
+               "Approved entries in the window; non-creditable GST included."),
+        metric("payroll", "Payroll (gross)", "amount",
+               pl_value(lambda st: st["payroll"]["total"]
+                        if st["payroll"]["complete"] else None),
+               "Gross salary of approved, processed or paid periods."),
+        metric("net_profit", "Net profit", "amount",
+               pl_value(lambda st: st["net_profit"]["value"]),
+               "Gross profit less expenses and payroll."),
     ]
     month_state = windows["state"]
     if month_state == "future":
         for m in metrics:
             m.update(current=None, previous=None, last_year=None,
                      previous_change=None, last_year_change=None, available=False)
+    for m in metrics:
+        if m["available"]:
+            continue
+        if m["key"] == "expenses":
+            m["gap"] = "GAP-P02"
+            m["note"] = ("Expenses are not tracked for the whole window; "
+                         "no figure is estimated.")
+        elif m["key"] in ("payroll", "net_profit"):
+            current = statements.get("current")
+            m["gap"] = (current["gaps"][0]["code"]
+                        if current and current["gaps"] else "GAP-P02")
+            m["note"] = ("The statement is incomplete; no figure is estimated.")
+        if m["key"] == "gross_profit" and statements.get("current"):
+            st = statements["current"]["gross_profit"]
+            if st["partial"]:
+                m["note"] = st["label"]
     label = (f"{first.strftime('%B %Y')}"
              + (" (current month, incomplete)" if month_state == "current" else "")
              + (" (not started)" if month_state == "future" else ""))
@@ -588,7 +707,8 @@ def compare(db: Session, mode: str, first: date, today: date) -> dict:
         "notes": [
             "Snapshot figures (outstanding, payables) are as at each window's last day.",
             "Flows cover each window exactly. A comparison against zero has no percentage.",
-            "No financial-year or period lock is configured (GAP-A03).",
+            "Profit lines use captured costs, approved expenses and approved payroll; "
+            "a gap is shown where any of them is incomplete.",
         ],
     }
 

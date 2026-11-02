@@ -126,6 +126,11 @@ def _put(ws, row, col, v, typ, bold=False):
 
 def _sheet_name(wb, title: str) -> str:
     base = re.sub(r"[\[\]\*\?/\\:]", "", title)[:28] or "Sheet"
+    # The exporter adds its own Reconciliation and Notes sheets. A report table
+    # with the same title (the P&L's reconciliation table) must not claim those
+    # names, or the reader opens the wrong sheet.
+    if base in ("Reconciliation", "Notes"):
+        base = f"{base} (report)"
     name, n = base, 2
     while name in wb.sheetnames:
         name, n = f"{base} {n}", n + 1

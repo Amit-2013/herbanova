@@ -195,6 +195,12 @@ def _accounts(data: dict) -> str:
     acc = data.get("accounts")
     if not acc:
         return ""
+    profit = data.get("profit") or {}
+    gaps = profit.get("gaps") or []
+    first_gap = gaps[0]["code"] if gaps else "GAP-P01"
+    gross_ok = profit.get("gross_profit") is not None
+    expenses_ok = profit.get("expenses") is not None
+    net_ok = profit.get("net_profit") is not None
     tiles = [
         {"key": "revenue", "static": True, "label": "Revenue (taxable)", "display": inr(acc["revenue"]["taxable"]),
          "available": True, "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
@@ -214,12 +220,26 @@ def _accounts(data: dict) -> str:
         {"key": "cash", "static": True, "label": "Cash and bank (net movement)", "display": inr(acc["cash_bank_net"]),
          "available": True, "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
          "gap": None, "note": "No opening balance is captured (GAP-A10)."},
-        {"key": "expenses", "static": True, "label": "Expenses", "display": "No data yet", "available": False,
-         "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
-         "gap": "GAP-A01", "note": "No expense record exists."},
-        {"key": "net_profit", "static": True, "label": "Net profit", "display": "No data yet", "available": False,
-         "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
-         "gap": "GAP-A02", "note": "Cost and expenses are not captured."},
+        {"key": "gross_profit", "static": True, "label": "Gross profit",
+         "display": inr(profit.get("gross_profit")) if gross_ok else "No data yet",
+         "available": gross_ok, "change": None,
+         "direction": {"arrow": "", "word": "", "tone": "flat"},
+         "gap": None if gross_ok else "GAP-P01",
+         "note": profit.get("gross_profit_label") or "Cost of goods is not captured."},
+        {"key": "expenses", "static": True, "label": "Expenses",
+         "display": inr(profit.get("expenses")) if expenses_ok else "No data yet",
+         "available": expenses_ok, "change": None,
+         "direction": {"arrow": "", "word": "", "tone": "flat"},
+         "gap": None if expenses_ok else "GAP-P02",
+         "note": ("Approved entries; non-creditable GST is cost." if expenses_ok
+                  else "Expenses are not tracked for the whole window.")},
+        {"key": "net_profit", "static": True, "label": "Net profit",
+         "display": inr(profit.get("net_profit")) if net_ok else "No data yet",
+         "available": net_ok, "change": None,
+         "direction": {"arrow": "", "word": "", "tone": "flat"},
+         "gap": None if net_ok else first_gap,
+         "note": ("Gross profit less expenses and payroll." if net_ok
+                  else "Not shown until cost, expenses and payroll are complete.")},
     ]
     tb = acc["trial_balance"]
     check = ("Debits equal credits" if tb["balanced"] else
@@ -231,8 +251,8 @@ def _accounts(data: dict) -> str:
         f'<div style="padding:22px 28px">'
         f'<h2 style="margin:0 0 6px;font-size:16px;color:{INK}">Accounts summary</h2>'
         f'<p style="margin:0 0 12px;font-size:13px;color:{MUTED}">Period {_e(data["period_label"])}. '
-        f'Outstanding and payables are as at {_e(acc["as_of"])}. No financial-year or period lock is '
-        f'configured (GAP-A03).</p>'
+        f'Outstanding and payables are as at {_e(acc["as_of"])}. Accounting months can be '
+        f'locked against cost corrections; there is no year-end close (GAP-A03).</p>'
         + _tiles(tiles)
         + f'<p style="font-size:12px;color:{"#1F6B4A" if tb["balanced"] else RED};margin:8px 0 0">'
           f'Trial balance: {_e(check)}.</p>'
@@ -469,6 +489,9 @@ def _plain(data: dict, attachments: list[dict], mode: str, test_recipient: str |
     lines += [f"- {r['name']}: {inr(r['value'])}" for r in data["states"]["top"]] or ["- No data yet"]
     if data.get("accounts"):
         acc = data["accounts"]
+        profit = data.get("profit") or {}
+        gaps = profit.get("gaps") or []
+        first_gap = gaps[0]["code"] if gaps else "GAP-P01"
         lines += ["", "ACCOUNTS SUMMARY",
                   f"- Revenue (taxable): {inr(acc['revenue']['taxable'])}",
                   f"- Collections: {inr(acc['collections']['total'])}",
@@ -478,10 +501,20 @@ def _plain(data: dict, attachments: list[dict], mode: str, test_recipient: str |
                   f"- Receivables over 60 days: {inr(acc['outstanding']['overdue_60'])}",
                   f"- Payables outstanding: {inr(acc['payables']['total'])} (due dates estimated)",
                   f"- Cash and bank net movement: {inr(acc['cash_bank_net'])} (no opening balance, GAP-A10)",
-                  f"- Expenses: No data yet (GAP-A01)",
-                  f"- Net profit: No data yet (GAP-A02)",
+                  f"- {profit.get('gross_profit_label', 'Gross profit')}: "
+                  + (inr(profit["gross_profit"]) if profit.get("gross_profit") is not None
+                     else "No data yet (GAP-P01)"),
+                  f"- Expenses: " + (inr(profit["expenses"])
+                                     if profit.get("expenses") is not None
+                                     else "No data yet (GAP-P02)"),
+                  f"- Payroll (gross): " + (inr(profit["payroll"])
+                                            if profit.get("payroll") is not None
+                                            else "No data yet (GAP-P03)"),
+                  f"- Net profit: " + (inr(profit["net_profit"])
+                                       if profit.get("net_profit") is not None
+                                       else f"No data yet ({first_gap})"),
                   f"- Trial balance: {'debits equal credits' if acc['trial_balance']['balanced'] else 'DOES NOT BALANCE'}",
-                  "- No financial-year or period lock is configured (GAP-A03)"]
+                  "- Accounting months can be locked against cost corrections; no year-end close (GAP-A03)"]
     lines += ["", "ATTACHED REPORTS"]
     lines += ([f"- {a['filename']} ({a.get('contains')}, {a.get('rows')} rows, {_size(len(a['bytes']))})"
                for a in attachments] or ["- None"])

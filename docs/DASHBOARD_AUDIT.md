@@ -385,13 +385,15 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 
 ## B2. What a report pack can honestly contain
 
+**Status 2 November 2026.** This section records the Phase 1 position. Expense, cost and payroll capture now exist (migrations `0020`–`0022`), so the pack statements below are updated to the current behaviour; the audit history above is unchanged.
+
 | Pack | Sources that exist | What must be shown as a gap |
 |---|---|---|
-| Daily Business Summary | Orders, invoices, receipts, GRNs, leads, approvals, expiry, audit — all dated | Gross margin (no cost, GAP-D04) |
-| Weekly Management Report | The above plus ageing, top products, credit use, PO ageing | Net profit, expenses (GAP-A02/A03) |
-| Monthly MD Report | Month windows from `_compare_windows`, 12-month trend, top 5 products/customers/states, Accounts block | Gross margin, net profit, expenses, new customers (GAP-V16) |
+| Daily Business Summary | Orders, invoices, receipts, GRNs, leads, approvals, expiry, audit — all dated; gross profit from captured issue cost | Gross profit is labelled partial when invoices are not costed (GAP-P01); expenses before `tracked_from` (GAP-P02); payroll months that are absent or draft (GAP-P03) |
+| Weekly Management Report | The above plus ageing, top products, credit use, PO ageing; expenses and payroll by month | The same three P&L gaps; net profit is withheld until all three are complete |
+| Monthly MD Report | Month windows from `_compare_windows`, 12-month trend, top 5 products/customers/states, Accounts block | The same three P&L gaps, plus new customers (GAP-V16) |
 | Alerts digest | Expiry, capacity, approvals, overdue follow-ups, >60-day receivables | Nothing new |
-| Accounts pack | Revenue, collections, outstanding/ageing, payables outstanding, GST output, trial balance, credit exposure | P&L net profit, balance sheet, expenses by head, input GST, TDS, due dates, bank reconciliation, vouchers, period locks (GAP-A01..A12) |
+| Accounts pack | Revenue, collections, outstanding/ageing, payables outstanding, GST output, trial balance, credit exposure, P&L with reconciliation and notes | Balance sheet, input GST, TDS, due dates, bank reconciliation, vouchers and year-end close (GAP-A03..A10); P&L gaps only when an input is missing |
 | Custom pack | Any existing report in the catalog, by key | Whichever report already declares |
 
 `tests/test_email_reports.py` compares the pack's sales, purchases, returns, receipts and outstanding against the same dashboard service and the same ledger function, so a pack cannot drift from the screens.
@@ -411,15 +413,15 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 | Trial balance | **PARTIAL** | Derived double-entry summary from documents (`ledger.trial_balance`), balanced check included. It is **not** a posted ledger: no opening balances, no expense or TDS accounts. |
 | Chart of accounts / vouchers / journal | **MISSING** | No account, voucher or journal table. |
 | Day book / cash book / bank book | **PARTIAL** | A dated payment book can be produced; opening balances and running closing balances cannot. |
-| Expenses / expense heads | **MISSING** | No expense table, no head, no cost centre. |
-| P&L / balance sheet | **MISSING** | Revenue and output GST are computable; cost, expenses and closing stock valuation are not. A P&L or balance sheet would be fabricated. |
-| Financial-year / period locks | **MISSING** | No lock date, no locked-period flag on any document. |
+| Expenses / expense heads | **CLOSED 2 Nov 2026** | `expenses`, `expense_heads` and `expense_settings` (migration `0020`); approval threshold with an on/off switch, non-creditable GST flag, audited reversal and receipts. |
+| P&L / balance sheet | **P&L CLOSED 2 Nov 2026; balance sheet still MISSING** | `profit_loss.statement()` builds revenue, returns, COGS, expenses, payroll, gross profit and net profit, with GAP-P01/P02/P03 when an input is missing. Closing stock valuation and opening balances are still not captured, so a balance sheet is still not produced (GAP-A10). |
+| Financial-year / period locks | **PARTIAL** | Accounting months can be locked for cost corrections through `hr_period_locks` scope `accounting` (migration `0022`, HTTP 423 on a locked correction). No year-end close or whole-document freeze exists (GAP-A03). |
 | TDS / statutory dues | **MISSING** | No TDS section, rate, deduction or challan. |
 | Bank reconciliation / unposted vouchers | **MISSING** | No bank statement import, no posting state. |
 | Invoice due dates | **MISSING** | No due date or payment term on an invoice, so "due this week" cannot be computed. |
 | Discounts | **PARTIAL** | Invoice/discount fields exist on documents and the discount-slab master; a period discount total is computable only from stored fields, not from free text. |
 | Post-billing changes | **VERIFIED** | Audit log records issued-invoice amendments and approval decisions. |
-| Accounts permission | **PARTIAL** | `accounts:read` is held by Administrator **and sales**; there is no separate gate for full accounts reporting. A new, additive `accounts:reports` key is required so the Administrator can allow an Accounts head without giving every sales user P&L-style visibility. |
+| Accounts permission | **CLOSED 2 Nov 2026** | The additive `accounts:reports` key gates the dashboard, P&L report and Accounts email block; `accounts:read` is unchanged for the statements and the sales desk. `expense:read`/`expense:write` gate the Expenses screen and API. |
 
 **Measured today (development database):** 2 issued invoices, ₹ 70,00,000.00 outstanding (both inside 0–30 days), 0 payments recorded in the current month, 0 credit notes in October, trial balance balanced. The sample email's figures (₹ 96.2 L sales, 31.8% margin, ₹ 14.6 L net profit) are **sample data only** and must not appear in a real email.
 
@@ -436,9 +438,9 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 | GAP-E07 | No unsubscribe endpoint | Extras opt-out | Token stored per recipient; mandatory groups are removed only by an Administrator |
 | GAP-E08 | No per-message Telegram history | Failure alert | Worker writes the failure to the delivery log **and** sends one Telegram alert |
 | GAP-E09 | No email delivery provider/reputation handling | Rate limits | Send in batches of 20 with a pause; provider-specific APIs not integrated |
-| GAP-A01 | No expense table or heads | Expenses, P&L, net profit | "No data yet" with the gap code; no invented head |
-| GAP-A02 | No cost on stock or invoice lines | COGS, gross profit, margin | "No data yet" (also GAP-D04) |
-| GAP-A03 | No closed-period lock | Locked-period enforcement | Display "No period lock is configured"; no lock is pretended |
+| GAP-A01 | No expense table or heads | Expenses, P&L, net profit | **Closed 2 Nov 2026:** migration `0020` adds expenses, heads, settings, approval and reversal; the P&L reads approved entries by head |
+| GAP-A02 | No cost on stock or invoice lines | COGS, gross profit, margin | **Closed 2 Nov 2026:** migration `0021` captures cost on the movement ledger; COGS is proved per invoice, partial/NULL when cost is unknown |
+| GAP-A03 | No closed-period lock | Locked-period enforcement | **Partially closed 2 Nov 2026:** accounting months can be locked for cost corrections (migration `0022`); no year-end close exists, so the page says exactly that |
 | GAP-A04 | No invoice due date | Payables/receivables due this week | Show outstanding ageing only |
 | GAP-A05 | No purchase-side tax | Input GST, net GST, GSTR-3B | Show output GST only, labelled |
 | GAP-A06 | No GSTR-1/3B filings | Reconciliation | Not shown |

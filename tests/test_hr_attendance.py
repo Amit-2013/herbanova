@@ -176,10 +176,14 @@ def test_lock_blocks_edits_until_the_administrator_reopens_with_a_reason(client)
     payroll_lock = client.as_user("payroll").post("/api/hr/period-locks", json={
         "scope": "payroll", "year": 2033, "month": 1, "reason": "Payroll closed"})
     assert payroll_lock.status_code == 201, payroll_lock.text
-    staff_locks = client.as_user("staff").get("/api/hr/period-locks").json()
+    # Only this year's rows: other test files lock accounting and other months,
+    # and the listing deliberately keeps the history of every scope.
+    staff_locks = [l for l in client.as_user("staff")
+                   .get("/api/hr/period-locks").json() if l["year"] == 2033]
     assert {l["scope"] for l in staff_locks} == {"attendance"}
-    hr_locks = client.as_user("hr_manager").get("/api/hr/period-locks").json()
-    assert {"attendance", "payroll"} <= {l["scope"] for l in hr_locks}
+    hr_locks = [l for l in client.as_user("hr_manager")
+                .get("/api/hr/period-locks").json() if l["year"] == 2033]
+    assert {l["scope"] for l in hr_locks} == {"attendance", "payroll"}
 
     assert client.as_user("staff").post("/api/hr/period-locks", json={
         "scope": "attendance", "year": 2033, "month": 2, "reason": "No right"}).status_code == 403

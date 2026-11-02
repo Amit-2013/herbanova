@@ -10,7 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from ..models.core import (
@@ -30,6 +30,7 @@ from ..models.core import (
     Warehouse,
 )
 from ..models.accounts import RECEIPT, Payment
+from ..models.expenses import APPROVED, Expense
 from ..models.hr import (
     Attendance,
     AttendanceCorrection,
@@ -48,7 +49,7 @@ from ..models.hr import (
 )
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
 from ..models.users import Employee
-from . import capacity, ledger
+from . import capacity, ledger, profit_loss
 
 
 # Catalog tuple:
@@ -109,6 +110,12 @@ CATALOG = {
     "trial_balance": (
         "Trial Balance", "Accounting balances and reconciliation checks.",
         "snapshot", "accounts:read", "trial_balance", "Accounting & Finance",
+    ),
+    "profit_and_loss": (
+        "Profit and Loss",
+        "Revenue, returns, cost of goods, expenses and payroll for the period, "
+        "with reconciliation checks and the gaps that remain.",
+        "period", "accounts:reports", "profit_and_loss", "Accounting & Finance",
     ),
     "hr_employee_master": (
         "Employee Master", "Employee directory without confidential bank and identity fields.",
@@ -187,6 +194,7 @@ FILTER_KEYS = {
     "payables": [],
     "gst_register": [],
     "trial_balance": [],
+    "profit_and_loss": [],
 }
 
 
@@ -967,6 +975,157 @@ def build(
             _check("paid", "Report payments made", report_paid,
                    "Sum of recorded supplier payments", source["paid"], "amount"),
         ])
+
+    if key == "profit_and_loss":
+        fy_start, today = profit_loss.defaults(date.today())
+        start, end = date_from or fy_start, date_to or today
+        if start > end:
+            raise ValueError("'from' must not be after 'to'")
+        pl = profit_loss.statement(db, start, end)
+
+        rows = [
+            {"section": "Revenue", "line": "Revenue (taxable)",
+             "amount": _num(_decimal(pl["revenue"]["taxable"])),
+             "note": "Issued invoices, before GST."},
+            {"section": "Revenue", "line": "Less returns (taxable)",
+             "amount": _num(_decimal(-pl["returns"]["taxable"])),
+             "note": f"{pl['returns']['count']} issued credit note(s)."},
+            {"section": "Revenue", "line": "Add debit notes (taxable)",
+             "amount": _num(_decimal(pl["revenue"]["debit_notes"])),
+             "note": f"{pl['revenue']['debit_notes_count']} issued debit note(s)."},
+            {"section": "Revenue", "line": "Net revenue",
+             "amount": _num(_decimal(pl["net_revenue"])),
+             "note": "Revenue less returns plus debit notes."},
+            {"section": "Cost of sales", "line": "Cost of goods sold",
+             "amount": _num(_decimal(pl["cogs"]["value"])),
+             "note": (f"Captured issue cost; {pl['cogs']['invoices_costed']} of "
+                      f"{pl['cogs']['invoices_total']} invoices fully costed.")},
+            {"section": "Profit", "line": pl["gross_profit"]["label"],
+             "amount": _num(_decimal(pl["gross_profit"]["value"])),
+             "note": ("Complete for every invoice in the window."
+                      if not pl["gross_profit"]["partial"]
+                      else "Partial: invoices with no captured cost are named in the gaps.")},
+        ]
+        for head in pl["expenses"]["by_head"]:
+            rows.append({
+                "section": "Expenses", "line": head["head"],
+                "amount": _num(_decimal(head["amount"])),
+                "note": (f"{head['count']} approved entrie(s); non-creditable GST "
+                         f"{head['gst_noncreditable']} is included in cost."),
+            })
+        rows.append({
+            "section": "Expenses", "line": "Total expenses",
+            "amount": (_num(_decimal(pl["expenses"]["total"]))
+                       if pl["expenses"]["complete"] else None),
+            "note": ("No approved expenses in this window." if not pl["expenses"]["count"]
+                     else "Approved, non-reversed entries by head.") if pl["expenses"]["complete"]
+            else "Not available: expenses are not tracked for the whole window (GAP-P02).",
+        })
+        rows.append({
+            "section": "Payroll", "line": "Payroll (gross)",
+            "amount": (_num(_decimal(pl["payroll"]["total"]))
+                       if pl["payroll"]["complete"] else None),
+            "note": ("Gross salary of approved, processed or paid monthly periods."
+                     if pl["payroll"]["complete"]
+                     else "Not available: a month is missing or only partly in the window (GAP-P03)."),
+        })
+        rows.append({
+            "section": "Profit", "line": "Net profit",
+            "amount": (_num(_decimal(pl["net_profit"]["value"]))
+                       if pl["net_profit"]["available"] else None),
+            "note": ("Gross profit less expenses and payroll."
+                     if pl["net_profit"]["available"]
+                     else "Not available until cost, expenses and payroll are complete; "
+                          "no figure is estimated."),
+        })
+        table = _table("profit_and_loss", "Profit and Loss", rows,
+                       ["section", "line", "amount", "note"])
+
+        # Independent figures straight from the source tables, so a difference
+        # in the statement is caught rather than printed.
+        revenue_src, invoice_count = db.execute(
+            select(func.coalesce(func.sum(Invoice.taxable_value), 0),
+                   func.count(Invoice.id))
+            .where(Invoice.status == "issued", Invoice.invoice_date >= start,
+                   Invoice.invoice_date <= end)).one()
+        returns_src, returns_count = db.execute(
+            select(func.coalesce(func.sum(CreditNote.taxable_value), 0),
+                   func.count(CreditNote.id))
+            .where(CreditNote.status == "issued", CreditNote.note_date >= start,
+                   CreditNote.note_date <= end)).one()
+        debits_src, debits_count = db.execute(
+            select(func.coalesce(func.sum(DebitNote.taxable_value), 0),
+                   func.count(DebitNote.id))
+            .where(DebitNote.status == "issued", DebitNote.note_date >= start,
+                   DebitNote.note_date <= end)).one()
+        expenses_src = db.execute(
+            select(func.coalesce(func.sum(
+                Expense.amount + case((Expense.gst_creditable.is_(False),
+                                       Expense.gst_amount), else_=0)), 0))
+            .where(Expense.status == APPROVED, Expense.entry_date >= start,
+                   Expense.entry_date <= end)).scalar()
+        payroll_src = Decimal("0")
+        for item in pl["payroll"]["periods"]:
+            period = db.scalar(select(PayrollPeriod).where(
+                PayrollPeriod.year == item["year"],
+                PayrollPeriod.month == item["month"]))
+            if period is not None:
+                payroll_src += Decimal(db.scalar(
+                    select(func.coalesce(func.sum(PayrollEntry.gross), 0))
+                    .where(PayrollEntry.period_id == period.id)) or 0)
+
+        checks = [
+            _check("revenue", "Statement revenue", _decimal(pl["revenue"]["taxable"]),
+                   "Issued invoices summed in the database", _decimal(revenue_src)),
+            _check("returns", "Statement returns", _decimal(pl["returns"]["taxable"]),
+                   "Issued credit notes summed in the database", _decimal(returns_src)),
+            _check("debit_notes", "Statement debit notes",
+                   _decimal(pl["revenue"]["debit_notes"]),
+                   "Issued debit notes summed in the database", _decimal(debits_src)),
+            _check("net_revenue", "Net revenue", _decimal(pl["net_revenue"]),
+                   "Revenue less returns plus debit notes",
+                   _decimal(_decimal(pl["revenue"]["taxable"])
+                            - _decimal(pl["returns"]["taxable"])
+                            + _decimal(pl["revenue"]["debit_notes"]))),
+            _check("gross_profit", "Gross profit",
+                   _decimal(pl["gross_profit"]["value"]),
+                   "Net revenue less cost of goods",
+                   _decimal(_decimal(pl["net_revenue"]) - _decimal(pl["cogs"]["value"]))),
+            _check("expenses", "Total expenses", _decimal(pl["expenses"]["total"]),
+                   "Approved entries summed in the database", _decimal(expenses_src)),
+            _check("payroll", "Payroll gross", _decimal(pl["payroll"]["total"]),
+                   "Approved or later payroll periods summed", _decimal(payroll_src)),
+            _check("invoice_count", "Invoices in the statement", pl["cogs"]["invoices_total"],
+                   "Issued invoices in the database", int(invoice_count), "records"),
+        ]
+        if pl["net_profit"]["available"]:
+            checks.append(_check(
+                "net_profit", "Net profit", _decimal(pl["net_profit"]["value"]),
+                "Gross profit less expenses and payroll",
+                _decimal(_decimal(pl["gross_profit"]["value"])
+                         - _decimal(pl["expenses"]["total"])
+                         - _decimal(pl["payroll"]["total"]))))
+
+        recon_rows = [{
+            "check": c["name"],
+            "report": f"{c['report_label']}: {c['report_value']}",
+            "records": f"{c['record_label']}: {c['record_value']}",
+            "result": "Agrees" if c["ok"] else "DIFFERS",
+        } for c in checks]
+        recon = _table("reconciliation", "Reconciliation", recon_rows,
+                       ["check", "report", "records", "result"])
+
+        limitations = list(pl["notes"]) + [
+            "Payroll months only partly inside the window are excluded, never prorated.",
+            "This statement reads the records; it is not a statutory filing.",
+        ]
+        for gap in pl["gaps"]:
+            limitations.append(f"{gap['code']} — {gap['label']}: {gap['detail']} "
+                               f"Fix: {gap['fix_label']}.")
+        if not pl["net_profit"]["available"]:
+            limitations.append("Net profit is not shown because the statement is "
+                               "incomplete; no figure is estimated.")
+        return _envelope(key, start, end, [table, recon], checks, limitations)
 
     if key == "trial_balance":
         result = ledger.trial_balance(db, date_to or date.today())
