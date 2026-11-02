@@ -24,16 +24,19 @@ issue rows are committed, so a second issue cannot compute from a stale ledger.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models.core import (Batch, Invoice, InvoiceLine, Product, PurchaseOrder,
-                           PurchaseOrderLine, StockMovement)
+from ..models.core import (AuditLog, Batch, Invoice, InvoiceLine, Product,
+                           PurchaseOrder, PurchaseOrderLine, StockMovement)
 from ..models.costs import CostCorrection
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine
+from .audit import audit
 
 CENT = Decimal("0.01")
 ZERO = Decimal("0")
@@ -43,10 +46,20 @@ PARTIAL = "partial"
 RETURN = "return"
 UNCOSTED = "uncosted"
 COST_SOURCES = (PO_RECEIPT, WEIGHTED_AVERAGE, PARTIAL, RETURN, UNCOSTED)
+ATTRIBUTION_AUDIT = "accounts.cost_attribution"
+COST_BACKFILL_AUDIT = "accounts.cost_backfill"
 
 
 class LockedPeriodError(Exception):
     """An accounting month is locked, so the correction must not run."""
+
+
+class StaleAttributionPlanError(Exception):
+    """The database no longer matches the attribution plan that was approved."""
+
+
+class StaleCostPlanError(Exception):
+    """The database no longer matches the cost plan that was approved."""
 
 
 def money(value) -> Decimal:
@@ -350,11 +363,32 @@ def invoice_cogs(db: Session, invoice_ids: list[int] | None = None) -> dict[int,
     return result
 
 
+def _stored_costs(movements: list[StockMovement]) -> dict[int, MovementCost]:
+    return {m.id: MovementCost(
+        m.id, money(m.unit_cost) if m.unit_cost is not None else None,
+        m.cost_source or UNCOSTED, m.invoice_id, m.movement_type,
+        Decimal(m.qty_delta)) for m in movements}
+
+
+def _invoice_issue_reason(item: dict) -> str | None:
+    if item["issue_qty"] <= 0:
+        return "no stock issue is attributed to this invoice"
+    if item["uncosted_issue_qty"] > 0:
+        return (f"{item['uncosted_issue_qty']:f} of {item['issue_qty']:f} issued "
+                "units have no cost")
+    if not item["clean"]:
+        return ("the captured cost is partial: some on-hand stock had no cost "
+                "when the goods were issued")
+    return None
+
+
 def backfill_plan(db: Session, product_ids: list[int] | None = None) -> dict:
     """What a cost backfill would change, without changing anything.
 
-    Dry-run only in this phase: the proposal is printed so it can be checked
-    against a database copy before anything is written.
+    Each movement carries its current and proposed cost and source, and every
+    issued invoice reports its cost of goods before and after, with the reason
+    when it would stay partial. Money is printed as a string only; this is a
+    reviewed proposal, never a write.
     """
     stmt = (select(Batch.product_id)
             .join(StockMovement, StockMovement.batch_id == Batch.id).distinct())
@@ -362,25 +396,37 @@ def backfill_plan(db: Session, product_ids: list[int] | None = None) -> dict:
         stmt = stmt.where(Batch.product_id.in_(product_ids))
     products = sorted(db.scalars(stmt).all())
     rows = []
+    proposed_costs: dict[int, MovementCost] = {}
     for pid in products:
         movements = _product_movements(db, pid)
         plan = replay(db, pid)
+        proposed_costs.update(plan.costs)
         would_set = would_change = same = 0
+        detail = []
         for m in movements:
             proposed = plan.costs.get(m.id)
             if proposed is None:
                 continue
             stored = money(m.unit_cost) if m.unit_cost is not None else None
-            if stored == proposed.unit_cost and (m.cost_source or UNCOSTED) == proposed.cost_source:
+            matches = (stored == proposed.unit_cost
+                       and (m.cost_source or UNCOSTED) == proposed.cost_source)
+            if matches:
                 same += 1
             elif stored is None and proposed.unit_cost is not None:
                 would_set += 1
             else:
                 would_change += 1
-        before = _invoice_cogs(movements, {
-            m.id: MovementCost(m.id, money(m.unit_cost) if m.unit_cost is not None else None,
-                               m.cost_source or UNCOSTED, m.invoice_id, m.movement_type,
-                               Decimal(m.qty_delta)) for m in movements})
+            detail.append({
+                "movement_id": m.id, "movement_type": m.movement_type,
+                "qty_delta": f"{Decimal(m.qty_delta):f}",
+                "current_unit_cost": str(stored) if stored is not None else None,
+                "current_cost_source": m.cost_source,
+                "unit_cost": (str(proposed.unit_cost)
+                              if proposed.unit_cost is not None else None),
+                "cost_source": proposed.cost_source,
+                "changed": not matches,
+            })
+        before = _invoice_cogs(movements, _stored_costs(movements))
         after = _invoice_cogs(movements, plan.costs)
         affected = []
         for invoice_id in sorted(set(before) | set(after)):
@@ -396,11 +442,171 @@ def backfill_plan(db: Session, product_ids: list[int] | None = None) -> dict:
                      "already_matching": same,
                      "uncosted_on_hand": plan.uncosted_on_hand,
                      "average_after": plan.average,
+                     "movements_detail": detail,
                      "affected_invoices": affected})
+
+    linked = list(db.scalars(select(StockMovement)
+                             .where(StockMovement.invoice_id.is_not(None))).all())
+    before_all = _invoice_cogs(linked, _stored_costs(linked))
+    after_all = _invoice_cogs(linked, {**_stored_costs(linked), **proposed_costs})
+    empty = {"cogs": ZERO, "issue_qty": ZERO, "return_qty": ZERO,
+             "uncosted_issue_qty": ZERO, "clean": False}
+    invoices = []
+    for invoice_id, number in db.execute(
+            select(Invoice.id, Invoice.invoice_number)
+            .where(Invoice.status == "issued").order_by(Invoice.id)).all():
+        b = before_all.get(invoice_id, empty)
+        a = after_all.get(invoice_id, empty)
+        invoices.append({
+            "invoice_id": invoice_id, "invoice_number": number,
+            "cogs_before": str(b["cogs"]), "cogs_after": str(a["cogs"]),
+            "costed_before": b["clean"], "costed_after": a["clean"],
+            "partial_reason_after": None if a["clean"] else _invoice_issue_reason(a),
+        })
+
     return {"products": rows,
             "movements": sum(r["movements"] for r in rows),
             "would_set_cost": sum(r["would_set_cost"] for r in rows),
-            "affected_invoices": sum(len(r["affected_invoices"]) for r in rows)}
+            "would_change_source": sum(r["would_change_source"] for r in rows),
+            "affected_invoices": sum(len(r["affected_invoices"]) for r in rows),
+            "invoices": invoices}
+
+
+def cost_plan_payload(plan: dict) -> dict:
+    """The material part of a cost plan: proposals per movement and per invoice."""
+    return {
+        "products": [
+            {"product_id": row["product_id"],
+             "movements": row["movements_detail"],
+             "uncosted_on_hand": f"{row['uncosted_on_hand']:f}",
+             "average_after": (None if row["average_after"] is None
+                               else str(row["average_after"]))}
+            for row in plan["products"]],
+        "invoices": plan["invoices"],
+    }
+
+
+def cost_fingerprint(plan: dict) -> str:
+    """Stable SHA-256 of the cost plan, for approval and apply."""
+    return _sha256(cost_plan_payload(plan))
+
+
+def _cost_audit(db: Session, fingerprint: str) -> dict | None:
+    for changes in db.scalars(select(AuditLog.changes).where(
+            AuditLog.action == COST_BACKFILL_AUDIT)
+            .order_by(AuditLog.id.desc())).all():
+        if (changes or {}).get("plan_fingerprint") == fingerprint:
+            return changes
+    return None
+
+
+def _costs_intact(db: Session, costs: list[dict]) -> bool:
+    if not costs:
+        return False
+    ids = [entry["movement_id"] for entry in costs]
+    actual = {m.id: (money(m.unit_cost) if m.unit_cost is not None else None,
+                     m.cost_source or UNCOSTED)
+              for m in db.scalars(select(StockMovement)
+                                  .where(StockMovement.id.in_(ids))).all()}
+    if len(actual) != len(ids):
+        return False
+    for entry in costs:
+        expected = (money(entry["unit_cost"]) if entry["unit_cost"] is not None
+                    else None, entry["cost_source"] or UNCOSTED)
+        if actual.get(entry["movement_id"]) != expected:
+            return False
+    return True
+
+
+def apply_cost_backfill(db: Session, *, expected_fingerprint: str,
+                        actor_id: int | None = None,
+                        product_ids: list[int] | None = None) -> dict:
+    """Write the approved cost proposals, guarded like the attribution apply.
+
+    Nothing is written unless the live plan still hashes to the approved
+    fingerprint. The product rows and the planned movements are locked, the plan
+    is recomputed under those locks, and any change refuses the batch before a
+    cost is set. An invoice whose cost of goods would move in a locked
+    accounting month refuses the batch as a whole.
+
+    Idempotent: re-running with the applied fingerprint is a no-op when every
+    recorded cost is still in place, and writes no second audit row. The caller
+    commits.
+    """
+    expected = (expected_fingerprint or "").strip().lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise ValueError("The plan fingerprint must be the 64-character SHA-256 "
+                         "printed by the dry run")
+
+    plan = backfill_plan(db, product_ids)
+    current = cost_fingerprint(plan)
+    if current != expected:
+        prior = _cost_audit(db, expected)
+        if prior is not None and _costs_intact(db, prior.get("costs", [])):
+            return {"applied": False, "already_applied": True, "idempotent": True,
+                    "movements_changed": 0, "products": 0, "audit_rows": 0,
+                    "plan_fingerprint": current}
+        raise StaleCostPlanError(
+            "The database changed after this plan was made, so nothing was "
+            "written. Run the dry run again and approve the new plan.")
+    pending = [m for row in plan["products"]
+               for m in row["movements_detail"] if m["changed"]]
+    if not pending:
+        return {"applied": False, "already_applied": False, "idempotent": False,
+                "movements_changed": 0, "products": 0, "audit_rows": 0,
+                "plan_fingerprint": current}
+
+    pids = [row["product_id"] for row in plan["products"]]
+    lock_products(db, pids)
+    movement_ids = sorted(m["movement_id"] for m in pending)
+    db.scalars(select(StockMovement).where(StockMovement.id.in_(movement_ids))
+               .order_by(StockMovement.id).with_for_update()).all()
+
+    plan = backfill_plan(db, product_ids)
+    if cost_fingerprint(plan) != expected:
+        raise StaleCostPlanError(
+            "The database changed while this plan was being locked, so nothing "
+            "was written. Run the dry run again and approve the new plan.")
+
+    affected = [i["invoice_id"] for i in plan["invoices"]
+                if i["cogs_before"] != i["cogs_after"]
+                or i["costed_before"] != i["costed_after"]]
+    if affected:
+        from .hr import active_period_lock
+        locked: dict[tuple[int, int], list[str]] = {}
+        for invoice_id, number, day in db.execute(
+                select(Invoice.id, Invoice.invoice_number, Invoice.invoice_date)
+                .where(Invoice.id.in_(affected))).all():
+            lock = active_period_lock(db, "accounting", day)
+            if lock is not None:
+                locked.setdefault((lock.year, lock.month), []).append(number)
+        if locked:
+            periods = "; ".join(
+                f"{year}-{month:02d} ({', '.join(sorted(numbers))})"
+                for (year, month), numbers in sorted(locked.items()))
+            raise LockedPeriodError(
+                "The accounting period is locked, so this backfill cannot move "
+                f"cost of goods in: {periods}. Unlock the month first.")
+
+    costs = []
+    changed_total = 0
+    for row in plan["products"]:
+        changed = apply_plan(db, replay(db, row["product_id"]))
+        changed_total += len(changed)
+        for movement in changed:
+            costs.append({
+                "movement_id": movement.id, "product_id": row["product_id"],
+                "unit_cost": (str(money(movement.unit_cost))
+                              if movement.unit_cost is not None else None),
+                "cost_source": movement.cost_source,
+            })
+    audit(db, actor_id, COST_BACKFILL_AUDIT, "stock_movements:cost_backfill",
+          {"plan_fingerprint": current, "products": pids,
+           "movements": changed_total, "costs": costs,
+           "tool": "backfill_costs.py"}, notify=False)
+    return {"applied": True, "already_applied": False, "idempotent": False,
+            "movements_changed": changed_total, "products": len(pids),
+            "audit_rows": 1, "plan_fingerprint": current}
 
 
 def _issue_quantities(movements: list[StockMovement],
@@ -525,6 +731,105 @@ def attribution_plan(db: Session) -> dict:
         "already_attributed": attributed,
         "without_issue_movements": without_issues,
     }
+
+
+def _sha256(value) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def attribution_fingerprint(plan: dict) -> str:
+    """Stable SHA-256 of the whole attribution plan, for approval and apply."""
+    return _sha256(plan)
+
+
+def _attribution_audit(db: Session, fingerprint: str) -> dict | None:
+    """The changes of the audit row that recorded this exact plan, if any."""
+    for changes in db.scalars(select(AuditLog.changes).where(
+            AuditLog.action == ATTRIBUTION_AUDIT).order_by(AuditLog.id.desc())).all():
+        if (changes or {}).get("plan_fingerprint") == fingerprint:
+            return changes
+    return None
+
+
+def _links_intact(db: Session, links: list[dict]) -> bool:
+    expected = {mid: link.get("invoice_id")
+                for link in links or [] for mid in link.get("movement_ids", [])}
+    if not expected:
+        return False
+    actual = {mid: iid for mid, iid in db.execute(
+        select(StockMovement.id, StockMovement.invoice_id)
+        .where(StockMovement.id.in_(sorted(expected)))).all()}
+    return actual == expected
+
+
+def apply_attribution(db: Session, *, expected_fingerprint: str,
+                      actor_id: int | None = None) -> dict:
+    """Link legacy issue rows to their invoice, guarded by the approved plan.
+
+    The caller passes the SHA-256 fingerprint printed by the dry run. Nothing is
+    written unless the live plan still hashes to exactly that value. The planned
+    rows are then locked and the plan recomputed inside the same transaction, so
+    a concurrent invoice or ledger change refuses the batch before any link is
+    set. One audit row records the links; Telegram is not notified.
+
+    Idempotent: re-running with the fingerprint already applied is a no-op when
+    every recorded link is still in place, and writes no second audit row. If a
+    recorded link was removed, the plan is stale and the call refuses.
+
+    The caller commits.
+    """
+    expected = (expected_fingerprint or "").strip().lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise ValueError("The plan fingerprint must be the 64-character SHA-256 "
+                         "printed by the dry run")
+
+    plan = attribution_plan(db)
+    current = attribution_fingerprint(plan)
+    if current != expected:
+        prior = _attribution_audit(db, expected)
+        if prior is not None and _links_intact(db, prior.get("links", [])):
+            return {"applied": False, "already_applied": True, "idempotent": True,
+                    "attributed_movements": 0, "invoices": 0, "audit_rows": 0,
+                    "plan_fingerprint": current}
+        raise StaleAttributionPlanError(
+            "The database changed after this plan was made, so nothing was "
+            "written. Run the dry run again and approve the new plan.")
+    if not plan["candidates"]:
+        return {"applied": False, "already_applied": False, "idempotent": False,
+                "attributed_movements": 0, "invoices": 0, "audit_rows": 0,
+                "plan_fingerprint": current}
+
+    movement_ids = sorted(mid for c in plan["candidates"]
+                          for mid in c["movement_ids"])
+    invoice_ids = sorted({c["invoice_id"] for c in plan["candidates"]})
+    locked = {m.id: m for m in db.scalars(
+        select(StockMovement).where(StockMovement.id.in_(movement_ids))
+        .order_by(StockMovement.id).with_for_update()).all()}
+    db.scalars(select(Invoice).where(Invoice.id.in_(invoice_ids))
+               .order_by(Invoice.id).with_for_update()).all()
+
+    if attribution_fingerprint(attribution_plan(db)) != expected:
+        raise StaleAttributionPlanError(
+            "The database changed while this plan was being locked, so nothing "
+            "was written. Run the dry run again and approve the new plan.")
+
+    links = []
+    for candidate in plan["candidates"]:
+        for mid in candidate["movement_ids"]:
+            locked[mid].invoice_id = candidate["invoice_id"]
+        links.append({"sales_order_id": candidate["sales_order_id"],
+                      "invoice_id": candidate["invoice_id"],
+                      "invoice_number": candidate["invoice_number"],
+                      "movement_ids": candidate["movement_ids"]})
+    movements = sum(len(link["movement_ids"]) for link in links)
+    audit(db, actor_id, ATTRIBUTION_AUDIT, "stock_movements:attribution",
+          {"plan_fingerprint": current, "links": links, "movements": movements,
+           "invoices": len(links), "tool": "backfill_costs.py"}, notify=False)
+    return {"applied": True, "already_applied": False, "idempotent": False,
+            "attributed_movements": movements, "invoices": len(links),
+            "audit_rows": 1, "plan_fingerprint": current, "links": links}
 
 
 def correct_po_cost(db: Session, *, po_line_id: int, new_unit_cost: Decimal,
