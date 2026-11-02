@@ -89,6 +89,7 @@ hand-typed number.
 | F-25 | Stock ledger and movements | Inventory | `stock:read` | `test_report_reconciliation.py` | VERIFIED |
 | F-26 | FEFO batch movements and expiry | Inventory, dispatch | `stock:read/write` | `test_dashboard.py`, `test_capacity.py` | VERIFIED |
 | F-27 | Warehouse utilisation report | Inventory, dashboard | `stock:read` | `test_capacity.py` | VERIFIED |
+| F-106 | Free-of-cost receipts, approved sample notes and the audited correction | Free samples; `/api/foc` | `foc:read`/`foc:write`; `foc:approve` + Administrator | `tests/test_foc.py`, `tests/test_costing.py` | VERIFIED (API, migration and tests, 2 November 2026); screen not browser-verified |
 
 ## 5. Sales, billing and printing
 

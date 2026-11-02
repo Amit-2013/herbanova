@@ -81,6 +81,7 @@
         <a class="nav" href="#/purchasing" data-v="purchasing">Purchases<span class="count hide" id="poCount"></span></a>
         <a class="nav" href="#/products" data-v="products">Products</a>
         <a class="nav" href="#/inventory" data-v="inventory">Inventory</a>
+        <a class="nav" href="#/foc" data-v="foc">Free samples</a>
         <a class="nav hide" href="#/suppliers" data-v="suppliers" id="navSuppliers">Suppliers</a>
       </div>
       <div class="nav-group">
@@ -718,6 +719,37 @@
         </table></div>
         <div class="empty hide" id="tbempty"></div>
       </div>
+      </div>
+    </section>
+
+    <!-- Free samples (FOC) -->
+    <section id="v-foc" class="view hide">
+      <div class="panel" id="focPanel">
+        <div class="panel-h"><h2>Free samples (FOC)</h2><span class="muted" id="focNote"></span></div>
+        <div class="toolbar">
+          <button class="btn ghost" type="button" data-act="foc-refresh">Refresh</button>
+          <button class="btn hide" id="focNewBtn" type="button" data-act="new-foc">New free-sample note</button>
+        </div>
+        <p class="err hide" id="focErr" role="alert"></p>
+        <p class="muted panel-note">Free stock is held apart from purchased stock, so a zero-rate sample never changes the weighted average. A note names one recipient and carries no invoice, revenue or GST. It needs a second Administrator to approve.</p>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>FOC on hand</h2><span class="muted">Known free stock, separate from costed stock.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>SKU</th><th>Product</th><th class="n">On hand</th><th class="n">FOC</th><th class="n">Costed</th><th class="n">Average cost (₹)</th></tr></thead>
+          <tbody id="focStockRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="focStockEmpty"></div>
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Free-sample notes</h2><span class="muted">One recipient per note; the quantity never reaches revenue.</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Number</th><th>Date</th><th>Recipient</th><th>Warehouse</th><th>Reason</th><th class="n">Qty</th><th class="n">Notional (₹)</th><th>Status</th><th></th></tr></thead>
+          <tbody id="focNoteRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="focNoteEmpty"></div>
       </div>
     </section>
 

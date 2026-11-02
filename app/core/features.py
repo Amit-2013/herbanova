@@ -50,6 +50,12 @@ FEATURES: tuple[Feature, ...] = (
         api_prefixes=("/api/warehouses", "/api/inventory", "/api/purchase-orders",
                       "/api/dashboard/expiry")),
     Feature(
+        "foc", "Free samples (FOC)",
+        "Free-of-cost receipts and approved sample distributions.",
+        views=("foc",),
+        permissions=("foc:read", "foc:write", "foc:approve"),
+        api_prefixes=("/api/foc",)),
+    Feature(
         "suppliers", "Suppliers",
         "Supplier master and bank-detail change requests.",
         views=("suppliers",),

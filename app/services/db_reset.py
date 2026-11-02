@@ -59,6 +59,7 @@ BUSINESS_TABLES = (
     "debit_note_lines", "debit_notes",
     "email_deliveries", "email_test_messages",
     "expenses",
+    "foc_note_lines", "foc_notes",
     "goods_receipt_lines", "goods_receipts",
     "hr_announcements",
     "hr_attendance", "hr_attendance_corrections", "hr_import_batches",

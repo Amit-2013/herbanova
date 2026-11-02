@@ -89,6 +89,9 @@ class MovementOut(BaseModel):
     ref_id: str
     ref_label: str      # human reference, e.g. the PO number for ref_type 'po'
     actor: str
+    unit_cost: Decimal | None = None
+    cost_source: str | None = None
+    invoice_id: int | None = None
 
 
 @router.get("/warehouses", response_model=list[WarehouseOut])
@@ -188,5 +191,7 @@ def list_movements(limit: int = Query(200, ge=1, le=500), batch_id: int | None =
     return [MovementOut(id=m.id, created_at=m.created_at, movement_type=m.movement_type,
                         qty_delta=m.qty_delta, sku=p.sku, product_name=p.name,
                         batch_no=b.batch_no, warehouse=w.name, ref_type=m.ref_type,
-                        ref_id=m.ref_id, ref_label=label(m), actor=u.username)
+                        ref_id=m.ref_id, ref_label=label(m), actor=u.username,
+                        unit_cost=m.unit_cost, cost_source=m.cost_source,
+                        invoice_id=m.invoice_id)
             for m, b, p, w, u in rows]

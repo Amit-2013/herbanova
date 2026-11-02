@@ -69,6 +69,9 @@ class POLineIn(BaseModel):
     def cost_or_remark(self):
         if self.unit_cost is None and not self.rate_remark:
             raise ValueError("enter a unit cost or choose a remark")
+        # A zero is a price, not a blank: it must still say why the goods are free.
+        if self.unit_cost is not None and self.unit_cost == 0 and not self.rate_remark:
+            raise ValueError("a zero unit cost needs a rate remark (for example Free of Cost (FOC))")
         return self
 
 
@@ -342,6 +345,7 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
 
     ordered = {ln.product_id: ln.qty for ln in po.lines}
     po_cost = {ln.product_id: ln.unit_cost for ln in po.lines}
+    po_remark = {ln.product_id: ln.rate_remark for ln in po.lines}
     already = _received_by_product(db, po.id)
     running = dict(already)
     for ln in body.lines:
@@ -382,11 +386,15 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
                           expiry=ln.expiry, owner=body.owner)
             db.add(batch)
             db.flush()                       # assign id before posting the movement
-        receipt_cost = po_cost.get(prod.id)
+        # A line whose remark says FOC is free stock: store zero and the FOC
+        # source, so the costing replay keeps it out of the weighted average.
+        foc = (po_remark.get(prod.id) or "").strip().lower() == "foc"
+        receipt_cost = Decimal("0.00") if foc else po_cost.get(prod.id)
+        receipt_source = ("foc" if foc
+                          else "po_receipt" if receipt_cost is not None else "uncosted")
         post_movement(db, batch_id=batch.id, qty_delta=ln.qty, movement_type="receipt",
                       ref_type="grn", ref_id=str(grn.id), actor_id=user.id,
-                      unit_cost=receipt_cost,
-                      cost_source="po_receipt" if receipt_cost is not None else "uncosted")
+                      unit_cost=receipt_cost, cost_source=receipt_source)
         db.add(GoodsReceiptLine(grn_id=grn.id, product_id=prod.id, batch_id=batch.id, qty=ln.qty))
         out_lines.append(ReceivedLine(sku=ln.sku, batch_no=ln.batch_no, qty=ln.qty,
                                       batch_on_hand=batch.on_hand))
