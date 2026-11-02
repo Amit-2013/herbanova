@@ -86,6 +86,7 @@
       <div class="nav-group">
         <p class="nav-grp">Finance and insight</p>
         <a class="nav hide" href="#/accounts" data-v="accounts" id="navAccounts">Accounting &amp; Finance</a>
+        <a class="nav hide" href="#/expenses" data-v="expenses" id="navExpenses">Expenses</a>
         <a class="nav" href="#/reports" data-v="reports" id="navReports">Reports</a>
         <a class="nav hide" href="#/geo" data-v="geo" id="navGeo">Geography</a>
       </div>
@@ -717,6 +718,43 @@
         </table></div>
         <div class="empty hide" id="tbempty"></div>
       </div>
+      </div>
+    </section>
+
+    <!-- Expenses -->
+    <section id="v-expenses" class="view hide">
+      <div class="panel" id="expPanel">
+        <div class="panel-h"><h2>Expenses</h2><span class="muted" id="expSettingsNote"></span></div>
+        <div class="toolbar">
+          <div class="seg compact" role="group" aria-label="Filter expenses by status">
+            <button type="button" data-exp-status="" aria-pressed="true">All</button>
+            <button type="button" data-exp-status="pending_approval" aria-pressed="false">Waiting</button>
+            <button type="button" data-exp-status="approved" aria-pressed="false">Approved</button>
+            <button type="button" data-exp-status="reversed" aria-pressed="false">Reversed</button>
+            <button type="button" data-exp-status="rejected" aria-pressed="false">Rejected</button>
+          </div>
+          <select id="expHead" aria-label="Filter by expense head"><option value="">All heads</option></select>
+          <input id="expq" type="search" placeholder="Search reference or note" aria-label="Search expenses">
+          <button class="btn ghost" type="button" data-act="exp-refresh">Refresh</button>
+          <button class="btn ghost hide" id="expHeadsBtn" type="button" data-act="exp-heads">Expense heads</button>
+          <button class="btn ghost hide" id="expSettingsBtn" type="button" data-act="exp-settings">Settings</button>
+          <button class="btn hide" id="expNewBtn" type="button" data-act="new-expense">New expense</button>
+        </div>
+        <p class="err hide" id="expErr" role="alert"></p>
+        <p class="muted panel-note" id="expTot"></p>
+      </div>
+
+      <div class="panel flush">
+        <div class="tw"><table>
+          <thead><tr><th>Number</th><th>Date</th><th>Head</th><th class="n">Amount (â‚¹)</th><th class="n">GST (â‚¹)</th><th class="n">Cost in P&amp;L (â‚¹)</th><th>Status</th><th>Paid by</th><th>Note</th><th></th></tr></thead>
+          <tbody id="expRows"></tbody>
+        </table></div>
+        <div class="empty hide" id="expEmpty"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-h"><h2>How an expense reaches profit</h2><span class="muted">Only approved, non-reversed entries count.</span></div>
+        <p class="muted panel-note">GST that can be claimed as input credit is excluded from cost; GST that cannot is added to the expense. An entry above the approval amount waits for a second person in Approvals. A mistake is reversed with a reason and the original row stays on file. An entry is never edited or deleted.</p>
       </div>
     </section>
 

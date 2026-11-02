@@ -28,6 +28,8 @@ const state = {user: null, perms: new Set(), features: null, featureFlags: [], m
                accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
                acc: {from: "", to: "", state: "", report: null, loading: false, error: null, seq: 0,
                      cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0}},
+               exp: {rows: [], heads: [], settings: null, status: "", head: "", q: "",
+                     loading: false, error: null, seq: 0, loaded: false},
                sr: {status: null, schedules: [], recipients: [], deliveries: [],
                     tab: "schedules", logStatus: "", logPack: ""},
                email: {settings: null, messages: [], loading: false, loaded: false,
@@ -162,7 +164,8 @@ const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "sto
                       suppliers: "suppliers", sales: "sales", billing: "sales",
                       customers: "sales", geo: "sales",
                       approvals: "approvals", leads: "leads", lost: "leads",
-                      followups: "leads", accounts: "accounts", tax: "tax",
+                      followups: "leads", accounts: "accounts", expenses: "accounts",
+                      tax: "tax",
                       reports: "reports", compare: "reports", hr: "hr", audit: "audit",
                       scheduled: "scheduled", users: "users", roles: "users"};
 const featureOn = v => !VIEW_FEATURE[v] || !state.features || state.features.has(VIEW_FEATURE[v]);
@@ -195,6 +198,7 @@ function enter(u) {
   // role is never offered a screen that can only answer 403.
   const showView = (v, on) => $$(`.side a.nav[data-v="${v}"]`).forEach(a => a.classList.toggle("hide", !on || !featureOn(v)));
   showView("lost", can("lead:read"));
+  showView("expenses", can("expense:read"));
   showView("followups", can("lead:read"));
   showView("customers", can("sales:read"));
   showView("sales", can("sales:read"));
@@ -363,6 +367,7 @@ async function loadMovements() {
 const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", purchasing: "Purchases",
                 suppliers: "Suppliers", tax: "Tax and discounts",
                 sales: "Sales orders", billing: "Billing", accounts: "Accounting & Finance",
+                expenses: "Expenses",
                 approvals: "Approvals", customers: "Customers and distributors",
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
@@ -374,6 +379,7 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
                    customers: "sales:read", users: "user:manage", roles: "user:manage",
                    audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
+                   expenses: "expense:read",
                    products: "product:read", inventory: "stock:read", purchasing: "stock:read",
                    sales: "sales:read", billing: "sales:read",
                    approvals: "approval:read",
@@ -407,6 +413,7 @@ function route() {
   if (state.view === "compare") loadCompare();
   if (state.view === "geo") loadGeo();
   if (state.view === "accounts") openAccountsReports();
+  if (state.view === "expenses") openExpenses();
   if (state.view === "scheduled") openScheduled();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
@@ -545,7 +552,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderApprovals(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderExpenses(); renderApprovals(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -2393,6 +2400,310 @@ function exportAccCsv() {
     [], ["State", "Invoices", "Revenue", "Output GST", "Returns", "Outstanding"],
     ...(r.states || []).map(x => [x.name, x.invoices, x.revenue, x.output_gst, x.returns, x.outstanding]));
   downloadCsv(`HERBANOVA_Accounts_${r.from}_${r.to}.csv`, rows);
+}
+
+/* ---------- expenses ---------- */
+const EXP_STATUS = {pending_approval: "Waiting approval", approved: "Approved",
+                    rejected: "Rejected", reversed: "Reversed"};
+const EXP_MODES = ["cash", "bank", "upi", "cheque", "neft", "other"];
+
+function openExpenses() {
+  if (!can("expense:read")) return;
+  renderExpenses();
+  if (!state.exp.loaded && !state.exp.loading) loadExpenses();
+}
+
+async function loadExpenses() {
+  if (!can("expense:read")) return;
+  const s = state.exp, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderExpenses();
+  const params = new URLSearchParams();
+  if (s.status) params.set("status", s.status);
+  if (s.head) params.set("head_id", s.head);
+  if (s.q) params.set("q", s.q);
+  const [rows, heads, settings] = await Promise.all([
+    api(`/api/expenses?${params.toString()}`),
+    api("/api/expenses/heads"),
+    api("/api/expenses/settings"),
+  ]);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (rows.ok && Array.isArray(rows.body)) s.rows = rows.body;
+  else s.error = detail(rows.body);
+  if (heads.ok && Array.isArray(heads.body)) s.heads = heads.body;
+  if (settings.ok && settings.body && !Array.isArray(settings.body)) s.settings = settings.body;
+  s.loaded = true;
+  renderExpenses();
+}
+
+function renderExpenses() {
+  const s = state.exp, panel = $("#expPanel");
+  if (!panel || !state.user) return;
+  panel.classList.toggle("hide", !can("expense:read"));
+  $("#expNewBtn").classList.toggle("hide", !can("expense:write"));
+  $("#expHeadsBtn").classList.toggle("hide", !can("expense:write"));
+  $("#expSettingsBtn").classList.toggle("hide", state.user.role !== "admin");
+  const st = s.settings;
+  $("#expSettingsNote").textContent = st
+    ? `Tracked from ${fmtDate(st.tracked_from)} Â· approval ${st.approval_enabled ? `on above â‚¹ ${money(st.approval_threshold)}` : "off"}`
+    : s.loading ? "Loading settingsâ€¦" : "";
+  $("#expErr").classList.toggle("hide", !s.error);
+  $("#expErr").textContent = s.error || "";
+
+  const headEl = $("#expHead");
+  if (headEl && document.activeElement !== headEl) {
+    headEl.innerHTML = `<option value="">All heads</option>` + s.heads.map(h =>
+      `<option value="${h.id}"${String(h.id) === String(s.head) ? " selected" : ""}>${esc(h.name)}</option>`).join("");
+  }
+  $$("[data-exp-status]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.expStatus === s.status)));
+
+  const rows = s.rows || [];
+  const writable = can("expense:write");
+  $("#expRows").innerHTML = rows.map(x => {
+    const acts = [];
+    if (x.attachment) acts.push(`<a class="rowbtn" href="${esc(x.attachment_url)}">Receipt</a>`);
+    if (writable && ["approved", "pending_approval"].includes(x.status)) {
+      acts.push(`<button class="rowbtn" type="button" data-act="exp-receipt" data-id="${x.id}">Upload</button>`);
+    }
+    if (writable && x.status === "approved") {
+      acts.push(`<button class="rowbtn" type="button" data-act="exp-reverse" data-id="${x.id}">Reverse</button>`);
+    }
+    if (x.status === "pending_approval" && can("approval:read")) {
+      acts.push(`<a class="rowbtn" href="#/approvals">Approve</a>`);
+    }
+    return `<tr><td class="strong">${esc(x.number)}</td><td>${esc(fmtDate(x.entry_date))}</td>`
+      + `<td>${esc(x.head)}</td><td class="n">${esc(money(x.amount))}</td>`
+      + `<td class="n">${esc(money(x.gst_amount))}${x.gst_creditable ? "" : ' <span class="chip off">Not creditable</span>'}</td>`
+      + `<td class="n strong">${esc(money(x.deductible_amount))}</td>`
+      + `<td><span class="pill">${esc(EXP_STATUS[x.status] || x.status)}</span>`
+      + (x.reversal_reason ? `<small>${esc(x.reversal_reason)}</small>` : "") + `</td>`
+      + `<td>${esc(x.mode)}</td><td>${esc(x.note || x.reference || "")}</td>`
+      + `<td class="rowacts">${acts.join(" ") || "â€“"}</td></tr>`;
+  }).join("");
+  $("#expEmpty").classList.toggle("hide", rows.length > 0);
+  $("#expEmpty").textContent = s.loading ? "Loading expensesâ€¦"
+    : s.loaded && !rows.length ? "No expense matches this filter." : "";
+  const deductible = rows.filter(x => x.status === "approved")
+    .reduce((sum, x) => sum + Number(x.deductible_amount || 0), 0);
+  $("#expTot").textContent = rows.length
+    ? `${plural(rows.length, "entry")} Â· â‚¹ ${money(deductible)} carried by approved entries shown` : "";
+}
+
+function openExpenseForm() {
+  if (!can("expense:write")) return;
+  const heads = state.exp.heads.filter(h => h.is_active && !h.is_system);
+  if (!heads.length) {
+    openDrawer("New expense",
+      "Add an expense head first; the payroll head is filled from HR.", `
+      <p class="gap-note">No expense head is available. Open <b>Expense heads</b> and add one.</p>
+      <div class="actions"><button class="btn" type="button" data-act="exp-heads">Expense heads</button>
+      <button class="btn ghost" type="button" data-act="close">Close</button></div>`);
+    return;
+  }
+  openDrawer("New expense",
+    "An expense is never edited. A mistake is reversed with a reason.", `
+    <form id="expForm" autocomplete="off">
+      <div class="row2">
+        <div><label for="x-head">Expense head</label><select id="x-head" name="head_id">
+          ${heads.map(h => `<option value="${h.id}">${esc(h.name)}</option>`).join("")}
+        </select></div>
+        <div><label for="x-date">Date</label><input id="x-date" name="entry_date" type="date" value="${dayIso(new Date())}" max="${dayIso(new Date())}" required></div>
+      </div>
+      <div class="row2">
+        <div><label for="x-amount">Amount before GST (â‚¹)</label><input id="x-amount" name="amount" inputmode="decimal" required autocomplete="off"></div>
+        <div><label for="x-gst">GST (â‚¹)</label><input id="x-gst" name="gst_amount" inputmode="decimal" value="0" autocomplete="off"></div>
+      </div>
+      <div class="row2">
+        <div><label for="x-mode">Paid by</label><select id="x-mode" name="mode">
+          ${EXP_MODES.map(m => `<option value="${m}"${m === "bank" ? " selected" : ""}>${m}</option>`).join("")}
+        </select></div>
+        <div><label for="x-ref">Reference (optional)</label><input id="x-ref" name="reference" maxlength="60" autocomplete="off"></div>
+      </div>
+      <label>GST that can be claimed as input credit
+        <input type="checkbox" name="gst_creditable" checked> Creditable
+      </label>
+      <label for="x-note">Note (optional)</label><input id="x-note" name="note" maxlength="300" autocomplete="off">
+      <label for="x-file">Receipt (JPEG, PNG, WebP or PDF, 5 MB)</label><input id="x-file" name="receipt" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+      <div class="note">GST that is not creditable becomes part of the expense in the profit and loss. Creditable GST never does.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save expense</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+async function saveExpense(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const f = form.elements;
+  const body = {head_id: Number(f.head_id.value), entry_date: f.entry_date.value,
+                amount: f.amount.value.trim(), gst_amount: f.gst_amount.value.trim() || "0",
+                gst_creditable: f.gst_creditable.checked, mode: f.mode.value};
+  if (f.reference.value.trim()) body.reference = f.reference.value.trim();
+  if (f.note.value.trim()) body.note = f.note.value.trim();
+  const res = await api("/api/expenses", {method: "POST", body});
+  if (!res.ok) {
+    btn.disabled = false; err.textContent = detail(res.body);
+    return;
+  }
+  const file = f.receipt.files && f.receipt.files[0];
+  if (file) {
+    const up = await uploadExpenseReceipt(res.body.id, file);
+    if (!up.ok) toast(up, "Expense saved but the receipt was not uploaded");
+  }
+  btn.disabled = false;
+  toast(res, res.body.status === "pending_approval"
+    ? "Expense saved and sent for approval" : "Expense saved");
+  closeDrawer(); loadExpenses(); loadDashboard();
+}
+
+async function uploadExpenseReceipt(id, file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const res = await fetch(`/api/expenses/${id}/attachment`,
+      {method: "POST", credentials: "same-origin", body: fd});
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* empty */ }
+    return {status: res.status, ok: res.ok, body};
+  } catch (e) {
+    return {status: 0, ok: false, body: {detail: "Cannot reach the server."}};
+  }
+}
+
+function expenseReceiptForm(id) {
+  if (!can("expense:write")) return;
+  const x = (state.exp.rows || []).find(r => r.id === Number(id));
+  if (!x) return;
+  openDrawer(`Receipt Â· ${x.number}`, "The file is private and served only to a signed-in role.",
+    `<form id="expReceiptForm" data-id="${x.id}">
+      <label for="xr-file">Receipt (JPEG, PNG, WebP or PDF, 5 MB)</label>
+      <input id="xr-file" name="receipt" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Upload</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveExpenseReceipt(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  const file = form.elements.receipt.files && form.elements.receipt.files[0];
+  if (!file) { err.textContent = "Choose a file first."; return; }
+  btn.disabled = true;
+  const res = await uploadExpenseReceipt(form.dataset.id, file);
+  btn.disabled = false;
+  toast(res, res.ok ? "Receipt uploaded" : "Receipt not uploaded");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadExpenses();
+}
+
+function expenseReverseForm(id) {
+  if (!can("expense:write")) return;
+  const x = (state.exp.rows || []).find(r => r.id === Number(id));
+  if (!x) return;
+  openDrawer(`Reverse ${x.number}`,
+    "The entry keeps its amount and stays on file; the profit and loss stops counting it.", `
+    <form id="expReverseForm" data-id="${x.id}">
+      <p>${esc(x.head)} Â· ${esc(fmtDate(x.entry_date))} Â· â‚¹ ${esc(money(x.amount))}</p>
+      <label for="xr-reason">Reason</label><input id="xr-reason" name="reason" maxlength="300" required autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Reverse expense</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveExpenseReverse(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  const reason = form.elements.reason.value.trim();
+  if (reason.length < 3) { err.textContent = "Give a reason of at least three characters."; return; }
+  btn.disabled = true;
+  const res = await api(`/api/expenses/${form.dataset.id}/reverse`, {method: "POST", body: {reason}});
+  btn.disabled = false;
+  toast(res, res.ok ? "Expense reversed" : "Not reversed");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadExpenses(); loadDashboard();
+}
+
+function openExpenseHeads() {
+  if (!can("expense:write")) return;
+  const rows = state.exp.heads || [];
+  openDrawer("Expense heads", "The payroll head is created by HR and cannot be edited here.", `
+    <form id="expHeadForm" autocomplete="off">
+      <label for="xh-name">New head</label>
+      <div class="toolbar"><input id="xh-name" name="name" maxlength="80" required autocomplete="off">
+      <button class="btn" type="submit">Add head</button></div>
+      <div class="err" role="alert"></div>
+    </form>
+    <div class="tw"><table><thead><tr><th>Head</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map(h => `<tr><td class="strong">${esc(h.name)}${h.is_system ? ' <span class="chip">Payroll</span>' : ""}</td>`
+        + `<td>${h.is_active ? "Active" : "Inactive"}</td><td>${h.is_system ? "â€“"
+          : `<button class="rowbtn" type="button" data-act="exp-head-toggle" data-id="${h.id}" data-on="${h.is_active ? "0" : "1"}">${h.is_active ? "Deactivate" : "Activate"}</button>`}</td></tr>`).join("")}
+    </tbody></table></div>`, true);
+}
+
+async function saveExpenseHead(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  const name = form.elements.name.value.trim();
+  if (name.length < 2) { err.textContent = "The name needs at least two characters."; return; }
+  btn.disabled = true;
+  const res = await api("/api/expenses/heads", {method: "POST", body: {name}});
+  btn.disabled = false;
+  toast(res, res.ok ? "Head added" : "Head not added");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  const r2 = await api("/api/expenses/heads");
+  if (r2.ok) state.exp.heads = r2.body;
+  openExpenseHeads(); renderExpenses();
+}
+
+async function toggleExpenseHead(id, on) {
+  const res = await api(`/api/expenses/heads/${id}`, {method: "PATCH", body: {is_active: on}});
+  toast(res, res.ok ? "Head changed" : "Head not changed");
+  if (!res.ok) return;
+  const r2 = await api("/api/expenses/heads");
+  if (r2.ok) state.exp.heads = r2.body;
+  openExpenseHeads(); renderExpenses(); loadExpenses();
+}
+
+function openExpenseSettings() {
+  if (state.user.role !== "admin") return;
+  const st = state.exp.settings;
+  if (!st) return;
+  openDrawer("Expense settings",
+    "Only the Administrator can change the approval rule or the tracking start.", `
+    <form id="expSettingsForm" autocomplete="off">
+      <label>Approval threshold
+        <input type="checkbox" name="approval_enabled"${st.approval_enabled ? " checked" : ""}> Ask for approval above the amount
+      </label>
+      <label for="xs-threshold">Approval amount (â‚¹)</label>
+      <input id="xs-threshold" name="approval_threshold" inputmode="decimal" value="${esc(st.approval_threshold)}">
+      <label for="xs-from">Track expenses from</label>
+      <input id="xs-from" name="tracked_from" type="date" value="${esc(st.tracked_from)}" max="${dayIso(new Date())}">
+      <div class="note">A window that starts before this date reports expenses as a gap, not as zero.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save settings</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveExpenseSettings(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const f = form.elements;
+  const res = await api("/api/expenses/settings", {method: "PUT", body: {
+    approval_enabled: f.approval_enabled.checked,
+    approval_threshold: f.approval_threshold.value.trim() || "0",
+    tracked_from: f.tracked_from.value,
+  }});
+  btn.disabled = false;
+  toast(res, res.ok ? "Settings saved" : "Settings not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadExpenses(); loadDashboard();
+}
+
+function setExpenseStatus(status) {
+  state.exp.status = ["approved", "pending_approval", "rejected", "reversed"].includes(status) ? status : "";
+  loadExpenses();
+}
+function setExpenseHead(value) {
+  state.exp.head = /^\d+$/.test(value || "") ? value : "";
+  loadExpenses();
 }
 
 async function openDistributorLedger(id) {
@@ -7243,6 +7554,8 @@ document.addEventListener("click", e => {
   if (accModeBtn) return setAccMode(accModeBtn.dataset.accMode);
   const accStateBtn = e.target.closest("[data-acc-state]");
   if (accStateBtn) return setAccStateFilter(accStateBtn.dataset.accState);
+  const expStatusBtn = e.target.closest("[data-exp-status]");
+  if (expStatusBtn) return setExpenseStatus(expStatusBtn.dataset.expStatus);
   const geoTile = e.target.closest("[data-geo-code]");
   if (geoTile) return selectGeo(geoTile.dataset.geoCode);
   const geoSortBtn = e.target.closest("[data-geo-sort]");
@@ -7265,6 +7578,13 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "load-acc-report") return loadAccountsReport();
   if (a && a.dataset.act === "export-acc") return exportAccCsv();
   if (a && a.dataset.act === "acc-ledger") return openDistributorLedger(a.dataset.id);
+  if (a && a.dataset.act === "exp-refresh") return loadExpenses();
+  if (a && a.dataset.act === "new-expense") return openExpenseForm();
+  if (a && a.dataset.act === "exp-heads") return openExpenseHeads();
+  if (a && a.dataset.act === "exp-settings") return openExpenseSettings();
+  if (a && a.dataset.act === "exp-reverse") return expenseReverseForm(a.dataset.id);
+  if (a && a.dataset.act === "exp-receipt") return expenseReceiptForm(a.dataset.id);
+  if (a && a.dataset.act === "exp-head-toggle") return toggleExpenseHead(a.dataset.id, a.dataset.on === "1");
   if (a && a.dataset.act === "open-search") return openPalette();
   if (a && a.dataset.act === "reload-dash") return loadDashboard();
   if (a && a.dataset.act === "reload-compare") return loadCompare();
@@ -7490,6 +7810,11 @@ document.addEventListener("submit", e => {
   else if (f.id === "limitForm") saveLimit(f);
   else if (f.id === "verifyForm") submitVerification(f);
   else if (f.id === "entryForm") saveEntry(f);
+  else if (f.id === "expForm") saveExpense(f);
+  else if (f.id === "expReceiptForm") saveExpenseReceipt(f);
+  else if (f.id === "expReverseForm") saveExpenseReverse(f);
+  else if (f.id === "expHeadForm") saveExpenseHead(f);
+  else if (f.id === "expSettingsForm") saveExpenseSettings(f);
   else if (f.id === "leadForm") saveLead(f);
   else if (f.id === "actForm") saveActivity(f);
   else if (f.id === "lstatusForm") saveLeadStatus(f);
@@ -7539,6 +7864,11 @@ document.addEventListener("input", e => {
   if (e.target.id === "pq") renderProducts();
   if (e.target.id === "rpq") { state.rpSearch = e.target.value; drawRpTabs(); }
   if (e.target.id === "hrq") renderHrDirectory();
+  if (e.target.id === "expq") {
+    clearTimeout(state.exp.timer);
+    state.exp.q = e.target.value.trim();
+    state.exp.timer = setTimeout(loadExpenses, 300);
+  }
 });
 document.addEventListener("change", e => {
   if (e.target.closest("#poForm")) syncPoLines();
@@ -7555,6 +7885,7 @@ document.addEventListener("change", e => {
     applyGeoDates($("#geoFrom").value, $("#geoTo").value);
   }
   if (e.target.id === "hrStatus" || e.target.id === "hrDept") renderHrDirectory();
+  if (e.target.id === "expHead") setExpenseHead(e.target.value);
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {

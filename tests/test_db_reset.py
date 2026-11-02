@@ -632,7 +632,10 @@ def test_full_mode_rebuilds_the_schema_and_the_base_admin(reset_env, separate_de
             products = conn.execute("SELECT count(*) FROM products").fetchone()[0]
             roles = {row[0] for row in conn.execute("SELECT name FROM roles").fetchall()}
             employees = conn.execute("SELECT code FROM employees").fetchall()
-        assert revision == "0019_db_reset_key"
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+        head = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head()
+        assert revision == head
         assert len(users) == 1 and users[0][0] == "admin"
         assert users[0][2] is True                       # must change on next sign-in
         assert verify_password(PASSWORD, users[0][1])    # the operator's own password

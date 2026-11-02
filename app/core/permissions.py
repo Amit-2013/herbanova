@@ -42,6 +42,8 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "accounts:read":     ("View outstanding, party ledgers, GST registers and the trial balance", "Accounts"),
     "accounts:write":    ("Record receipts from distributors and payments to suppliers", "Accounts"),
     "accounts:reports":  ("View the Accounts dashboard, Accounts report pack and Accounts email block", "Accounts"),
+    "expense:read":      ("View expense heads and recorded expenses", "Accounts"),
+    "expense:write":     ("Create expenses, reverse a recorded expense and upload its receipt", "Accounts"),
     "lead:read":         ("View leads", "Leads"),
     "lead:write":        ("Create and work leads", "Leads"),
     "lead:assign":       ("Reassign lead ownership", "Leads"),
@@ -102,6 +104,8 @@ PERMISSION_PARENT: dict[str, str | None] = {
     "accounts:read": None,
     "accounts:write": "accounts:read",
     "accounts:reports": None,
+    "expense:read": None,
+    "expense:write": "expense:read",
     "lead:read": None,
     "lead:write": "lead:read",
     "lead:assign": "lead:read",
@@ -192,6 +196,8 @@ BASELINE_ROLE_PERMS: dict[str, set[str]] = {
                   # Full accounts reporting is a narrower right than the statements
                   # above; the Administrator may grant it to an Accounts head.
                   "accounts:reports",
+                  # Expense heads and entries, including the reversal flow
+                  "expense:read", "expense:write",
                   # Scheduled reports: recipients, schedules and the delivery log
                   "email:manage",
                   # Approvals and post-billing amendments are administrator decisions

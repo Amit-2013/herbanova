@@ -57,6 +57,7 @@ BUSINESS_TABLES = (
     "credit_note_lines", "credit_notes",
     "debit_note_lines", "debit_notes",
     "email_deliveries", "email_test_messages",
+    "expenses",
     "goods_receipt_lines", "goods_receipts",
     "hr_announcements",
     "hr_attendance", "hr_attendance_corrections", "hr_import_batches",
@@ -78,7 +79,7 @@ BUSINESS_TABLES = (
 KEPT_TABLES = (
     "company_profile", "discount_slabs", "distributors", "document_sequences",
     "email_recipients", "email_schedule_recipients", "email_schedules",
-    "email_settings", "feature_flags",
+    "email_settings", "feature_flags", "expense_heads", "expense_settings",
     "hr_approval_workflows", "hr_attendance_rules", "hr_branches", "hr_departments",
     "hr_employee_assets", "hr_employee_documents", "hr_holidays", "hr_leave_types",
     "hr_letter_templates", "hr_period_locks", "hr_salary_components",
@@ -645,7 +646,7 @@ def verify_backups(admin, run_id: str, token: str) -> dict:
             blob = path.read_bytes()
             digest = hashlib.sha256(blob).hexdigest()
             check(label, "checksum", digest == item["sha256"],
-                  f"sha256 {digest[:16]}…" if digest == item["sha256"] else "checksum differs")
+                  f"sha256 {digest[:16]}â€¦" if digest == item["sha256"] else "checksum differs")
             try:
                 plain = fernet.decrypt(blob)
                 check(label, "decrypt", True, f"{len(plain):,} bytes decrypted")
