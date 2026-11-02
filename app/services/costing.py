@@ -520,7 +520,8 @@ def _costs_intact(db: Session, costs: list[dict]) -> bool:
 
 def apply_cost_backfill(db: Session, *, expected_fingerprint: str,
                         actor_id: int | None = None,
-                        product_ids: list[int] | None = None) -> dict:
+                        product_ids: list[int] | None = None,
+                        operator: str | None = None) -> dict:
     """Write the approved cost proposals, guarded like the attribution apply.
 
     Nothing is written unless the live plan still hashes to the approved
@@ -603,6 +604,7 @@ def apply_cost_backfill(db: Session, *, expected_fingerprint: str,
     audit(db, actor_id, COST_BACKFILL_AUDIT, "stock_movements:cost_backfill",
           {"plan_fingerprint": current, "products": pids,
            "movements": changed_total, "costs": costs,
+           "operator": (operator or "").strip() or None,
            "tool": "backfill_costs.py"}, notify=False)
     return {"applied": True, "already_applied": False, "idempotent": False,
             "movements_changed": changed_total, "products": len(pids),
@@ -765,7 +767,8 @@ def _links_intact(db: Session, links: list[dict]) -> bool:
 
 
 def apply_attribution(db: Session, *, expected_fingerprint: str,
-                      actor_id: int | None = None) -> dict:
+                      actor_id: int | None = None,
+                      operator: str | None = None) -> dict:
     """Link legacy issue rows to their invoice, guarded by the approved plan.
 
     The caller passes the SHA-256 fingerprint printed by the dry run. Nothing is
@@ -826,7 +829,8 @@ def apply_attribution(db: Session, *, expected_fingerprint: str,
     movements = sum(len(link["movement_ids"]) for link in links)
     audit(db, actor_id, ATTRIBUTION_AUDIT, "stock_movements:attribution",
           {"plan_fingerprint": current, "links": links, "movements": movements,
-           "invoices": len(links), "tool": "backfill_costs.py"}, notify=False)
+           "invoices": len(links), "operator": (operator or "").strip() or None,
+           "tool": "backfill_costs.py"}, notify=False)
     return {"applied": True, "already_applied": False, "idempotent": False,
             "attributed_movements": movements, "invoices": len(links),
             "audit_rows": 1, "plan_fingerprint": current, "links": links}

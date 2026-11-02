@@ -15,11 +15,15 @@ No amounts are hidden from the operator at approval time, but nothing leaves
 the database except this report.
 
     python backfill_costs.py [--product 12] [--product 13]
-    python backfill_costs.py --apply --plan-fingerprint <sha256>
+    python backfill_costs.py --apply --plan-fingerprint <sha256> [--operator NAME]
     python backfill_costs.py --apply-costs --plan-fingerprint <sha256> [--product 12]
+
+The operator is recorded in the audit row. Pass `--operator NAME` or set
+HERBANOVA_BACKFILL_OPERATOR; the dry run prints which name would be recorded.
 """
 import argparse
 import json
+import os
 import sys
 from decimal import Decimal
 
@@ -52,7 +56,11 @@ def main() -> int:
                         help="write the approved cost proposals")
     parser.add_argument("--plan-fingerprint", metavar="SHA256",
                         help="fingerprint printed by the dry run; required to apply")
+    parser.add_argument("--operator", default=os.environ.get("HERBANOVA_BACKFILL_OPERATOR"),
+                        help="name recorded in the audit row (default: "
+                             "HERBANOVA_BACKFILL_OPERATOR)")
     args = parser.parse_args()
+    operator = (args.operator or "").strip() or None
     if args.apply and args.apply_costs:
         print("Refused: use --apply or --apply-costs, not both.", file=sys.stderr)
         return 2
@@ -70,10 +78,12 @@ def main() -> int:
             try:
                 if args.apply:
                     result = apply_attribution(
-                        db, actor_id=None, expected_fingerprint=args.plan_fingerprint)
+                        db, actor_id=None, operator=operator,
+                        expected_fingerprint=args.plan_fingerprint)
                 else:
                     result = apply_cost_backfill(
                         db, actor_id=None, product_ids=args.product,
+                        operator=operator,
                         expected_fingerprint=args.plan_fingerprint)
             except (StaleAttributionPlanError, StaleCostPlanError,
                     LockedPeriodError, ValueError) as exc:
@@ -91,6 +101,7 @@ def main() -> int:
         attribution["plan_fingerprint"] = attribution_fingerprint(attribution)
     report = {
         "mode": "dry-run",
+        "operator": operator,
         "products": len(plan["products"]),
         "movements": plan["movements"],
         "would_set_cost": plan["would_set_cost"],

@@ -429,7 +429,8 @@ def test_apply_links_only_the_candidates_and_writes_one_audit_row(client, world)
     assert not any(c["sales_order_id"] == blocked_order for c in plan["candidates"])
 
     with SessionLocal() as db:
-        result = costing.apply_attribution(db, expected_fingerprint=fingerprint)
+        result = costing.apply_attribution(
+            db, expected_fingerprint=fingerprint, operator=" attribution.ops ")
         db.commit()
 
     assert result["applied"] is True and result["already_applied"] is False
@@ -447,6 +448,7 @@ def test_apply_links_only_the_candidates_and_writes_one_audit_row(client, world)
     assert len(audited) == 1
     assert audited[0].actor_id is None
     assert audited[0].record == "stock_movements:attribution"
+    assert audited[0].changes["operator"] == "attribution.ops"
     assert audited[0].changes["tool"] == "backfill_costs.py"
 
 
@@ -527,7 +529,8 @@ def test_cost_apply_sets_the_proposal_and_writes_one_audit_row(client, world):
     fingerprint = costing.cost_fingerprint(plan)
     with SessionLocal() as db:
         result = costing.apply_cost_backfill(
-            db, expected_fingerprint=fingerprint, product_ids=[product["product_id"]])
+            db, expected_fingerprint=fingerprint, operator="cost.ops",
+            product_ids=[product["product_id"]])
         db.commit()
 
     assert result["applied"] is True and result["audit_rows"] == 1
@@ -544,6 +547,7 @@ def test_cost_apply_sets_the_proposal_and_writes_one_audit_row(client, world):
     recorded = {c["movement_id"]: c for c in audited[0].changes["costs"]}
     assert recorded[issue.id]["unit_cost"] == "10.00"
     assert recorded[issue.id]["cost_source"] == costing.PARTIAL
+    assert audited[0].changes["operator"] == "cost.ops"
 
 
 def test_cost_apply_is_idempotent_and_writes_no_second_audit_row(client, world):
@@ -850,6 +854,19 @@ def test_backfill_tool_refuses_to_write():
     assert len(data["attribution"]["plan_fingerprint"]) == 64
     assert len(data["cost_plan_fingerprint"]) == 64
     assert all("movements_detail" in row for row in data["detail"])
+
+    from_env = subprocess.run(
+        [sys.executable, "backfill_costs.py"], cwd=ROOT,
+        env={**env, "HERBANOVA_BACKFILL_OPERATOR": "env.ops"},
+        capture_output=True, text=True)
+    assert from_env.returncode == 0, from_env.stderr
+    assert json.loads(from_env.stdout)["operator"] == "env.ops"
+
+    from_arg = subprocess.run(
+        [sys.executable, "backfill_costs.py", "--operator", "arg.ops"],
+        cwd=ROOT, env=env, capture_output=True, text=True)
+    assert from_arg.returncode == 0, from_arg.stderr
+    assert json.loads(from_arg.stdout)["operator"] == "arg.ops"
 
 
 # ------------------------------------------------- issues with no known cost
