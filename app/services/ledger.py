@@ -21,7 +21,7 @@ What this module does **not** claim:
 """
 from collections import OrderedDict
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -35,7 +35,9 @@ ZERO = Decimal("0.00")
 
 
 def money(value) -> Decimal:
-    return Decimal(value or 0).quantize(Decimal("0.01"))
+    # Half-up, the same rule as the tax/payroll quantisers (F-01); the default
+    # Decimal context rounds half-even, which would disagree on an exact half paisa.
+    return Decimal(value or 0).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
 
 def _grand(document) -> Decimal:

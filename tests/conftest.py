@@ -19,6 +19,10 @@ TEST_URL = URL.set(database="herbanova_bcs_test")
 settings.database_url = TEST_URL.render_as_string(hide_password=False)
 os.environ["DATABASE_URL"] = settings.database_url
 os.environ["APP_ENV"] = "local"
+# The suite must never reach the outside world. A token present in .env made
+# every audited change fire a real Telegram message and rate-limit the run.
+settings.telegram_bot_token = ""
+settings.telegram_chat_id = ""
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -84,7 +88,8 @@ def client():
         tokens = {}
         for name, role in (("admin", "admin"), ("sales", "sales"),
                            ("inventory", "inventory"), ("viewer", "viewer"),
-                           ("hr_manager", "hr_manager"), ("payroll", "payroll_officer")):
+                           ("hr_manager", "hr_manager"), ("payroll", "payroll_officer"),
+                           ("manager", "reporting_manager"), ("staff", "employee")):
             user = db.scalar(select(User).where(User.username == f"t_{name}"))
             if not user:
                 emp = Employee(code=f"T_{name}"[:30].upper(), full_name=f"Test {name}",

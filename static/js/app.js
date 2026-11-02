@@ -10,7 +10,8 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money = n => new Intl.NumberFormat("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2}).format(Number(n) || 0);
 const qty = n => new Intl.NumberFormat("en-IN", {maximumFractionDigits: 3}).format(Number(n) || 0);
-const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const PLURALS = {batch: "batches", entry: "entries"};
+const plural = (n, w) => `${n} ${n === 1 ? w : (PLURALS[w] || w + "s")}`;
 const parseTs = s => new Date(/([zZ]|[+-]\d\d:?\d\d)$/.test(s) ? s : s + "Z");
 const fmtDate = d => d ? new Date(d + "T00:00:00").toLocaleDateString("en-IN", {day: "2-digit", month: "short", year: "numeric"}) : "–";
 const fmtStamp = s => s ? parseTs(s).toLocaleString("en-IN", {day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit"}) : "–";
@@ -18,19 +19,90 @@ const fmtDay = s => s ? parseTs(s).toLocaleDateString("en-IN", {day: "2-digit", 
 const daysUntil = iso => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((new Date(iso + "T00:00:00") - t) / 86400000); };
 const poValue = po => Math.round(po.lines.reduce((s, l) => s + Number(l.qty) * Number(l.unit_cost), 0) * 100) / 100;
 
-const state = {user: null, perms: new Set(), modules: null, dashboard: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
+const state = {user: null, perms: new Set(), features: null, featureFlags: [], modules: null, dashboard: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
                suppliers: [], bankChanges: [], supFilter: "all",
                dists: [], orders: [], approvals: [], leads: [], rp: {cat: [], key: "stock", from: "", to: "", data: null, tok: 0}, soFilter: "all", apFilter: "pending", ldFilter: "open", ldOwner: "all", distFilter: "all",
                users: [], roles: [], employees: [], permCatalog: [], audit: {rows: [], actions: [], actors: [], total: 0},
                tax: {company: null, rates: [], slabs: [], states: [], rateFilter: "all"},
                invoices: [], creditNotes: [], debitNotes: [], invFilter: "all",
                accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
+               acc: {from: "", to: "", state: "", report: null, loading: false, error: null, seq: 0,
+                     cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0}},
+               exp: {rows: [], heads: [], settings: null, status: "", head: "", q: "",
+                     loading: false, error: null, seq: 0, loaded: false},
+               foc: {stock: [], notes: [], loading: false, error: null, loaded: false},
+               sr: {status: null, schedules: [], recipients: [], deliveries: [],
+                    tab: "schedules", logStatus: "", logPack: ""},
+               email: {settings: null, messages: [], loading: false, loaded: false,
+                       error: null},
                poFilter: "all", view: "dash", tab: "stock", lostFilter: "",
                fuFilter: "today", rpPage: 1, rpSearch: "", rpCategory: "",
-               hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: []}};
+               dashFrom: "", dashTo: "", dashPreset: "month", dashDateError: "", dashLoading: false, dashError: null, dashSeq: 0, chart: {index: -1},
+               compare: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0},
+               geo: {from: "", to: "", data: null, loading: false, error: null, dateError: "", seq: 0,
+                     sort: {key: "sales", dir: "desc"}, selected: null},
+               expiry: {bucket: "all", loading: false, data: null},
+               palette: {open: false, items: [], i: -1, seq: 0, timer: 0},
+               hr: {dashboard: null, employees: [], attendance: [], leave: [], od: [], payroll: [],
+                    branches: [], offices: [], rules: [], shifts: [], siteEmps: [],
+                    mxBranch: "", mxOffice: "", repBranch: "", repOffice: "",
+                    from: "", to: "", error: null, profile: null}};
 state.rp.filters = {employee_id: "", department: "", branch_id: ""};
 state.rp.opts = null;
+
+/* The Overview window. A preset fills both fields; editing a field clears it.
+   Dates are calendar days in the business time zone, sent to the server as
+   from_date/to_date so the figures are counted there, not filtered here. */
+function dayIso(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dashWindow(key, now = new Date()) {
+  const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (key === "7d" || key === "30d" || key === "90d") {
+    const n = Number(key.slice(0, -1));
+    const s = new Date(t); s.setDate(t.getDate() - (n - 1));
+    return {from: dayIso(s), to: dayIso(t)};
+  }
+  if (key === "last_month") {
+    return {from: dayIso(new Date(t.getFullYear(), t.getMonth() - 1, 1)),
+            to: dayIso(new Date(t.getFullYear(), t.getMonth(), 0))};
+  }
+  if (key === "fy") {
+    const y = t.getMonth() >= 3 ? t.getFullYear() : t.getFullYear() - 1;
+    return {from: `${y}-04-01`, to: dayIso(t)};
+  }
+  return {from: dayIso(new Date(t.getFullYear(), t.getMonth(), 1)), to: dayIso(t)};
+}
+{ const w = dashWindow("month"); state.dashFrom = w.from; state.dashTo = w.to; }
+try {
+  const from = localStorage.getItem("hb.dashFrom");
+  const to = localStorage.getItem("hb.dashTo");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from || "") && /^\d{4}-\d{2}-\d{2}$/.test(to || "")
+      && from <= to) {
+    state.dashFrom = from; state.dashTo = to;
+    state.dashPreset = localStorage.getItem("hb.dashPreset") || "";
+  }
+} catch (e) { /* storage blocked */ }
+try {
+  const mode = localStorage.getItem("hb.cmpMode");
+  const month = localStorage.getItem("hb.cmpMonth");
+  if (mode === "full_month" || mode === "mtd") state.compare.mode = mode;
+  if (/^\d{4}-\d{2}$/.test(month || "")) state.compare.month = month;
+} catch (e) { /* storage blocked */ }
+{ const w = dashWindow("month"); state.geo.from = w.from; state.geo.to = w.to; }
+{ const w = dashWindow("month"); state.acc.from = w.from; state.acc.to = w.to; }
+const accAllowed = () => can("accounts:reports");
+try {
+  const from = localStorage.getItem("hb.geoFrom");
+  const to = localStorage.getItem("hb.geoTo");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from || "") && /^\d{4}-\d{2}-\d{2}$/.test(to || "")
+      && from <= to) {
+    state.geo.from = from;
+    state.geo.to = to;
+  }
+} catch (e) { /* storage blocked */ }
 const can = p => state.perms.has(p);
+const dashQuery = () => `from_date=${encodeURIComponent(state.dashFrom)}&to_date=${encodeURIComponent(state.dashTo)}`;
 
 /* ---------- server calls ---------- */
 async function api(path, opts = {}) {
@@ -68,6 +140,7 @@ function openDrawer(title, sub, html, wide = false) {
   $("#dtitle").textContent = title;
   $("#dsub").textContent = sub || "";
   $("#dbody").innerHTML = html;
+  $("#drawer").classList.remove("hr-wide");
   $("#drawer").classList.toggle("wide", wide);
   $("#scrim").classList.remove("hide");
   $("#drawer").classList.remove("hide");
@@ -84,10 +157,33 @@ function closeDrawer() {
 const drawerOpen = () => !$("#drawer").classList.contains("hide");
 
 /* ---------- session ---------- */
+/* Module switches are separate from permissions: the Administrator turns a
+   module off centrally, and the server then removes its permissions from every
+   role. The map mirrors app/core/features.py so navigation never offers a
+   screen whose API answers 403. A missing list (older server) means all on. */
+const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "stock",
+                      foc: "foc",
+                      suppliers: "suppliers", sales: "sales", billing: "sales",
+                      customers: "sales", geo: "sales",
+                      approvals: "approvals", leads: "leads", lost: "leads",
+                      followups: "leads", accounts: "accounts", expenses: "accounts",
+                      tax: "tax",
+                      reports: "reports", compare: "reports", hr: "hr", audit: "audit",
+                      scheduled: "scheduled", users: "users", roles: "users"};
+const featureOn = v => !VIEW_FEATURE[v] || !state.features || state.features.has(VIEW_FEATURE[v]);
+
 function enter(u) {
   state.user = u;
   state.perms = new Set(u.permissions || []);
+  state.features = Array.isArray(u.features) ? new Set(u.features) : null;
   if (u.must_change_password) { showPasswordChange(u); return; }
+  state.dashboard = null;
+  state.dashLoading = true;
+  state.dashError = null;
+  state.expiry = {bucket: "all", loading: false, data: null};
+  state.email = {settings: null, messages: [], loading: false, loaded: false, error: null};
+  state.chart = {index: -1, off: {}};
+  closePalette();
   $("#mustChange").classList.add("hide");
   $("#login").classList.add("hide");
   $("#shell").classList.remove("hide");
@@ -96,15 +192,38 @@ function enter(u) {
   show("#navLeads", can("lead:read"));
   show("#navSuppliers", can("supplier:read"));
   show("#navBilling", can("sales:read"));
-  show("#navAccounts", can("accounts:read"));
+  show("#navAccounts", can("accounts:read") || can("accounts:reports"));
   show("#navHr", can("hr:read") || can("hr:attendance_self"));
+  show("#navRoles", can("user:manage"));
   show("#navSettings", can("user:manage") || can("tax:read") || can("audit:read") || can("hr:read"));
+  // Every other module link follows the read permission its API requires, so a
+  // role is never offered a screen that can only answer 403.
+  const showView = (v, on) => $$(`.side a.nav[data-v="${v}"]`).forEach(a => a.classList.toggle("hide", !on || !featureOn(v)));
+  showView("lost", can("lead:read"));
+  showView("expenses", can("expense:read"));
+  showView("followups", can("lead:read"));
+  showView("customers", can("sales:read"));
+  showView("sales", can("sales:read"));
+  showView("approvals", can("approval:read"));
+  showView("purchasing", can("stock:read"));
+  showView("products", can("product:read"));
+  showView("inventory", can("stock:read"));
+  showView("foc", can("foc:read"));
+  showView("geo", can("sales:read"));
+  showView("roles", can("user:manage"));
+  showView("scheduled", srAllowed());
+  showView("reports", ["accounts:read", "hr:reports", "sales:read", "stock:read",
+                       "supplier:read", "tax:read"].some(k => can(k)));
+  $$(".nav-group").forEach(g => g.classList.toggle("hide", !g.querySelector("a.nav:not(.hide)")));
   $("#role").textContent = u.role;
   route();
   loadAll();
 }
 function leave(msg) {
-  state.user = null; state.perms = new Set(); state.movements = null;
+  state.user = null; state.perms = new Set(); state.features = null;
+  state.featureFlags = []; state.movements = null;
+  state.dashboard = null; state.dashLoading = false; state.dashError = null;
+  closePalette();
   closeDrawer();
   $("#mustChange").classList.add("hide");
   $("#changePwForm").reset();
@@ -162,16 +281,22 @@ async function boot() {
 
 /* ---------- data ---------- */
 async function loadAll() {
+  if (!state.dashboard) { state.dashLoading = true; renderDash(); }
   const none = Promise.resolve({ok: true, body: []});
   const canUsers = can("user:manage");
   const canTax = can("tax:read");
   const canSales = can("sales:read");
   const canAccounts = can("accounts:read");
   const canApprovals = can("approval:read");
-  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da] = await Promise.all([
-    api("/api/health"), api("/api/modules"), api("/api/products?page=1&page_size=200"), api("/api/warehouses"),
-    api("/api/inventory/batches"), api("/api/purchase-orders?page=1&page_size=200"),
-    api("/api/distributors?page=1&page_size=200"), api("/api/sales-orders?page=1&page_size=200"),
+  const isAdminRole = !!state.user && String(state.user.role || "").trim().toLowerCase() === "admin";
+  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da, ff] = await Promise.all([
+    api("/api/health"), api("/api/modules"),
+    can("product:read") ? api("/api/products?page=1&page_size=200") : none,
+    can("stock:read") ? api("/api/warehouses") : none,
+    can("stock:read") ? api("/api/inventory/batches") : none,
+    can("stock:read") ? api("/api/purchase-orders?page=1&page_size=200") : none,
+    canSales ? api("/api/distributors?page=1&page_size=200") : none,
+    canSales ? api("/api/sales-orders?page=1&page_size=200") : none,
     canApprovals ? api("/api/approvals?page=1&page_size=200") : none,
     can("lead:read") ? api("/api/leads?page=1&page_size=200") : none,
     canUsers ? api("/api/users") : none, canUsers ? api("/api/roles") : none,
@@ -186,14 +311,22 @@ async function loadAll() {
     canAccounts ? api("/api/accounts/outstanding") : none,
     canAccounts ? api("/api/accounts/payments") : none,
     canAccounts ? api("/api/accounts/ageing") : none,
-    api("/api/dashboard")]);
+    api(`/api/dashboard?${dashQuery()}`),
+    isAdminRole ? api("/api/features") : none]);
   if (!state.user) return;
   // The register is load-bearing for the Overview: keep the last good copy if a
   // refresh fails rather than blanking the module panel.
   if (mo.ok && mo.body) state.modules = mo.body;
   // Overview figures are counted by the server over the whole database; the lists
   // below are capped at 200 rows and must never be used to compute a tile.
-  state.dashboard = da.ok && da.body && !Array.isArray(da.body) ? da.body : null;
+  state.dashLoading = false;
+  if (da.ok && da.body && !Array.isArray(da.body)) {
+    state.dashboard = da.body;
+    state.dashError = null;
+    state.expiry.data = null;
+  } else if (!state.dashboard) {
+    state.dashError = da.ok ? "The server returned an unexpected response." : detail(da.body);
+  }
   state.products = p.ok ? p.body : [];
   state.warehouses = w.ok ? w.body : [];
   state.batches = b.ok ? b.body : [];
@@ -206,6 +339,7 @@ async function loadAll() {
   state.roles = rl.ok ? rl.body : [];
   state.employees = em.ok ? em.body : [];
   state.permCatalog = pcat.ok ? pcat.body : [];
+  state.featureFlags = ff.ok ? ff.body : [];
   state.suppliers = sp.ok ? sp.body : [];
   state.bankChanges = bc.ok ? bc.body : [];
   state.tax.company = co.ok ? co.body : null;
@@ -222,6 +356,7 @@ async function loadAll() {
   const failed = [p, w, b, o, ds, so, canApprovals ? ap : null, ld, sp].find(r => r && !r.ok);
   if (failed) toast(failed, "Some data could not be loaded");
   renderAll();
+  if (state.dashboard && state.expiry.bucket !== "all") setExpiryBucket(state.expiry.bucket);
   if (state.movements) loadMovements();
 }
 async function loadMovements() {
@@ -235,20 +370,38 @@ async function loadMovements() {
 const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", purchasing: "Purchases",
                 suppliers: "Suppliers", tax: "Tax and discounts",
                 sales: "Sales orders", billing: "Billing", accounts: "Accounting & Finance",
-                approvals: "Approvals", distributors: "Distributors", customers: "Customers",
+                expenses: "Expenses", foc: "Free samples (FOC)",
+                approvals: "Approvals", customers: "Customers and distributors",
                 leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
                 reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
-                users: "Users and rights", audit: "Audit trail"};
+                roles: "Roles & Permissions", users: "Logins and employees", audit: "Audit trail",
+                compare: "MoM & YoY dashboard", geo: "Geography",
+                scheduled: "Scheduled reports"};
 const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
-                   customers: "sales:read", users: "user:manage", audit: "audit:read",
+                   geo: "sales:read",
+                   customers: "sales:read", users: "user:manage", roles: "user:manage",
+                   audit: "audit:read",
                    suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
-                   hr: "hr:read"};
+                   expenses: "expense:read",
+                   products: "product:read", inventory: "stock:read", purchasing: "stock:read",
+                   foc: "foc:read",
+                   sales: "sales:read", billing: "sales:read",
+                   approvals: "approval:read",
+                   hr: "hr:read", scheduled: "email:manage"};
 function route() {
-  const [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
+  let [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
+  // Customers and distributors are one master. The older address still opens
+  // the screen, so dashboard drill-downs, links and bookmarks keep working.
+  if (v === "distributors") v = "customers";
   // Staff with only self-service attendance still reach the HR page for their own day.
-  const allowed = !VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"));
+  const allowed = featureOn(v) && (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
+    || (v === "compare" && (can("sales:read") || can("stock:read")))
+    || (v === "accounts" && can("accounts:reports")))
+    && (v !== "scheduled" || srAllowed());
   state.view = TITLES[v] && allowed ? v : "dash";
+  $("#shell").dataset.view = state.view;
   if (state.view === "inventory") state.tab = ["stock", "ledger", "warehouses"].includes(sub) ? sub : "stock";
+  if (state.view === "scheduled") state.sr.tab = ["schedules", "recipients", "log"].includes(sub) ? sub : "schedules";
   $$(".view").forEach(s => s.classList.toggle("hide", s.id !== "v-" + state.view));
   $$(".nav[data-v]").forEach(a => { const on = a.dataset.v === state.view; a.classList.toggle("on", on); on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"); });
   $("#title").textContent = TITLES[state.view];
@@ -261,6 +414,12 @@ function route() {
   if (state.view === "customers") renderCustomers();
   if (state.view === "settings") renderSettings();
   if (state.view === "hr") { if (can("hr:read")) openHr(); else renderHr(); }
+  if (state.view === "compare") loadCompare();
+  if (state.view === "geo") loadGeo();
+  if (state.view === "accounts") openAccountsReports();
+  if (state.view === "expenses") openExpenses();
+  if (state.view === "foc") openFoc();
+  if (state.view === "scheduled") openScheduled();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
 function showTab() {
@@ -271,8 +430,14 @@ function showTab() {
 function renderHead() {
   const v = state.view; let sub = "", act = "";
   if (v === "dash") {
-    sub = "Stock position and orders waiting for action.";
+    sub = "Every figure is counted by the server over the whole database. Open a tile to see the records behind it.";
     if (can("db:reset")) act = `<button class="btn" data-act="reset-db" type="button">Reset database</button>`;
+  }
+  if (v === "compare") {
+    sub = "One month beside the previous month and the same month last year. Every figure is counted by the server.";
+  }
+  if (v === "geo") {
+    sub = "Sales, returns and GST by the buyer state frozen on each issued invoice. District and city are not recorded, so the page stops at state.";
   }
   if (v === "products") {
     sub = `${plural(state.products.length, "product")} on file, ${state.products.filter(x => x.status === "active").length} active.`;
@@ -308,25 +473,13 @@ function renderHead() {
     sub = out
       ? `${money(out.receivable_total)} receivable, ${money(out.payable_total)} payable, from the documents as they stand.`
       : "Outstanding, ledgers, GST registers and the trial balance, all built from the documents.";
+    if (can("accounts:reports")) sub += " The performance section compares any window with the previous month and the same month last year.";
     if (can("accounts:write")) {
       act = `<button class="btn" data-act="new-entry" data-kind="receipt" type="button">Record receipt</button>`
           + ` <button class="btn ghost" data-act="new-entry" data-kind="payment" type="button">Record payment</button>`;
     }
   }
   if (v === "approvals") sub = `${state.approvals.filter(a => a.status === "pending").length} waiting for a decision. The person who raised an order cannot approve it.`;
-  if (v === "distributors") {
-    const active = state.dists.filter(d => d.status === "active").length;
-    const blocked = state.dists.filter(d => d.status === "blocked").length;
-    const incomplete = state.dists.filter(d => d.needs_completion).length;
-    sub = `${plural(state.dists.length, "distributor")}. Active: ${active}, Blocked: ${blocked}${incomplete ? `, needing details: ${incomplete}` : ""}. Credit in use counts orders awaiting approval, approved and dispatched.`;
-    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New distributor</button>`;
-    // The header is rebuilt on every render, so the chosen filter lives in
-    // state and is restored here; reading it from the DOM lost the choice and
-    // crashed on first load, when this screen's header is not the one shown.
-    const fopt = ["all", ...DIST_STATUSES, "incomplete"].map(v =>
-      `<option value="${v}"${state.distFilter === v ? " selected" : ""}>${v === "all" ? "All" : v === "incomplete" ? "Needs completion" : DSTAT[v][1]}</option>`).join("");
-    act += ` <select id="dists-filter" class="ghost" aria-label="Filter distributors by status">${fopt}</select>`;
-  }
   if (v === "leads") {
     const od = state.leads.filter(l => l.follow_up_state === "overdue").length, td = state.leads.filter(l => l.follow_up_state === "today").length;
     sub = `${od} overdue and ${td} due today across the team. Only a lead’s owner or an administrator can change it.`;
@@ -342,8 +495,11 @@ function renderHead() {
     if (can("lead:write")) act = `<button class="btn" data-act="new-lead" type="button">New lead</button>`;
   }
   if (v === "customers") {
-    sub = `${plural(state.dists.length, "customer")} in the distributor master. Open a record to see orders, invoices and outstanding.`;
-    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New customer</button>`;
+    const active = state.dists.filter(d => d.status === "active").length;
+    const blocked = state.dists.filter(d => d.status === "blocked").length;
+    const incomplete = state.dists.filter(d => d.needs_completion).length;
+    sub = `${plural(state.dists.length, "record")} in one customer and distributor master. Active: ${active}, Blocked: ${blocked}${incomplete ? `, needing details: ${incomplete}` : ""}. Credit in use counts orders awaiting approval, approved and dispatched.`;
+    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New customer or distributor</button>`;
   }
   if (v === "hr") {
     const d = state.hr.dashboard;
@@ -351,14 +507,26 @@ function renderHead() {
             : "Employee records, attendance, leave, on-duty and payroll, integrated with Approvals and Reports.";
     if (can("hr:write")) act = `<button class="btn" data-act="hr-employees" type="button">Employee master</button>`;
   }
-  if (v === "settings") sub = "Users, roles, employees, tax configuration, HR policies and the audit trail.";
+  if (v === "settings") sub = "Roles, logins, employees, tax configuration, HR policies and the audit trail.";
+  if (v === "scheduled") {
+    const s = state.sr.status;
+    sub = s
+      ? `${s.mode === "live" ? "Live mode" : "Test mode"}: ${state.sr.schedules.filter(x => x.enabled).length} of ${plural(state.sr.schedules.length, "schedule")} on. ${s.send_enabled ? "Sending is enabled." : "Sending is disabled."}`
+      : "Administrator only. Schedules, recipients and the delivery log, with every send audited.";
+  }
   if (v === "reports") sub = "Every figure is checked against the records it comes from. Downloads are recorded in the audit log.";
+  if (v === "roles") {
+    const rights = PERM_ITEMS().filter(i => i.admin_only).length;
+    sub = `${plural(state.roles.length, "role")} and ${plural(PERM_ITEMS().length, "permission")}. ${state.featureFlags.length} module switch${state.featureFlags.length === 1 ? "" : "es"}; ${rights} right${rights === 1 ? " is" : "s are"} reserved for the Administrator.`;
+    const btn = [`<button class="btn ghost" data-act="new-role" type="button">New role</button>`];
+    if (can("user:manage")) btn.push(`<a class="btn ghost" href="#/users">Logins and employees</a>`);
+    act = btn.join(" ");
+  }
   if (v === "users") {
     const locked = state.users.filter(u => u.locked).length, pending = state.users.filter(u => u.must_change_password).length;
     sub = `${plural(state.users.length, "login")} and ${plural(state.employees.length, "employee")}. ${pending} awaiting a password change, ${locked} locked. Temporary passwords are shown once.`;
     const btn = [];
     if (can("employee:write")) btn.push(`<button class="btn ghost" data-act="new-employee" type="button">New employee</button>`);
-    btn.push(`<button class="btn ghost" data-act="new-role" type="button">New role</button>`);
     btn.push(`<button class="btn" data-act="new-user" type="button">New user</button>`);
     act = btn.join(" ");
   }
@@ -389,7 +557,7 @@ const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], trans
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
 /* ---------- renderers ---------- */
-function renderAll() { renderHead(); renderDash(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderApprovals(); renderDists(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); if (state.view === "hr") renderHr(); }
+function renderAll() { renderHead(); renderDash(); renderCompare(); renderGeo(); renderProducts(); renderStock(); renderLedger(); renderWarehouses(); renderPOs(); renderSuppliers(); renderTax(); renderSales(); renderBilling(); renderAccounts(); renderAccountsReport(); renderExpenses(); renderFoc(); renderApprovals(); renderLeads(); renderUsers(); renderLost(); renderFollowups(); renderCustomers(); renderSettings(); renderScheduled(); if (state.view === "hr") renderHr(); }
 
 // The module list is not here any more: it is served by GET /api/modules from
 // app/core/module_register.py, so the screen renders the server's register and
@@ -397,68 +565,1487 @@ function renderAll() { renderHead(); renderDash(); renderProducts(); renderStock
 
 function renderDash() {
   const d = state.dashboard;
-  const tiles = [];
-  if (d) {
-    if (d.stock) tiles.push([qty(d.stock.units_on_hand), "Units on hand"], [d.stock.batches_in_stock, "Batches in stock"]);
-    if (d.active_products !== null) tiles.push([d.active_products, "Active products"]);
-    if (d.purchase_orders) tiles.push([d.purchase_orders.open_count, "Purchase orders awaiting goods"]);
-    if (d.stock) tiles.push([d.stock.expiring_count, "Batches expiring within 90 days"]);
-    if (d.orders_ready !== null) tiles.push([d.orders_ready, "Orders ready to dispatch"]);
-    if (d.approvals_waiting !== null) tiles.push([d.approvals_waiting, "Approvals waiting"]);
-    if (d.leads) tiles.push([d.leads.overdue, "Follow-ups overdue"], [d.leads.due_today, "Follow-ups due today"]);
+  const loading = state.dashLoading;
+  const err = state.dashError;
+  const u = state.user;
+
+  $("#dashGreet").textContent = u ? `${greeting()}, ${u.username}` : "Overview";
+  $("#dashDate").textContent = new Date().toLocaleDateString("en-IN", {
+    weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const fromEl = $("#dashFrom"), toEl = $("#dashTo");
+  const today = dayIso(new Date());
+  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = state.dashFrom; }
+  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = state.dashTo; }
+  $$("[data-dash-preset]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.dashPreset === state.dashPreset)));
+  const dateErr = $("#dashDateErr");
+  dateErr.textContent = state.dashDateError;
+  dateErr.classList.toggle("hide", !state.dashDateError);
+  $("#dashReset").classList.toggle("hide", !can("db:reset"));
+
+  $("#dashSkeleton").classList.toggle("hide", !(loading && !d));
+  $("#dashError").classList.toggle("hide", !err);
+  $("#dashContent").classList.toggle("hide", !d);
+  $("#dashContent").setAttribute("aria-busy", loading ? "true" : "false");
+  if (err) {
+    $("#dashErrText").textContent = d
+      ? ` The last figures loaded are shown. ${err}`
+      : ` ${err}`;
   }
+
   // A failed load is shown as such. It must never be drawn as zeros.
-  $("#stats").innerHTML = d
-    ? tiles.map(s => `<div class="stat"><b>${esc(s[0])}</b><span>${esc(s[1])}</span></div>`).join("")
-    : `<div class="stat"><b>–</b><span>Dashboard figures could not be loaded. Refresh to try again.</span></div>`;
-
   $("#whCallout").classList.toggle("hide", !d || d.warehouse_count !== 0 || !can("stock:write"));
-
-  const watch = d && d.stock ? d.stock.expiring : [];
-  const watchTotal = d && d.stock ? d.stock.expiring_count : 0;
-  $("#watchNote").textContent = watchTotal > watch.length ? `Showing ${watch.length} of ${watchTotal}` : "";
-  $("#watch").innerHTML = watch.length ? watch.map(b => {
-    const dl = b.days_left;
-    const chip = dl < 0 ? "bad" : "warn";
-    const txt = dl < 0 ? `Expired ${plural(-dl, "day")} ago` : dl === 0 ? "Expires today" : `${plural(dl, "day")} left`;
-    return `<li><div>${esc(b.product_name)}<small>Batch ${esc(b.batch_no)} in ${esc(b.warehouse)}, ${esc(qty(b.on_hand))} on hand</small></div><span class="chip ${chip}">${esc(txt)}</span></li>`;
-  }).join("") : `<li><span class="none">Nothing in stock expires in the next 90 days.</span></li>`;
-
-  const open = d && d.purchase_orders ? d.purchase_orders.open : [];
-  const openTotal = d && d.purchase_orders ? d.purchase_orders.open_count : 0;
-  const poLine = p => p.status === "partially_received"
-    ? `${qty(p.remaining_units)} unit${Number(p.remaining_units) === 1 ? "" : "s"} still to come`
-    : `${plural(p.receipt_count, "receipt")} so far`;
-  $("#openpos").innerHTML = open.length ? open.map(p => `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button><small>${esc(p.supplier)}, ${esc(poLine(p))}</small></div>
-    <div class="r"><span class="num">₹ ${money(p.value)}</span></div></li>`).join("")
-    : `<li><span class="none">No purchase orders are waiting for goods.</span></li>`;
-
-  // The module list and every figure come from GET /api/modules, which is built
-  // from app/core/module_register.py. The browser holds no copy of the list, so
-  // it cannot show a total the server does not imply (COR-007).
-  const reg = state.modules;
-  if (reg) {
-    const t = reg.totals, CHIP = reg.chips;
-    $("#prog").textContent = `${t.working} of ${t.counted} modules working`
-      + (t.conditional ? ` · ${t.conditional} conditional not counted` : "");
-    $("#barfill").style.width = `${t.percent}%`;
-    $("#mods").innerHTML = reg.groups.map(g => {
-      const rows = reg.modules.filter(m => m.group === g.name);
-      return `<li class="grp"><b>${esc(g.name)}</b><span>${g.counted ? `${g.working} of ${g.counted} working` : "optional"}</span></li>` +
-        rows.map(m => {
-          const chip = CHIP[m.status] || ["off", m.status];
-          return `<li><div>${esc(m.name)}<small>${esc(m.does)}</small></div><span class="chip ${chip[0]}">${esc(chip[1])}</span></li>`;
-        }).join("");
-    }).join("");
+  if (!d) {
+    $("#dashUpdated").textContent = loading ? "Loading figures from the server…" : "";
+    return;
   }
 
-  const n = openTotal, c = $("#poCount");
-  c.textContent = n; c.classList.toggle("hide", !n);
-  c.setAttribute("aria-label", `${n} open purchase orders`);
+  const period = d.from === d.to ? fmtDate(d.from) : `${fmtDate(d.from)} to ${fmtDate(d.to)}`;
+  $("#dashUpdated").innerHTML = loading
+    ? `Refreshing ${esc(period)}…`
+    : `Selected period <b>${esc(period)}</b> (${esc(plural(d.range, "day"))}) · `
+      + `snapshot cards are as at ${esc(fmtDate(d.as_of))} · updated ${esc(fmtStamp(d.generated_at))}`;
+
+  renderAttention(d.attention || []);
+  renderKpis(d.kpis || []);
+  renderDashAccounts(d.accounts);
+  renderChart(d.sales_vs_purchases);
+  renderDashAgeing(d.receivables_ageing);
+  renderExpiry(d);
+  renderDashWarehouses(d.stock_by_warehouse);
+  renderOpenPos(d.open_pos);
+  renderDashApprovals(d.approvals);
+  renderTopProducts(d.top_products, d);
+  renderCategory(d.category_sales);
+  renderInsights(d.insights);
+  renderActivity(d.recent_activity);
+  renderHealth(d.health);
+  renderModuleList();
+
+  const openTotal = d.purchase_orders ? d.purchase_orders.open_count : 0;
+  const c = $("#poCount");
+  c.textContent = openTotal; c.classList.toggle("hide", !openTotal);
+  c.setAttribute("aria-label", `${openTotal} open purchase orders`);
+}
+
+/* ---------- dashboard fragments ---------- */
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+}
+
+function inrShort(n) {
+  const v = Number(n) || 0, a = Math.abs(v);
+  if (a >= 1e7) return `₹${(v / 1e7).toFixed(a >= 1e8 ? 0 : 1)} Cr`;
+  if (a >= 1e5) return `₹${(v / 1e5).toFixed(a >= 1e6 ? 0 : 1)} L`;
+  if (a >= 1e3) return `₹${(v / 1e3).toFixed(a >= 1e4 ? 0 : 1)} K`;
+  return `₹${Math.round(v)}`;
+}
+const dayLabel = iso => iso
+  ? new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short" })
+  : "";
+
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const power = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / power;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * power;
+}
+
+function deltaText(v) {
+  if (v === null || v === undefined) return `<span class="delta flat">no prior period to compare</span>`;
+  const n = Number(v);
+  if (!isFinite(n)) return `<span class="delta flat">no prior period to compare</span>`;
+  const dir = n > 0 ? "up" : n < 0 ? "down" : "flat";
+  const arrow = n > 0 ? "▲" : n < 0 ? "▼" : "■";
+  return `<span class="delta ${dir}">${arrow} ${Math.abs(n).toFixed(1)}% against the previous period</span>`;
+}
+
+function sparkline(values) {
+  const vals = values.map(Number).filter(Number.isFinite);
+  if (vals.length < 2) return "";
+  const w = 112, h = 30, max = Math.max(...vals), min = Math.min(...vals);
+  const step = w / (vals.length - 1);
+  const y = v => max === min ? h / 2 : h - 4 - ((v - min) / (max - min)) * (h - 8);
+  const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false"><polyline points="${pts}"/></svg>`;
+}
+
+function renderAttention(items) {
+  const el = $("#attention"), note = $("#attNote");
+  const live = items.filter(i => i.available && i.severity !== "ok");
+  const gaps = items.filter(i => !i.available);
+  const shown = [...live, ...gaps];
+  note.textContent = shown.length
+    ? `${plural(shown.length, "item")}${gaps.length ? ` · ${gaps.length} data gap${gaps.length === 1 ? "" : "s"}` : ""}`
+    : "";
+  if (!shown.length) {
+    el.innerHTML = `<li class="att-empty">Nothing needs attention in the figures the server can see.</li>`;
+    return;
+  }
+  el.innerHTML = shown.map(i => {
+    if (!i.available) {
+      const gap = i.gap ? ` (${i.gap})` : "";
+      return `<li><span class="att-item att-off"><span class="att-body"><b>${esc(i.label)}</b><span>${esc(i.note || "This figure cannot be sourced yet.")}${esc(gap)}</span></span><span class="chip off">No data</span></span></li>`;
+    }
+    const bits = [];
+    if (i.count !== null && i.count !== undefined) bits.push(plural(i.count, "record"));
+    if (i.units !== null && i.units !== undefined) bits.push(`${qty(i.units)} units`);
+    if (i.amount) bits.push(`₹ ${money(i.amount)}`);
+    const sev = i.severity === "bad" ? "att-bad" : "att-warn";
+    const tag = i.href ? "a" : "span";
+    const href = i.href ? ` href="${esc(i.href)}"` : "";
+    return `<li><${tag} class="att-item ${sev}"${href}><span class="att-body"><b>${esc(i.label)}</b><span>${esc(bits.join(" · ") || "Open the records behind this figure.")}</span></span>${i.href ? `<span class="att-go">Open</span>` : ""}</${tag}></li>`;
+  }).join("");
+}
+
+function renderKpis(kpis) {
+  const el = $("#stats");
+  if (!kpis.length) {
+    el.innerHTML = `<div class="att-empty">No figure on this screen is available to your role.</div>`;
+    return;
+  }
+  el.innerHTML = kpis.map(k => {
+    const trend = Array.isArray(k.trend) && k.trend.length > 1 ? sparkline(k.trend) : "";
+    return `<a class="kpi" href="${esc(k.href)}">
+      <span class="kpi-label">${esc(k.label)}</span>
+      <span class="kpi-value">${esc(qty(k.value))}</span>
+      ${k.note && trend ? `<span class="kpi-note">${esc(k.note)}</span>` : ""}
+      ${trend ? `<span class="kpi-trend">${trend}<em>${esc(k.trend_note || "")}</em></span>`
+              : `<span class="kpi-trend off"><em>${esc(k.trend_note || k.note || "")}</em></span>`}
+    </a>`;
+  }).join("");
+}
+
+function hideChartTip() {
+  const tip = $("#chartTip");
+  if (tip) tip.classList.add("hide");
+  $$("#salesChart .hit.on").forEach(h => h.classList.remove("on"));
+  state.chart.index = -1;
+}
+
+function chartTip(i) {
+  const c = state.dashboard && state.dashboard.sales_vs_purchases;
+  if (!c || !c.series || !c.series[i]) return;
+  const pt = c.series[i], n = c.series.length;
+  const svg = $("#salesChart"), tip = $("#chartTip");
+  if (!svg || !tip) return;
+  state.chart.index = i;
+  $$(".hit", svg).forEach((h, j) => h.classList.toggle("on", j === i));
+  const sOn = c.sales_visible && !(state.chart.off && state.chart.off.sales);
+  const pOn = c.purchases_visible && !(state.chart.off && state.chart.off.purchases);
+  tip.innerHTML = `<b>${esc(fmtDate(pt.date))}</b>`
+    + (sOn ? `<span><i class="key sales"></i>Sales ₹ ${money(pt.sales)}</span>` : "")
+    + (pOn ? `<span><i class="key purchases"></i>Purchases ₹ ${money(pt.purchases)}</span>` : "");
+  tip.classList.remove("hide");
+  const ratio = n > 1 ? i / (n - 1) : 0.5;
+  const left = 58 + ratio * (744 - 58);
+  tip.style.left = `${(left / 760) * 100}%`;
+  tip.style.top = "50%";
+}
+
+function renderChart(c) {
+  const panel = $("#chartPanel"), svg = $("#salesChart");
+  const legend = $("#chartLegend"), totals = $("#chartTotals");
+  const note = $("#chartNote"), title = $("#chartTitle");
+  hideChartTip();
+  if (!c) {
+    panel.classList.add("hide");
+    return;
+  }
+  panel.classList.remove("hide");
+  const from = fmtDate(c.from), to = fmtDate(c.to);
+  note.textContent = `${from} to ${to}; the previous period is `
+    + `${fmtDate(c.previous_from)} to ${fmtDate(c.previous_to)}.`;
+  state.chart.off = state.chart.off || {};
+  const sOn = !!c.sales_visible && !state.chart.off.sales;
+  const pOn = !!c.purchases_visible && !state.chart.off.purchases;
+  title.textContent = sOn && pOn ? "Sales and purchases"
+    : sOn ? "Sales" : pOn ? "Purchases received" : "Sales and purchases";
+  const onlyOne = (sOn ? 1 : 0) + (pOn ? 1 : 0) === 1;
+  legend.innerHTML =
+    (c.sales_visible ? `<button class="legend-pill sales" type="button" data-act="toggle-series" data-series="sales" aria-pressed="${sOn}"${onlyOne && sOn ? " aria-disabled=\"true\" title=\"One line must stay visible\"" : ""}><i></i>Sales</button>` : "")
+    + (c.purchases_visible ? `<button class="legend-pill purchases" type="button" data-act="toggle-series" data-series="purchases" aria-pressed="${pOn}"${onlyOne && pOn ? " aria-disabled=\"true\" title=\"One line must stay visible\"" : ""}><i></i>Purchases</button>` : "");
+
+  const series = c.series || [];
+  if (!series.length) {
+    svg.innerHTML = "";
+    totals.innerHTML = `<span class="gap-note">No days fall in this period.</span>`;
+    return;
+  }
+
+  const W = 760, x0 = 58, x1 = 744, y0 = 14, y1 = 218;
+  const vals = [];
+  series.forEach(p => {
+    if (sOn && p.sales != null) vals.push(Number(p.sales));
+    if (pOn && p.purchases != null) vals.push(Number(p.purchases));
+  });
+  const max = niceMax(Math.max(...vals, 0));
+  const x = i => x0 + (series.length === 1 ? 0.5 : i / (series.length - 1)) * (x1 - x0);
+  const y = v => y1 - (Number(v) / max) * (y1 - y0);
+
+  const grid = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const gy = y1 - f * (y1 - y0);
+    return `<line class="grid-line" x1="${x0}" y1="${gy.toFixed(1)}" x2="${x1}" y2="${gy.toFixed(1)}"/>`
+      + `<text class="axis-label" x="${x0 - 8}" y="${(gy + 4).toFixed(1)}" text-anchor="end">${esc(inrShort(max * f))}</text>`;
+  }).join("");
+
+  const every = Math.max(1, Math.ceil(series.length / 6));
+  const xlabels = series.map((p, i) => (i % every === 0 || i === series.length - 1)
+    ? `<text class="axis-label" x="${x(i).toFixed(1)}" y="${y1 + 20}" text-anchor="middle">${esc(dayLabel(p.date))}</text>`
+    : "").join("");
+
+  const line = key => series.map((p, i) =>
+    `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[key] ?? 0).toFixed(1)}`).join(" ");
+  const dots = key => series.map((p, i) =>
+    `<circle class="dot ${key}" cx="${x(i).toFixed(1)}" cy="${y(p[key] ?? 0).toFixed(1)}" r="2.6"/>`).join("");
+  const area = sOn
+    ? `<path d="${line("sales")} L${x(series.length - 1).toFixed(1)},${y1} L${x0},${y1} Z" fill="url(#salesFill)" stroke="none"/>`
+    : "";
+
+  const step = series.length > 1 ? (x1 - x0) / (series.length - 1) : (x1 - x0);
+  const hits = series.map((p, i) => {
+    const left = Math.max(x0, x(i) - step / 2);
+    const right = Math.min(x1, x(i) + step / 2);
+    return `<rect class="hit" data-i="${i}" x="${left.toFixed(1)}" y="${y0}" width="${(right - left).toFixed(1)}" height="${y1 - y0}"/>`;
+  }).join("");
+
+  svg.innerHTML = `<defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--moss)" stop-opacity=".20"/>
+      <stop offset="1" stop-color="var(--moss)" stop-opacity="0"/>
+    </linearGradient></defs>${grid}${xlabels}
+    ${sOn ? area + `<path class="series-sales" d="${line("sales")}"/>` + dots("sales") : ""}
+    ${pOn ? `<path class="series-purchases" d="${line("purchases")}"/>` + dots("purchases") : ""}
+    ${hits}`;
+  svg.setAttribute("aria-label",
+    `${title.textContent} from ${from} to ${to}. `
+    + (sOn ? `Sales total ${money(c.sales_total)} rupees. ` : "")
+    + (pOn ? `Purchases total ${money(c.purchases_total)} rupees. ` : "")
+    + "Use the left and right arrow keys to read each day.");
+  state.chart.index = -1;
+
+  const bits = [];
+  if (sOn) bits.push(`<span><b>Sales</b> ₹ ${money(c.sales_total)} ${deltaText(c.sales_change)}</span>`);
+  if (pOn) bits.push(`<span><b>Purchases</b> ₹ ${money(c.purchases_total)} ${deltaText(c.purchases_change)}</span>`);
+  bits.push(`<span class="source-line">${esc(c.note || "")}</span>`);
+  totals.innerHTML = bits.join("");
+}
+
+function toggleSeries(key) {
+  const c = state.dashboard && state.dashboard.sales_vs_purchases;
+  if (!c) return;
+  state.chart.off = state.chart.off || {};
+  const sOn = !!c.sales_visible && !state.chart.off.sales;
+  const pOn = !!c.purchases_visible && !state.chart.off.purchases;
+  const on = key === "sales" ? sOn : pOn;
+  const other = key === "sales" ? pOn : sOn;
+  if (on && !other) return; // the last visible line stays on
+  state.chart.off[key] = !state.chart.off[key];
+  renderChart(c);
+}
+
+function renderDashAgeing(a) {
+  const el = $("#ageing"), note = $("#ageNote");
+  if (!a) {
+    note.textContent = "";
+    el.innerHTML = `<p class="gap-note">Receivables are not shown because your role cannot read accounting.</p>`;
+    return;
+  }
+  note.textContent = `As at ${fmtDate(a.as_of)} · ${plural(a.count, "invoice")}`;
+  const max = Math.max(...a.buckets.map(b => Number(b.amount)), 0) || 1;
+  el.innerHTML = a.buckets.map(b => {
+    const amt = Number(b.amount);
+    const pct = amt > 0 ? Math.max(2, amt / max * 100) : 0;
+    const tone = b.key === "90+" ? "bad" : b.key === "61-90" ? "warn" : "ok";
+    return `<div class="age-row">
+      <div class="age-top"><span>${esc(b.label)} <small>${plural(b.count, "invoice")}</small></span><b>₹ ${money(amt)}</b></div>
+      <div class="age-bar ${tone}" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div>
+    </div>`;
+  }).join("")
+  + `<p class="age-total"><span>Total outstanding</span><b>₹ ${money(a.total)}</b></p>`
+  + `<p class="gap-note">${esc(a.note || "")}</p>`;
+}
+
+function expiryLabel(bucket) {
+  return { expired: "already expired", lt30: "expiring within 30 days", lt90: "expiring in 31 to 90 days" }[bucket]
+    || "expiring within 90 days";
+}
+
+function renderExpiry(d) {
+  const w = d && d.expiry_watch;
+  const el = $("#watch"), note = $("#watchNote");
+  $$("[data-eb]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.eb === state.expiry.bucket)));
+  if (state.expiry.loading) {
+    note.textContent = "Loading…";
+    el.innerHTML = `<li><span class="none">Loading the batches in this window…</span></li>`;
+    return;
+  }
+  if (!w) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Stock is not available to your role.</span></li>`;
+    return;
+  }
+  let rows, total;
+  if (state.expiry.bucket === "all") {
+    rows = w.rows || [];
+    total = w.shown_of != null ? w.shown_of : rows.length;
+  } else {
+    const x = state.expiry.data;
+    if (x && x.error) {
+      note.textContent = "";
+      el.innerHTML = `<li><span class="none">${esc(x.error)}</span></li>`;
+      return;
+    }
+    rows = x && x.rows ? x.rows : [];
+    total = x && x.total != null ? x.total : rows.length;
+  }
+  note.textContent = `${total > rows.length ? `Showing ${rows.length} of ${total}. ` : ""}${plural(total, "batch")} ${expiryLabel(state.expiry.bucket)}.`;
+  el.innerHTML = (rows.length ? rows.map(b => {
+    const left = b.days_left < 0 ? `Expired ${plural(-b.days_left, "day")} ago`
+      : b.days_left === 0 ? "Expires today" : `${plural(b.days_left, "day")} left`;
+    const tone = b.tone === "bad" ? "bad" : b.tone === "warn" ? "warn" : "off";
+    return `<li><div><button class="rowbtn" data-act="expiry-detail" data-id="${b.batch_id}" type="button">${esc(b.product_name)}</button>
+      <small>Batch ${esc(b.batch_no)} · ${esc(b.warehouse)} · ${esc(qty(b.on_hand))} on hand</small></div>
+      <div class="r"><span class="chip ${tone}">${esc(left)}</span></div></li>`;
+  }).join("") : `<li><span class="none">Nothing in stock falls in this window.</span></li>`)
+  + `<li><span class="gap-note">Batch value is not shown because stock carries no cost (GAP-D04).</span></li>`;
+}
+
+async function setExpiryBucket(bucket) {
+  state.expiry.bucket = bucket;
+  $$("[data-eb]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.eb === bucket)));
+  if (bucket === "all") {
+    state.expiry.loading = false;
+    state.expiry.data = null;
+    renderExpiry(state.dashboard || {});
+    return;
+  }
+  state.expiry.loading = true;
+  state.expiry.data = null;
+  renderExpiry(state.dashboard || {});
+  const res = await api(`/api/dashboard/expiry?bucket=${encodeURIComponent(bucket)}&page_size=25`);
+  if (state.expiry.bucket !== bucket) return;
+  state.expiry.loading = false;
+  state.expiry.data = res.ok ? res.body : { error: detail(res.body) };
+  if (!res.ok) toast(res, "Expiry list could not be loaded");
+  renderExpiry(state.dashboard || {});
+}
+
+function expiryDetail(id) {
+  const d = state.dashboard;
+  if (!d) return;
+  const pool = [];
+  if (d.expiry_watch) pool.push(...(d.expiry_watch.rows || []));
+  if (state.expiry.data && state.expiry.data.rows) pool.push(...state.expiry.data.rows);
+  const b = pool.find(r => Number(r.batch_id) === Number(id));
+  if (!b) return;
+  const left = b.days_left < 0 ? `Expired ${plural(-b.days_left, "day")} ago`
+    : b.days_left === 0 ? "Expires today" : `${plural(b.days_left, "day")} left`;
+  openDrawer("Batch expiry", `${b.product_name} · ${b.sku}`, `
+    <dl class="dl">
+      <dt>Batch</dt><dd>${esc(b.batch_no)}</dd>
+      <dt>Warehouse</dt><dd>${esc(b.warehouse)}</dd>
+      <dt>On hand</dt><dd>${esc(qty(b.on_hand))} units</dd>
+      <dt>Expiry</dt><dd>${esc(fmtDate(b.expiry))} <span class="chip ${b.tone === "bad" ? "bad" : b.tone === "warn" ? "warn" : "off"}">${esc(left)}</span></dd>
+      <dt>Suggested action</dt><dd>${esc(b.action)}</dd>
+    </dl>
+    <div class="note">The value of this stock is not shown because a batch carries no cost (GAP-D04).</div>
+    <div class="actions"><a class="btn ghost" href="#/inventory/stock">Open inventory</a><button class="btn ghost" type="button" data-act="close">Close</button></div>`);
+}
+
+function renderDashWarehouses(list) {
+  const el = $("#whList");
+  if (!list) {
+    el.innerHTML = `<li class="gap-note">Stock by warehouse is not available to your role.</li>`;
+    return;
+  }
+  const total = list.reduce((s, w) => s + Number(w.units || w.used_units || 0), 0);
+  const configured = list.filter(w => w.capacity_units !== null && w.capacity_units !== undefined);
+  const tight = configured.filter(w => ["high", "over", "full"].includes(w.capacity_state));
+  el.innerHTML = (list.length ? list.map(w => {
+    const units = Number(w.units || w.used_units || 0);
+    const share = total > 0 ? units / total * 100 : 0;
+    const shareText = units > 0 && share < 0.5 ? "<1%" : `${share.toFixed(0)}%`;
+    const hasCap = w.capacity_units !== null && w.capacity_units !== undefined;
+    const pct = hasCap ? Math.max(0, Math.min(100, Number(w.utilisation_pct) || 0)) : share;
+    const tone = hasCap && ["high", "over", "full"].includes(w.capacity_state) ? ` ${w.capacity_state}` : "";
+    const detail = hasCap
+      ? `${esc(qty(units))} of ${esc(qty(w.capacity_units))} units · ${Number(w.utilisation_pct).toFixed(1)}%`
+      : `${esc(qty(units))} units`;
+    const under = hasCap
+      ? `${esc(qty(w.free_units))} units free`
+      : `${shareText} of stock · capacity not set`;
+    return `<li><div class="wh-top"><span><b>${esc(w.name)}</b><small>${plural(w.batches, "batch")} in stock</small></span>
+      <span class="num">${detail}<small>${under}</small></span></div>
+      <div class="wh-bar" aria-hidden="true"><i class="${tone.trim()}" style="width:${pct.toFixed(1)}%"></i></div></li>`;
+  }).join("") : `<li><span class="none">No warehouse has been added yet.</span></li>`)
+  + (tight.length
+    ? `<li><span class="gap-note">${tight.length === 1 ? "One warehouse is" : `${tight.length} warehouses are`} above 80% of capacity: ${esc(tight.map(w => w.name).join(", "))}.</span></li>`
+    : "")
+  + (!configured.length
+    ? `<li><span class="gap-note">Capacity is not set for any warehouse (GAP-D03), so a fill level against capacity cannot be shown.</span></li>`
+    : "");
+}
+
+function renderOpenPos(o) {
+  const el = $("#openpos"), note = $("#poNote");
+  if (!o) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Purchase orders are not available to your role.</span></li>`;
+    return;
+  }
+  const rows = o.rows || [];
+  const total = o.open_total ?? o.count ?? rows.length;
+  const inRange = o.count ?? rows.length;
+  note.textContent = (inRange > o.shown ? `Showing ${o.shown} of ${inRange} raised in this period. ` : "")
+    + (total > inRange ? `${total - inRange} open order${total - inRange === 1 ? "" : "s"} raised outside it. ` : "")
+    + (o.note || "");
+  el.innerHTML = rows.length ? rows.map(p => {
+    const pct = Math.max(0, Math.min(100, Number(p.pct_received) || 0));
+    return `<li><div><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button>
+      <small>${esc(p.supplier)} · ${esc(qty(p.received_units))} of ${esc(qty(p.ordered_units))} units received</small>
+      <div class="wh-bar" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div></div>
+      <div class="r"><span class="num">₹ ${money(p.value)}<small>${pct.toFixed(0)}% received</small></span></div></li>`;
+  }).join("") : `<li><span class="none">No purchase order is waiting for goods.</span></li>`;
+}
+
+let dashRejectId = null;
+
+function renderDashApprovals(a) {
+  const el = $("#approvalList"), note = $("#apNote");
+  if (!a) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Approvals are not available to your role.</span></li>`;
+    return;
+  }
+  const rows = a.rows || [];
+  note.textContent = (a.count > a.shown ? `Showing ${a.shown} of ${a.count}. ` : "")
+    + (a.note || "");
+  el.innerHTML = rows.length ? rows.map(x => {
+    const me = state.user && x.requested_by === state.user.username;
+    const amount = x.order_total != null ? `₹ ${money(x.order_total)}`
+      : (x.requested_dates || "");
+    const age = x.age_days == null ? ""
+      : x.age_days === 0 ? "raised today" : `${plural(x.age_days, "day")} old`;
+    const who = me ? "You raised this request"
+      : (x.deciders || []).length ? `Awaiting ${x.deciders.join(" or ")}` : "";
+    const overLimit = (x.reasons || []).includes("credit_limit");
+    const meta = [x.request_type_label, x.requested_by, amount, age]
+      .filter(Boolean).map(v => esc(v)).join(" · ");
+    let acts = "";
+    if (x.can_decide) {
+      acts = dashRejectId === x.id
+        ? `<form class="ap-reject" id="dashRejectForm" data-id="${x.id}" novalidate>
+            <input name="reason" placeholder="Reason (required)" maxlength="300" autocomplete="off"
+              aria-label="Reason for rejecting ${esc(x.request_no || x.document_number || "this request")}">
+            <button class="btn sm" type="submit">Reject</button>
+            <button class="btn ghost sm" type="button" data-act="dash-reject-cancel">Cancel</button>
+            <div class="ap-err" role="alert"></div></form>`
+        : `<div class="ap-acts">
+            <button class="btn ghost sm" type="button" data-act="dash-reject" data-id="${x.id}">Reject</button>
+            <button class="btn sm" type="button" data-act="dash-approve" data-id="${x.id}">Approve</button></div>`;
+    }
+    return `<li class="ap-row"><div>
+      <button class="rowbtn" data-act="dash-ap" data-id="${x.id}" type="button">${esc(x.request_no || x.document_number || "Request")}</button>
+      <small>${meta}</small>
+      ${who ? `<small class="ap-who">${esc(who)}</small>` : ""}
+      ${overLimit ? `<span class="chip bad">Over credit limit</span>` : ""}</div>
+      ${acts}</li>`;
+  }).join("")
+    : `<li><span class="none">Nothing is waiting for a decision.</span></li>`;
+}
+
+async function dashApprove(id) {
+  const res = await api(`/api/approvals/${id}/decide`, {
+    method: "POST", body: {decision: "approve", reason: "Approved from the dashboard"}});
+  toast(res, res.ok ? "Approved" : "Decision not saved");
+  if (!res.ok) return;
+  dashRejectId = null;
+  await loadAll();
+}
+
+async function sendDashReject(form) {
+  const err = $(".ap-err", form), reason = form.elements.reason.value.trim();
+  err.textContent = "";
+  if (reason.length < 3) {
+    err.textContent = "Give a reason of at least three characters.";
+    form.elements.reason.focus();
+    return;
+  }
+  const res = await api(`/api/approvals/${form.dataset.id}/decide`, {
+    method: "POST", body: {decision: "reject", reason}});
+  toast(res, res.ok ? "Rejected" : "Decision not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  dashRejectId = null;
+  await loadAll();
+}
+
+function dashOpenApproval(id) {
+  if (state.approvals.some(a => a.id === Number(id))) return apDetail(id);
+  const a = state.dashboard && state.dashboard.approvals
+    ? (state.dashboard.approvals.rows || []).find(x => x.id === Number(id)) : null;
+  if (!a) return;
+  state.approvals = [a, ...state.approvals.filter(x => x.id !== a.id)];
+  apDetail(id);
+}
+
+function renderTopProducts(t, d) {
+  const el = $("#topProducts"), note = $("#topNote");
+  if (!t) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">Sales are not available to your role.</span></li>`;
+    return;
+  }
+  note.textContent = `${fmtDate(d.from)} to ${fmtDate(d.to)}, taxable value before GST`;
+  const rows = t.rows || [];
+  if (!rows.length) {
+    el.innerHTML = `<li><span class="none">No issued invoice falls in this period.</span></li>`;
+    return;
+  }
+  const max = Math.max(...rows.map(r => Number(r.revenue)), 0) || 1;
+  el.innerHTML = rows.map(r => {
+    const rev = Number(r.revenue), prev = Number(r.previous_revenue);
+    const pct = Math.max(0, rev / max * 100);
+    const change = r.change == null
+      ? (prev === 0 && rev > 0 ? `<span class="delta up">new this period</span>` : `<span class="delta flat">no prior sales</span>`)
+      : Number(r.change) > 0 ? `<span class="delta up">▲ ${Number(r.change).toFixed(1)}%</span>`
+      : Number(r.change) < 0 ? `<span class="delta down">▼ ${Math.abs(Number(r.change)).toFixed(1)}%</span>`
+      : `<span class="delta flat">no change</span>`;
+    return `<li><div><b>${esc(r.name)}</b><small>${esc(r.sku)} · ${esc(qty(r.qty))} units</small>
+      <div class="wh-bar" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div></div>
+      <div class="r"><span class="num">₹ ${money(rev)}<small>${change}</small></span></div></li>`;
+  }).join("");
+}
+
+function renderCategory(c) {
+  const el = $("#category");
+  if (!c || c.available === false) {
+    el.innerHTML = `<div class="category-empty"><div class="donut" aria-hidden="true"></div>
+      <div><b>No data yet</b><p>${esc(c && c.note || "Sales cannot be grouped by category until a category is captured on each product.")}</p>
+      <code>${esc(c && c.gap || "GAP-D01")}</code></div></div>`;
+    return;
+  }
+  el.innerHTML = `<p class="gap-note">Category totals are not available.</p>`;
+}
+
+/* ---------- phase 3 insight cards ---------- */
+function renderInsights(ins) {
+  renderInsightPipeline(ins && ins.pipeline);
+  renderInsightCustomers(ins && ins.customers);
+  renderInsightPurchasing(ins && ins.purchasing);
+  renderInsightCorrections(ins && ins.corrections);
+  renderInsightHrToday(ins && ins.hr);
+}
+
+function renderInsightPipeline(p) {
+  const show = !!(p && (p.sales || p.leads));
+  $("#pipePanel").classList.toggle("hide", !show);
+  if (!show) return;
+  const col = (title, rows, render, extra = "") => `<div><h3 class="ins-h">${esc(title)}</h3>
+    <ul class="rows">${rows.length ? rows.map(render).join("") : `<li><span class="none">None.</span></li>`}</ul>${extra}</div>`;
+  const parts = [];
+  if (p.sales) {
+    const d = p.sales.dispatch || {};
+    const dispatch = d.average_days != null
+      ? `Raised to dispatch: ${d.average_days} days on average across ${plural(d.measured, "dispatched order")}. ${d.note || ""}`
+      : `Order-to-dispatch time is not available yet. ${d.note || ""}`;
+    parts.push(col(`Sales orders · ${plural(p.sales.total, "order")}`, p.sales.rows,
+      r => `<li><div><b>${esc(r.label)}</b><small>${plural(r.count, "order")}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.value)}</span></div></li>`,
+      `<p class="gap-note">${esc(dispatch)}</p>`));
+  }
+  if (p.leads) parts.push(col(`Leads · ${plural(p.leads.total, "lead")}`, p.leads.rows,
+    r => `<li><div><b>${esc(r.label)}</b></div><span class="num">${qty(r.count)}</span></li>`));
+  $("#pipeBody").innerHTML = parts.join("");
+}
+
+function renderInsightCustomers(c) {
+  $("#custPanel").classList.toggle("hide", !c);
+  if (!c) return;
+  $("#custNote").textContent = `${fmtDate(c.from)} to ${fmtDate(c.to)} · top by invoiced value`;
+  $("#custTop").innerHTML = c.top
+    ? (c.top.length ? c.top.map(r => `<li><div><b>${esc(r.name)}</b><small>${plural(r.invoices, "invoice")}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.revenue)}</span></div></li>`).join("")
+      : `<li><span class="none">No issued invoice falls in this period.</span></li>`)
+    : `<li><span class="none">Top customers are not available to your role.</span></li>`;
+  $("#custOutWrap").classList.toggle("hide", !c.outstanding);
+  if (c.outstanding) {
+    $("#custOut").innerHTML = (c.outstanding.length ? c.outstanding.map(r => `<li><div><b>${esc(r.name)}</b><small>${plural(r.invoices, "invoice")}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.outstanding)}</span></div></li>`).join("")
+      : `<li><span class="none">Nothing is outstanding.</span></li>`)
+      + `<li><div><b>Total outstanding</b></div><span class="num">₹ ${money(c.outstanding_total)}</span></li>`;
+  }
+  $("#custCreditWrap").classList.toggle("hide", !c.credit);
+  if (c.credit) {
+    $("#custCredit").innerHTML = (c.credit.length ? c.credit.map(r => {
+      const pct = Number(r.pct_used) || 0;
+      const pctText = `${pct.toLocaleString("en-IN", {maximumFractionDigits: 0})}%`;
+      return `<li><div><b>${esc(r.name)}</b><small>₹ ${money(r.exposure)} of ₹ ${money(r.credit_limit)} in use</small>
+        <div class="meter use" aria-hidden="true"><i style="width:${Math.min(pct, 100).toFixed(1)}%;background:${pct > 100 ? "var(--bad)" : pct >= 80 ? "var(--turmeric)" : "var(--moss)"}"></i></div></div>
+        <div class="r"><span class="num">${pctText}${pct > 100 ? "<small>over limit</small>" : ""}</span></div></li>`;
+    }).join("") : `<li><span class="none">No distributor has a credit limit.</span></li>`);
+  }
+}
+
+function renderInsightPurchasing(p) {
+  $("#purPanel").classList.toggle("hide", !p);
+  if (!p) return;
+  $("#purNote").textContent = `${plural(p.open_count, "open purchase order")}`
+    + ` · ${p.no_receipt} with no goods received · ${p.partial} part received`;
+  $("#purAge").innerHTML = (p.rows || []).map(r => `<li><div><b>${esc(r.label)}</b><small>${plural(r.count, "order")}</small></div>
+    <div class="r"><span class="num">₹ ${money(r.value)}</span></div></li>`).join("")
+    || `<li><span class="none">No purchase order is waiting for goods.</span></li>`;
+  $("#purGap").textContent = p.note || "";
+}
+
+function renderInsightCorrections(c) {
+  $("#corrPanel").classList.toggle("hide", !c);
+  if (!c) return;
+  $("#corrNote").textContent = `${fmtDate(c.from)} to ${fmtDate(c.to)}`;
+  const latest = [...(c.credit_notes.rows || []).map(r => ({...r, kind: "Credit"})),
+                  ...(c.debit_notes.rows || []).map(r => ({...r, kind: "Debit"}))]
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 6);
+  $("#corrNotes").innerHTML =
+    `<li><div><b>Credit notes</b><small>${plural(c.credit_notes.count, "note")}</small></div>
+      <div class="r"><span class="num">₹ ${money(c.credit_notes.value)}</span></div></li>`
+    + `<li><div><b>Debit notes</b><small>${plural(c.debit_notes.count, "note")}</small></div>
+      <div class="r"><span class="num">₹ ${money(c.debit_notes.value)}</span></div></li>`
+    + (latest.length ? latest.map(r => `<li><div><b>${esc(r.kind)} note ${esc(r.number)}</b>
+        <small>${esc(r.invoice)} · ${esc(r.distributor)} · ${esc(r.reason)}</small></div>
+        <div class="r"><span class="num">₹ ${money(r.total)}</span></div></li>`).join("")
+      : `<li><span class="none">No credit or debit note was issued in this period.</span></li>`);
+  $("#postWrap").classList.remove("hide");
+  const posts = c.post_billing;
+  $("#corrPosts").innerHTML = posts.count
+    ? posts.rows.map(r => {
+        const tone = r.status === "approved" ? "ok" : r.status === "rejected" ? "bad" : r.status === "pending" ? "warn" : "off";
+        return `<li><div><b>${esc(r.request_no || "—")}</b><small>${esc(r.document || "")} ${esc(r.subject || "")}</small></div>
+          <div class="r"><span class="chip ${tone}">${esc(r.status)}</span>
+          <small>${esc(fmtStamp(r.requested_at))}</small></div></li>`;
+      }).join("")
+    : `<li><span class="none">No post-billing request in this period.</span></li>`;
+}
+
+function renderInsightHrToday(h) {
+  $("#hrPanel").classList.toggle("hide", !h);
+  if (!h) return;
+  $("#hrNote").textContent = fmtDate(h.date);
+  const stat = (n, label) => `<div><b>${qty(n)}</b><span>${esc(label)}</span></div>`;
+  $("#hrStats").innerHTML = stat(h.headcount, "active employees")
+    + stat(h.marked, "attendance marked") + stat(h.not_marked, "not marked")
+    + stat(h.leave_pending, "leave pending") + stat(h.od_pending, "on-duty pending");
+  const rows = (h.attendance || []).filter(r => r.count > 0);
+  $("#hrAtt").innerHTML = rows.length
+    ? rows.map(r => `<li><div><b>${esc(r.label)}</b></div><span class="num">${qty(r.count)}</span></li>`).join("")
+    : `<li><span class="none">No attendance is marked for today.</span></li>`;
+}
+
+function renderActivity(a) {
+  const el = $("#activity"), note = $("#actNote");
+  if (!a) {
+    note.textContent = "";
+    el.innerHTML = `<li><span class="none">The audit trail is not available to your role.</span></li>`;
+    return;
+  }
+  const rows = a.rows || [];
+  note.textContent = a.total > a.shown ? `Latest ${a.shown} of ${a.total} entries.` : `${plural(a.total, "entry")}.`;
+  el.innerHTML = rows.length ? rows.map(r => {
+    const changed = r.changes && Object.keys(r.changes).length ? ` · ${Object.keys(r.changes).join(", ")}` : "";
+    return `<li><div><span class="who-done">${esc(r.actor)}</span>
+      <span class="what">${esc(r.action)} · ${esc(r.record)}${esc(changed)}</span></div>
+      <time datetime="${esc(r.at || "")}">${esc(fmtStamp(r.at))}</time></li>`;
+  }).join("") : `<li><span class="none">No activity has been recorded yet.</span></li>`;
+}
+
+function renderHealth(h) {
+  const el = $("#health"), prog = $("#prog"), bar = $("#barfill");
+  if (!h) {
+    prog.textContent = "";
+    el.innerHTML = `<p class="gap-note">Health information is not available.</p>`;
+    return;
+  }
+  const m = h.modules || {}, s = h.schema || {}, b = h.backup || {}, al = h.alerts || {};
+  prog.textContent = `${m.working ?? 0} of ${m.counted ?? 0} modules working`;
+  bar.style.width = `${Number(m.percent) || 0}%`;
+  const schemaOk = !!s.at_head;
+  const schemaText = s.current
+    ? `${s.current}${schemaOk ? " · at the latest migration" : s.head ? ` · latest is ${s.head}` : ""}`
+    : "No migration version recorded";
+  const backupOk = !!b.status && b.status !== "not_recorded";
+  el.innerHTML = `
+    <div class="health-row"><div class="h-label"><b>Modules</b><span>From the server's module register.</span></div>
+      <span class="chip ${m.counted && m.working === m.counted ? "ok" : "warn"}">${m.working ?? 0} of ${m.counted ?? 0}</span></div>
+    <div class="health-row"><div class="h-label"><b>Schema migration</b><span>${esc(schemaText)}</span></div>
+      <span class="chip ${schemaOk ? "ok" : "warn"}">${schemaOk ? "At head" : "Check"}</span></div>
+    <div class="health-row"><div class="h-label"><b>Backup and restore</b><span>${esc(b.note || "Not recorded.")}</span></div>
+      <span class="chip ${backupOk ? "ok" : "warn"}">${backupOk ? "Recorded" : "Not recorded"}</span></div>
+    <div class="health-row"><div class="h-label"><b>Alert channel</b><span>${esc(al.note || "")}</span></div>
+      <span class="chip ${al.configured ? "ok" : "off"}">${al.configured ? "Configured" : "Not configured"}</span></div>`;
+}
+
+function renderModuleList() {
+  const reg = state.modules;
+  if (!reg) return;
+  const CHIP = reg.chips;
+  $("#mods").innerHTML = reg.groups.map(g => {
+    const rows = reg.modules.filter(m => m.group === g.name);
+    return `<li class="grp"><b>${esc(g.name)}</b><span>${g.counted ? `${g.working} of ${g.counted} working` : "optional"}</span></li>`
+      + rows.map(m => {
+        const chip = CHIP[m.status] || ["off", m.status];
+        return `<li><div>${esc(m.name)}<small>${esc(m.does)}</small></div><span class="chip ${chip[0]}">${esc(chip[1])}</span></li>`;
+      }).join("");
+  }).join("");
+}
+
+async function loadDashboard() {
+  const seq = ++state.dashSeq;
+  state.dashLoading = true;
+  state.dashError = null;
+  renderDash();
+  const res = await api(`/api/dashboard?${dashQuery()}`);
+  if (seq !== state.dashSeq || !state.user) return;
+  state.dashLoading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    state.dashboard = res.body;
+    state.dashError = null;
+    state.expiry.data = null;
+    state.chart.index = -1;
+  } else {
+    state.dashError = detail(res.body);
+  }
+  renderDash();
+  if (state.dashboard && state.expiry.bucket !== "all") setExpiryBucket(state.expiry.bucket);
+}
+
+function applyDashDates(from, to, preset) {
+  const today = dayIso(new Date());
+  let problem = "";
+  if (!from || !to) problem = "Choose both dates, or pick a preset.";
+  else if (from > to) problem = "The From date cannot be after the To date.";
+  else if (to > today) problem = "The To date cannot be in the future.";
+  state.dashDateError = problem;
+  if (problem) { renderDash(); return; }
+  state.dashFrom = from;
+  state.dashTo = to;
+  state.dashPreset = preset || "";
+  try {
+    localStorage.setItem("hb.dashFrom", from);
+    localStorage.setItem("hb.dashTo", to);
+    localStorage.setItem("hb.dashPreset", state.dashPreset);
+  } catch (e) { /* storage blocked */ }
+  renderDash();
+  loadDashboard();
+}
+
+function setDashPreset(key) {
+  const w = dashWindow(key);
+  applyDashDates(w.from, w.to, key);
+}
+
+/* ---------- MoM & YoY comparison ---------- */
+const CMP_MODES = {full_month: "Full month", mtd: "Month to date"};
+const CMP_STATE = {current: "Current month (incomplete)", past: "Complete month",
+                   future: "Not started"};
+const cmpAmount = (unit, value) => unit === "amount" ? `₹ ${money(value)}` : qty(value);
+
+function cmpDelta(value) {
+  if (value === null || value === undefined) {
+    return `<span class="cmp-delta flat">no prior figure</span>`;
+  }
+  const n = Number(value);
+  if (!isFinite(n)) return `<span class="cmp-delta flat">no prior figure</span>`;
+  if (n === 0) return `<span class="cmp-delta flat">no change</span>`;
+  const dir = n > 0 ? "up" : "down";
+  return `<span class="cmp-delta ${dir}">${n > 0 ? "▲" : "▼"} ${Math.abs(n).toFixed(1)}%</span>`;
+}
+
+function cmpCard(c, future) {
+  if (!c.available) {
+    return `<div class="kpi cmp-card-gap">
+      <span class="kpi-label">${esc(c.label)}<span class="chip off">Gap ${esc(c.gap)}</span></span>
+      <span class="kpi-value">No data yet</span>
+      <span class="kpi-note">${esc(c.note)}</span>
+    </div>`;
+  }
+  const tag = c.href ? "a" : "div";
+  const href = c.href ? ` href="${esc(c.href)}"` : "";
+  return `<${tag} class="kpi"${href}>
+    <span class="kpi-label">${esc(c.label)}</span>
+    <span class="kpi-value">${future ? "No data yet" : esc(cmpAmount(c.unit, c.current))}</span>
+    <span class="kpi-note">${esc(c.note)}</span>
+    <div class="cmp-split">
+      <span>Previous month<b>${esc(cmpAmount(c.unit, c.previous))}</b>${cmpDelta(c.previous_change)}</span>
+      <span>Same month last year<b>${esc(cmpAmount(c.unit, c.last_year))}</b>${cmpDelta(c.last_year_change)}</span>
+    </div>
+  </${tag}>`;
+}
+
+function cmpRange(label, window, on) {
+  return `<div class="cmp-range${on ? " on" : ""}">
+    <small>${esc(label)}</small>
+    <b>${esc(window.label)}</b>
+    <span>${esc(plural(window.days, "day"))}</span>
+  </div>`;
+}
+
+function cmpTrend(months, selected, sales, purchases) {
+  if (!sales && !purchases) {
+    return `<p class="gap-note">Your role may not read sales or purchases.</p>`;
+  }
+  const head = ["Month"];
+  if (sales) head.push("Sales (incl. GST)", "Same month last year", "YoY");
+  if (purchases) head.push("Purchases", "Prior year");
+  if (sales) head.push("3-month average");
+  const body = months.map(r => {
+    const cells = [`<td>${esc(r.label)}</td>`];
+    if (sales) {
+      cells.push(`<td class="n">${r.sales === null ? "–" : esc(money(r.sales))}</td>`);
+      cells.push(`<td class="n">${r.prior_sales === null ? "–" : esc(money(r.prior_sales))}</td>`);
+      cells.push(`<td class="n">${cmpDelta(r.yoy_change)}</td>`);
+    }
+    if (purchases) {
+      cells.push(`<td class="n">${r.purchases === null ? "–" : esc(money(r.purchases))}</td>`);
+      cells.push(`<td class="n">${r.prior_purchases === null ? "–" : esc(money(r.prior_purchases))}</td>`);
+    }
+    if (sales) {
+      cells.push(`<td class="n">${r.moving_average === null ? "–" : esc(money(r.moving_average))}</td>`);
+    }
+    return `<tr${r.month === selected ? ` class="on"` : ""}>${cells.join("")}</tr>`;
+  }).join("");
+  return `<thead><tr>${head.map((h, i) => `<th${i ? ` class="n"` : ""}>${esc(h)}</th>`).join("")}</tr></thead>`
+    + `<tbody>${body}</tbody>`;
+}
+
+function cmpMoves(trend) {
+  const blocks = [];
+  const add = (label, g) => {
+    if (!g) return;
+    blocks.push(`<div class="cmp-move">
+      <div><span>${esc(label)} in the window</span><b>₹ ${esc(money(g.current))}</b></div>
+      <div><span>Previous month</span><b>₹ ${esc(money(g.previous))}</b>${cmpDelta(g.mom)}</div>
+      <div><span>Same month last year</span><b>₹ ${esc(money(g.last_year))}</b>${cmpDelta(g.yoy)}</div>
+    </div>`);
+  };
+  add("Sales", trend.sales_visible ? trend.growth.sales : null);
+  add("Purchases", trend.purchases_visible ? trend.growth.purchases : null);
+  return blocks.join("") || `<p class="gap-note">No movement figure is available to your role.</p>`;
+}
+
+function cmpExtremes(trend) {
+  if (!trend.sales_visible) {
+    return `<li><div><span class="gap-note">The best and worst month need the sales figure.</span></div></li>`;
+  }
+  if (!trend.best || !trend.worst) {
+    return `<li><div><span class="gap-note">No issued invoices in the twelve months shown, so there is no best or worst month yet.</span></div></li>`;
+  }
+  return [[`Best month`, trend.best], [`Weakest month`, trend.worst]].map(([label, row]) =>
+    `<li><div><b>${esc(label)}</b><small>${esc(row.label)}</small></div>`
+    + `<span class="num">₹ ${esc(money(row.sales))}</span></li>`).join("");
+}
+
+function cmpBreakdown(table, emptyText) {
+  const rows = table.rows || [];
+  if (!rows.length) return `<tbody><tr><td colspan="5"><span class="gap-note">${esc(emptyText)}</span></td></tr></tbody>`;
+  return `<thead><tr><th>Name</th><th class="n">This window</th><th class="n">Previous</th>`
+    + `<th class="n">Change</th><th class="n">Share</th></tr></thead><tbody>`
+    + rows.map(r => `<tr><td>${esc(r.label)}</td><td class="n">${esc(money(r.current))}</td>`
+      + `<td class="n">${esc(money(r.previous))}</td><td class="n">${cmpDelta(r.change)}</td>`
+      + `<td class="n">${r.share === null ? "–" : esc(r.share.toFixed(1)) + "%"}</td></tr>`).join("")
+    + `</tbody>`;
+}
+
+function renderCompare() {
+  const s = state.compare, d = s.data;
+  const monthEl = $("#cmpMonth");
+  if (monthEl && document.activeElement !== monthEl) {
+    monthEl.value = s.month || (d ? d.month : "");
+  }
+  $$("[data-cmp-mode]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.cmpMode === s.mode)));
+  $("#cmpSkeleton").classList.toggle("hide", !(s.loading && !d));
+  $("#cmpError").classList.toggle("hide", !s.error);
+  $("#cmpContent").classList.toggle("hide", !d);
+  $("#cmpContent").setAttribute("aria-busy", s.loading ? "true" : "false");
+  if (s.error) {
+    $("#cmpErrText").textContent = d
+      ? ` The last figures loaded are shown. ${s.error}`
+      : ` ${s.error}`;
+  }
+  if (!d) {
+    $("#cmpNote").textContent = s.loading ? "Loading figures from the server…" : "";
+    return;
+  }
+
+  $("#cmpNote").innerHTML = `${esc(CMP_MODES[d.mode])} · ${esc(CMP_STATE[d.month_state])}`
+    + ` · ${esc(d.month_label)}${s.loading ? " · refreshing…" : ""}`;
+
+  const ranges = d.ranges;
+  $("#cmpRanges").innerHTML =
+    cmpRange(`Selected window · ${CMP_MODES[d.mode]}`, ranges.current, true)
+    + cmpRange("Previous month", ranges.previous, false)
+    + cmpRange("Same month last year", ranges.last_year, false);
+
+  $("#cmpCards").innerHTML = d.cards.map(c => cmpCard(c, d.month_state === "future")).join("");
+
+  const trend = d.trend;
+  $("#cmpTrend").innerHTML = cmpTrend(trend.months, d.month,
+                                      trend.sales_visible, trend.purchases_visible);
+  $("#cmpTrendNote").textContent = "The selected month is highlighted. Purchases are valued at order cost.";
+  $("#cmpGrowth").innerHTML = cmpMoves(trend);
+  $("#cmpExtremes").innerHTML = cmpExtremes(trend);
+  const seasons = (trend.seasonality || []).filter(x => x.index !== null);
+  $("#cmpSeason").innerHTML = seasons.length
+    ? seasons.map(x => `<span>${esc(x.label)}<b>${Number(x.index).toFixed(2)}×</b></span>`).join("")
+    : `<p class="gap-note">No prior-year sales figure to divide by for these months.</p>`;
+
+  const b = d.breakdowns;
+  $("#cmpBreakdowns").classList.toggle("hide", !b);
+  if (b) {
+    $("#cmpProdNote").textContent = "Taxable value, before GST";
+    $("#cmpDistNote").textContent = "Taxable value, before GST";
+    $("#cmpProducts").innerHTML = cmpBreakdown(b.sales_by_product,
+      "No issued invoices in the selected window.");
+    $("#cmpDists").innerHTML = cmpBreakdown(b.sales_by_distributor,
+      "No issued invoices in the selected window.");
+  }
+
+  const p = d.projection;
+  const estimate = p.is_estimate && p.state === "current";
+  $("#cmpProjLabel").innerHTML = estimate
+    ? `<span class="cmp-est">Estimate</span>${esc(p.label)}` : esc(p.label);
+  const stat = (value, label) => `<div><b>${estimate ? "≈ " : ""}₹ ${esc(money(value))}</b>`
+    + `<span>${esc(label)}</span></div>`;
+  const stats = [];
+  const suffix = p.complete ? ", recorded" : estimate ? ", run rate" : "";
+  if (p.sales !== null) stats.push(stat(p.sales, `Sales${suffix}`));
+  if (p.purchases !== null) stats.push(stat(p.purchases, `Purchases${suffix}`));
+  stats.push(`<div><b>${esc(qty(p.elapsed_days))} of ${esc(qty(p.days_in_month))}</b><span>days elapsed in the month</span></div>`);
+  $("#cmpProjection").innerHTML = stats.join("");
+  $("#cmpProjNote").textContent = p.note;
+
+  $("#cmpFooter").textContent =
+    `Counted ${fmtStamp(d.generated_at)} in Asia/Kolkata · `
+    + `rolling three-month average over the twelve months ending ${d.month_label}.`;
+  $("#cmpNotes").innerHTML = (d.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+}
+
+async function loadCompare() {
+  const s = state.compare;
+  const seq = ++s.seq;
+  s.loading = true;
+  s.error = null;
+  renderCompare();
+  const params = new URLSearchParams({mode: s.mode});
+  if (s.month) params.set("month", s.month);
+  const res = await api(`/api/dashboard/compare?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    s.data = res.body;
+    s.error = null;
+  } else {
+    s.error = detail(res.body);
+  }
+  renderCompare();
+}
+
+function setCompareMode(mode) {
+  if (!CMP_MODES[mode]) return;
+  state.compare.mode = mode;
+  try { localStorage.setItem("hb.cmpMode", mode); } catch (e) { /* storage blocked */ }
+  loadCompare();
+}
+
+function setCompareMonth(value) {
+  state.compare.month = /^\d{4}-\d{2}$/.test(value || "") ? value : "";
+  try {
+    if (state.compare.month) localStorage.setItem("hb.cmpMonth", state.compare.month);
+    else localStorage.removeItem("hb.cmpMonth");
+  } catch (e) { /* storage blocked */ }
+  loadCompare();
+}
+
+function downloadCsv(name, rows) {
+  // Same rule as the server exports: text a spreadsheet would run as a formula
+  // is prefixed with an apostrophe, but numbers (including negatives) are not.
+  const formula = /^[=+\-@\t\r]/;
+  const numberLike = /^[+-]?[\d\s().,-]+$/;
+  const text = v => {
+    const s = String(v ?? "");
+    return formula.test(s) && !numberLike.test(s) ? "'" + s : s;
+  };
+  const cell = v => {
+    const s = text(v);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = rows.map(r => r.map(cell).join(",")).join("\r\n");
+  const blob = new Blob(["\ufeff" + csv], {type: "text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function exportCompareCsv() {
+  const d = state.compare.data;
+  if (!d) return;
+  const t = d.trend;
+  const head = ["Month"];
+  if (t.sales_visible) head.push("Sales incl. GST", "Same month last year", "YoY %");
+  if (t.purchases_visible) head.push("Purchases", "Prior year purchases");
+  if (t.sales_visible) head.push("3-month average");
+  const rows = [
+    ["HERBANOVA MoM and YoY comparison"],
+    ["Mode", CMP_MODES[d.mode]],
+    ["Selected window", d.ranges.current.from, d.ranges.current.to],
+    ["Previous month", d.ranges.previous.from, d.ranges.previous.to],
+    ["Same month last year", d.ranges.last_year.from, d.ranges.last_year.to],
+    ["Generated", d.generated_at],
+    [],
+    head,
+  ];
+  t.months.forEach(r => {
+    const row = [r.month];
+    if (t.sales_visible) row.push(r.sales, r.prior_sales, r.yoy_change);
+    if (t.purchases_visible) row.push(r.purchases, r.prior_purchases);
+    if (t.sales_visible) row.push(r.moving_average);
+    rows.push(row);
+  });
+  downloadCsv(`herbanova-mom-yoy-${d.month}.csv`, rows);
+}
+
+/* ---------- geography ---------- */
+// A fixed local tile layout: roughly north to south, west to east. It is a
+// schematic, not a geographic outline, and is labelled as such on screen.
+const GEO_LAYOUT = {
+  "38": [0, 2],
+  "01": [1, 0],
+  "02": [2, 0], "04": [2, 1], "05": [2, 2],
+  "03": [3, 0], "06": [3, 1], "07": [3, 2], "09": [3, 3], "11": [3, 6], "12": [3, 7],
+  "08": [4, 0], "23": [4, 2], "10": [4, 3], "20": [4, 4], "18": [4, 5], "13": [4, 6],
+  "24": [5, 0], "27": [5, 1], "22": [5, 2], "21": [5, 3], "19": [5, 4],
+  "14": [5, 5], "17": [5, 6], "15": [5, 7],
+  "26": [6, 0], "30": [6, 1], "36": [6, 2], "37": [6, 3], "16": [6, 4], "35": [6, 7],
+  "31": [7, 0], "29": [7, 1],
+  "32": [8, 0], "33": [8, 1], "34": [8, 2],
+  "97": [9, 4],
+};
+const GEO_SHORT = {
+  "01": "JK", "02": "HP", "03": "PB", "04": "CH", "05": "UK", "06": "HR", "07": "DL",
+  "08": "RJ", "09": "UP", "10": "BR", "11": "SK", "12": "AR", "13": "NL", "14": "MN",
+  "15": "MZ", "16": "TR", "17": "ML", "18": "AS", "19": "WB", "20": "JH", "21": "OD",
+  "22": "CG", "23": "MP", "24": "GJ", "26": "DN", "27": "MH", "29": "KA", "30": "GA",
+  "31": "LD", "32": "KL", "33": "TN", "34": "PY", "35": "AN", "36": "TS", "37": "AP",
+  "38": "LA", "97": "OT",
+};
+const GEO_SORTABLE = new Set(["name", "sales", "share", "invoice_count", "customers",
+                              "taxable", "return_value"]);
+
+function applyGeoDates(from, to) {
+  const today = dayIso(new Date());
+  let problem = "";
+  if (!from || !to) problem = "Choose both dates.";
+  else if (from > to) problem = "The From date cannot be after the To date.";
+  else if (to > today) problem = "The To date cannot be in the future.";
+  state.geo.dateError = problem;
+  if (problem) { renderGeo(); return; }
+  state.geo.from = from;
+  state.geo.to = to;
+  try {
+    localStorage.setItem("hb.geoFrom", from);
+    localStorage.setItem("hb.geoTo", to);
+  } catch (e) { /* storage blocked */ }
+  renderGeo();
+  loadGeo();
+}
+
+function setGeoSort(key) {
+  if (!GEO_SORTABLE.has(key)) return;
+  const cur = state.geo.sort;
+  if (cur.key === key) cur.dir = cur.dir === "asc" ? "desc" : "asc";
+  else state.geo.sort = {key, dir: key === "name" ? "asc" : "desc"};
+  renderGeo();
+}
+
+function selectGeo(key) {
+  state.geo.selected = state.geo.selected === key ? null : key;
+  renderGeo();
+}
+
+function geoRows() {
+  const d = state.geo.data;
+  if (!d) return [];
+  const {key, dir} = state.geo.sort;
+  const value = r => {
+    if (key === "name") return r.name.toLowerCase();
+    if (key === "share") return r.share === null ? -1 : Number(r.share);
+    return Number(r[key] || 0);
+  };
+  return [...d.states].sort((a, b) => {
+    const va = value(a), vb = value(b);
+    const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+    return dir === "asc" ? cmp : -cmp;
+  });
+}
+
+function renderGeo() {
+  const s = state.geo, d = s.data;
+  const today = dayIso(new Date());
+  const fromEl = $("#geoFrom"), toEl = $("#geoTo");
+  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = s.from; }
+  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = s.to; }
+  const dateErr = $("#geoDateErr");
+  if (dateErr) {
+    dateErr.textContent = s.dateError;
+    dateErr.classList.toggle("hide", !s.dateError);
+  }
+  $("#geoSkeleton").classList.toggle("hide", !(s.loading && !d));
+  $("#geoError").classList.toggle("hide", !s.error);
+  $("#geoContent").classList.toggle("hide", !d);
+  $("#geoContent").setAttribute("aria-busy", s.loading ? "true" : "false");
+  if (s.error) {
+    $("#geoErrText").textContent = d
+      ? ` The last figures loaded are shown. ${s.error}`
+      : ` ${s.error}`;
+  }
+  if (!d) {
+    $("#geoNote").textContent = s.loading ? "Loading figures from the server…" : "";
+    return;
+  }
+
+  $("#geoNote").innerHTML = `${esc(d.range_label)} · ${esc(qty(d.days))} ${d.days === 1 ? "day" : "days"}`
+    + (s.loading ? " · refreshing…" : "");
+
+  const level = l => `<div class="geo-level ${l.available ? "" : "off"}">`
+    + `<b>${esc(l.level)}</b><span>${l.available
+        ? esc(l.note) : `No data yet · ${esc(l.gap)}`}</span></div>`;
+  $("#geoLevels").innerHTML = d.levels.map(level).join("");
+
+  const t = d.totals;
+  const kpi = (label, value, note) => `<div class="kpi">`
+    + `<span class="kpi-label">${esc(label)}</span>`
+    + `<span class="kpi-value">${esc(value)}</span>`
+    + `<span class="kpi-trend off"><em>${esc(note)}</em></span></div>`;
+  const cards = [
+    kpi("Sales", `₹ ${money(t.sales)}`, "Issued invoices, including GST."),
+    kpi("Invoices", qty(t.invoice_count), "Issued in the selected window."),
+    kpi("States with sales", qty(t.states), "States or territories with at least one issued invoice."),
+  ];
+  if (d.gst.available) {
+    cards.push(kpi("Taxable value", `₹ ${money(t.taxable)}`,
+                   "Before GST; the tax split is in the table below."));
+  } else if (d.returns.available) {
+    cards.push(kpi("Returns", `₹ ${money(t.returns)}`,
+                   `${plural(t.return_count, "issued credit note")}.`));
+  } else {
+    cards.push(kpi("Location not recorded", qty(d.basis.unrecorded),
+                   "Invoices with no state on the snapshot or the distributor."));
+  }
+  $("#geoKpis").innerHTML = cards.join("");
+
+  const max = d.map.reduce((m, x) => Math.max(m, Number(x.sales)), 0);
+  $("#geoMap").innerHTML = d.map.map(m => {
+    const at = GEO_LAYOUT[m.code] || [9, 7];
+    const value = Number(m.sales);
+    const alpha = m.recorded && max > 0 ? 0.12 + 0.66 * Math.sqrt(value / max) : 0;
+    const style = `grid-row:${at[0] + 1};grid-column:${at[1] + 1};`
+      + (alpha ? `background:rgba(31,107,68,${alpha.toFixed(2)});` : "")
+      + (alpha > 0.55 ? "color:#fff;" : "");
+    const label = m.recorded ? `₹ ${money(m.sales)}` : "no issued invoice";
+    return `<button type="button" class="geo-tile ${m.recorded ? "" : "zero"}`
+      + `${s.selected === m.code ? " on" : ""}" style="${style}"`
+      + ` data-geo-code="${esc(m.code)}" title="${esc(m.name)} · ${esc(label)}"`
+      + ` aria-label="${esc(m.name)}: ${esc(label)}">`
+      + `<b>${esc(GEO_SHORT[m.code] || m.code)}</b>`
+      + `${m.recorded ? `<span>₹ ${esc(money(m.sales))}</span>` : ""}</button>`;
+  }).join("");
+  $("#geoMapNote").textContent = "Tiles are a fixed local layout, not a geographic outline. "
+    + "Select a tile to highlight its row in the table."
+    + (d.unrecorded ? ` ${plural(d.unrecorded.invoice_count, "invoice")} have no recorded state and are not on the map.` : "");
+
+  const rank = rows => rows.length
+    ? rows.map((r, i) => `<li><button type="button" data-geo-code="${esc(r.key)}">`
+        + `<b>${i + 1}. ${esc(r.name)}</b>`
+        + `<em>₹ ${esc(money(r.sales))}</em>`
+        + `<span>${plural(r.invoice_count, "invoice")} · ${r.share === null ? "–" : esc(r.share.toFixed(2)) + "%"} of sales</span>`
+        + `</button></li>`).join("")
+    : `<li class="geo-sub">No state has a recorded sale in this window.</li>`;
+  $("#geoTop").innerHTML = rank(d.top);
+  $("#geoBottom").innerHTML = rank(d.bottom);
+
+  const rows = geoRows();
+  const cols = [
+    {key: "name", label: "State"},
+    {key: "sales", label: "Sales (incl. GST)", num: true},
+    {key: "share", label: "Share", num: true},
+    {key: "invoice_count", label: "Invoices", num: true},
+    {key: "customers", label: "Customers", num: true},
+  ];
+  if (d.gst.available) cols.push({key: "taxable", label: "Taxable", num: true});
+  if (d.returns.available) cols.push({key: "return_value", label: "Returns", num: true});
+  const head = cols.map(c => {
+    const on = s.sort.key === c.key;
+    const aria = on ? (s.sort.dir === "asc" ? "ascending" : "descending") : "none";
+    return `<th class="${c.num ? "n" : ""}" aria-sort="${aria}">`
+      + `<button type="button" class="geo-sort ${on ? "on" : ""}"`
+      + ` data-geo-sort="${c.key}">${esc(c.label)}`
+      + `${on ? (s.sort.dir === "asc" ? " ↑" : " ↓") : ""}</button></th>`;
+  }).join("");
+  const body = rows.map(r => {
+    const cells = cols.map(c => {
+      if (c.key === "name") {
+        return `<td><b>${esc(r.name)}</b>${r.recorded ? ""
+          : ` <span class="muted">· no state recorded</span>`}</td>`;
+      }
+      if (c.key === "share") {
+        return `<td class="n">${r.share === null ? "–" : esc(r.share.toFixed(2)) + "%"}</td>`;
+      }
+      if (["sales", "taxable", "return_value"].includes(c.key)) {
+        return `<td class="n">₹ ${esc(money(r[c.key]))}</td>`;
+      }
+      return `<td class="n">${esc(qty(r[c.key]))}</td>`;
+    }).join("");
+    return `<tr class="${r.recorded ? "" : "geo-unrecorded"}`
+      + `${s.selected === r.key ? " on" : ""}" data-geo-row="${esc(r.key)}">${cells}</tr>`;
+  }).join("");
+  $("#geoTable").innerHTML = `<thead><tr>${head}</tr></thead><tbody>`
+    + (body || `<tr><td colspan="${cols.length}" class="muted">No issued invoices in this window.</td></tr>`)
+    + `</tbody>`;
+  $("#geoTableNote").textContent = `${plural(t.invoice_count, "invoice")} across `
+    + `${plural(t.states, "state")}${d.unrecorded ? " plus a location-not-recorded row" : ""}.`;
+
+  if (!d.returns.available) {
+    $("#geoReturns").innerHTML = `<div class="geo-gap"><b>No data yet · ${esc(d.returns.gap)}</b><br>`
+      + `${esc(d.returns.note)}</div>`;
+  } else if (!d.returns.rows.length) {
+    $("#geoReturns").innerHTML = `<p class="geo-sub">No issued credit notes in this window.</p>`;
+  } else {
+    const rrows = d.returns.rows.map(r => {
+      const reasons = r.reasons.length ? r.reasons.map(esc).join("; ") : "No reason text recorded";
+      const more = r.reasons_total > r.reasons.length
+        ? ` <em>Showing ${r.reasons.length} of ${r.reasons_total} reasons.</em>` : "";
+      return `<tr><td><b>${esc(r.name)}</b></td>`
+        + `<td class="n">₹ ${esc(money(r.value))}</td>`
+        + `<td class="n">${esc(qty(r.count))}</td>`
+        + `<td><span class="geo-reasons" title="${esc(r.reasons.join("; "))}">${reasons}</span>${more}</td></tr>`;
+    }).join("");
+    $("#geoReturns").innerHTML = `<div class="tw"><table class="cmp-table"><thead><tr>`
+      + `<th>State</th><th class="n">Returns</th><th class="n">Notes</th><th>Reason as recorded</th>`
+      + `</tr></thead><tbody>${rrows}</tbody></table></div>`
+      + `<p class="geo-sub">${esc(d.returns.note)}</p>`;
+  }
+
+  if (!d.gst.available) {
+    $("#geoGst").innerHTML = `<div class="geo-gap"><b>No data yet · ${esc(d.gst.gap)}</b><br>`
+      + `${esc(d.gst.note)}</div>`;
+  } else if (!d.gst.rows.length) {
+    $("#geoGst").innerHTML = `<p class="geo-sub">No issued invoices in this window.</p>`;
+  } else {
+    const grows = d.gst.rows.map(r => `<tr><td><b>${esc(r.name)}</b></td>`
+      + `<td class="n">₹ ${esc(money(r.taxable))}</td>`
+      + `<td class="n">₹ ${esc(money(r.cgst))}</td>`
+      + `<td class="n">₹ ${esc(money(r.sgst))}</td>`
+      + `<td class="n">₹ ${esc(money(r.igst))}</td>`
+      + `<td class="n">₹ ${esc(money(r.cess))}</td>`
+      + `<td class="n">₹ ${esc(money(r.tax))}</td></tr>`).join("");
+    $("#geoGst").innerHTML = `<div class="tw"><table class="cmp-table"><thead><tr>`
+      + `<th>State</th><th class="n">Taxable</th><th class="n">CGST</th><th class="n">SGST</th>`
+      + `<th class="n">IGST</th><th class="n">Cess</th><th class="n">Tax</th>`
+      + `</tr></thead><tbody>${grows}</tbody></table></div>`
+      + `<p class="geo-sub">${esc(d.gst.note)}</p>`;
+  }
+
+  $("#geoFooter").textContent = `Counted ${fmtStamp(d.generated_at)} in Asia/Kolkata`
+    + ` · ${d.range_label}.`;
+  $("#geoNotes").innerHTML = (d.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+}
+
+async function loadGeo() {
+  const s = state.geo;
+  const seq = ++s.seq;
+  s.loading = true;
+  s.error = null;
+  renderGeo();
+  const params = new URLSearchParams({from_date: s.from, to_date: s.to});
+  const res = await api(`/api/dashboard/geo?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    s.data = res.body;
+    s.error = null;
+    if (!s.data.states.some(r => r.key === s.selected)) s.selected = null;
+  } else {
+    s.error = detail(res.body);
+  }
+  renderGeo();
+}
+
+function exportGeoCsv() {
+  const d = state.geo.data;
+  if (!d) return;
+  const cols = ["State", "State code", "Sales incl. GST", "Share %", "Invoices", "Customers"];
+  if (d.gst.available) cols.push("Taxable value", "CGST", "SGST", "IGST", "Cess", "Tax");
+  if (d.returns.available) cols.push("Returns", "Credit notes", "Reasons as recorded");
+  const rows = [
+    ["HERBANOVA sales by state"],
+    ["From", d.from], ["To", d.to], ["Generated", d.generated_at], [],
+    cols,
+  ];
+  d.states.forEach(r => {
+    const row = [r.name, r.code || "not recorded", r.sales, r.share ?? "",
+                 r.invoice_count, r.customers];
+    if (d.gst.available) row.push(r.taxable, r.cgst, r.sgst, r.igst, r.cess, r.tax);
+    if (d.returns.available) row.push(r.return_value, r.return_count, r.reasons.join("; "));
+    rows.push(row);
+  });
+  if (d.states.length) {
+    rows.push(["Total", "", d.totals.sales, "", d.totals.invoice_count, ""]);
+  } else {
+    rows.push(["No records for this period."]);
+  }
+  downloadCsv(`herbanova-geography-${d.from}-to-${d.to}.csv`, rows);
+}
+
+/* ---------- command palette ---------- */
+function openPalette() {
+  if (!state.user) return;
+  state.palette.open = true;
+  state.palette.seq++;
+  state.palette.items = [];
+  state.palette.i = -1;
+  clearTimeout(state.palette.timer);
+  $("#palette").classList.remove("hide");
+  $("#paletteQ").value = "";
+  $("#paletteQ").setAttribute("aria-activedescendant", "");
+  $("#paletteResults").innerHTML = "";
+  $("#paletteNote").textContent = "Type at least two characters. Results follow what your role may read.";
+  $("#paletteQ").focus();
+}
+
+function closePalette() {
+  const p = $("#palette");
+  state.palette.open = false;
+  state.palette.seq++;
+  clearTimeout(state.palette.timer);
+  state.palette.items = [];
+  state.palette.i = -1;
+  if (!p) return;
+  p.classList.add("hide");
+  $("#paletteQ").value = "";
+  $("#paletteResults").innerHTML = "";
+}
+
+function paletteSetIndex(i) {
+  const items = state.palette.items;
+  if (!items.length) { state.palette.i = -1; return; }
+  state.palette.i = Math.max(0, Math.min(items.length - 1, i));
+  items.forEach((el, j) => {
+    el.classList.toggle("on", j === state.palette.i);
+    el.setAttribute("aria-selected", String(j === state.palette.i));
+  });
+  const active = items[state.palette.i];
+  if (active) {
+    if (!active.id) active.id = `palette-item-${state.palette.i}`;
+    $("#paletteQ").setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function renderPalette(body, term) {
+  const groups = body && body.groups ? body.groups : [];
+  const box = $("#paletteResults");
+  if (!groups.length) {
+    box.innerHTML = `<p class="palette-empty">No record matches “${esc(term)}” in the sections your role can read.</p>`;
+    $("#paletteNote").textContent = "Nothing to open.";
+    state.palette.items = [];
+    state.palette.i = -1;
+    return;
+  }
+  box.innerHTML = groups.map(g => `<div class="palette-group" role="group" aria-label="${esc(g.label)}">
+    <h3>${esc(g.label)}</h3>
+    ${(g.items || []).map(it => `<button class="palette-item" type="button" role="option" aria-selected="false"
+      data-href="${esc(it.href)}" data-group="${esc(g.key)}" data-id="${esc(it.id)}">
+      <b>${esc(it.title)}</b><span>${esc(it.subtitle || "")}</span></button>`).join("")}
+  </div>`).join("");
+  state.palette.items = $$(".palette-item", box);
+  const count = state.palette.items.length;
+  $("#paletteNote").textContent = `${plural(count, "result")} across ${plural(groups.length, "section")} · `
+    + "↑ ↓ to move · Enter to open · Esc to close";
+  paletteSetIndex(0);
+}
+
+async function paletteSearch(term) {
+  const seq = ++state.palette.seq;
+  if (term.length < 2) {
+    $("#paletteResults").innerHTML = "";
+    state.palette.items = [];
+    state.palette.i = -1;
+    $("#paletteNote").textContent = "Type at least two characters. Results follow what your role may read.";
+    return;
+  }
+  $("#paletteNote").textContent = "Searching…";
+  const res = await api(`/api/dashboard/search?q=${encodeURIComponent(term)}`);
+  if (seq !== state.palette.seq || !state.palette.open) return;
+  if (!res.ok) {
+    $("#paletteResults").innerHTML = `<p class="palette-empty">${esc(detail(res.body))}</p>`;
+    $("#paletteNote").textContent = "The search could not run.";
+    state.palette.items = [];
+    state.palette.i = -1;
+    return;
+  }
+  renderPalette(res.body, term);
+}
+
+function paletteGo(btn) {
+  const href = btn.dataset.href || "#/dash";
+  const group = btn.dataset.group, id = btn.dataset.id;
+  closePalette();
+  if (location.hash !== href) location.hash = href;
+  else route();
+  if (!id) return;
+  // Let the screen render before a record drawer opens on top of it.
+  setTimeout(() => {
+    if (group === "sales_orders") soDetail(id);
+    else if (group === "invoices") invDetail(id);
+    else if (group === "purchase_orders") poDetail(id);
+    else if (group === "distributors") distForm(id);
+    else if (group === "suppliers") supplierDetail(id);
+    else if (group === "leads") leadDetail(id);
+    else if (group === "products") productDrawer(id, "open");
+  }, 80);
+}
+
+/* ---------- theme ---------- */
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const b = $("#themeToggle");
+  if (b) {
+    b.setAttribute("aria-pressed", String(dark));
+    b.textContent = dark ? "Light theme" : "Dark theme";
+  }
+  const d = $("#dashTheme");
+  if (d) {
+    d.setAttribute("aria-pressed", String(dark));
+    d.textContent = dark ? "Light theme" : "Dark theme";
+  }
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem("hb.theme", next); } catch (e) { /* storage blocked */ }
+  applyTheme(next);
 }
 
 /* ---------- accounts ---------- */
 function renderAccounts() {
+  // The statements need accounts:read; the performance section above is
+  // accounts:reports, so a role may reach this screen with only that right.
+  const stmts = $("#accStatements");
+  if (stmts) stmts.classList.toggle("hide", !can("accounts:read"));
   if (!can("accounts:read")) return;
   const out = state.accounts.outstanding;
   const recv = out ? out.receivables.filter(r => Number(r.outstanding) > 0) : [];
@@ -558,6 +2145,611 @@ async function loadTrialBalance() {
   state.accounts.tb = res.body; renderTrialBalance();
 }
 
+/* ---------- accounts performance (accounts:reports) ----------
+   The statements above need accounts:read. This section is the narrower
+   accounts:reports right: the Administrator, the MD or an Accounts head the
+   Administrator has granted it. The server enforces the same key. */
+const accMoney = v => (Number(v) < 0 ? "−₹ " : "₹ ") + money(Math.abs(Number(v) || 0));
+const accQuery = () => {
+  const p = new URLSearchParams({from_date: state.acc.from, to_date: state.acc.to});
+  if (state.acc.state) p.set("state", state.acc.state);
+  return p.toString();
+};
+const ACC_PANELS = ["#accPerfPanel", "#accPnlPanel", "#accCmpPanel", "#accTrendPanel",
+                    "#accStatePanel", "#accDrillPanel", "#accGapPanel"];
+
+function renderDashAccounts(a) {
+  const panel = $("#accOverviewPanel"), el = $("#accOverview");
+  if (!panel || !el) return;
+  panel.classList.toggle("hide", !a);
+  if (!a) return;
+  $("#accOverviewNote").textContent =
+    `${fmtDate(a.from)} to ${fmtDate(a.to)} · snapshot balances as at ${fmtDate(a.to)}`;
+  const tiles = [
+    ["Receivables", a.receivable_total, "#/accounts",
+     `${accMoney(a.overdue_60)} has been outstanding more than 60 days.`],
+    ["Payables", a.payable_total, "#/accounts",
+     `${accMoney(a.payable_due_this_week)} estimated to fall due within 7 days.`],
+    ["Cash and bank (net)", a.cash_bank_net, "#/accounts",
+     "Receipts minus payments in the selected window; opening balances are not captured."],
+    ["Output GST", a.output_gst, "#/accounts",
+     "Output only; purchase-side tax is not captured."],
+    ["Gross profit", a.gross_profit, "#/accounts",
+     a.gross_profit_partial
+       ? `${a.invoices_costed} of ${a.invoices_total} invoices fully costed; the rest are named in the gaps.`
+       : "Net revenue less cost of goods sold.", null, a.gross_profit_label],
+    ["Expenses", a.expenses, "#/expenses",
+     "Approved entries in the window; non-creditable GST is part of the cost.",
+     a.expenses_gap],
+    ["Net profit", a.net_profit, "#/accounts", a.net_profit_note || "Cost, expenses and payroll are not all complete.",
+     a.net_profit_gap],
+  ];
+  el.innerHTML = tiles.map(([label, value, href, note, gap, shown]) => gap
+    ? `<a class="kpi cmp-card-gap" href="${esc(href)}"><span class="kpi-label">${esc(label)}<span class="chip off">Gap ${esc(gap)}</span></span><span class="kpi-value">No data yet</span><span class="kpi-note">${esc(note)}</span></a>`
+    : `<a class="kpi" href="${esc(href)}"><span class="kpi-label">${esc(shown || label)}</span><span class="kpi-value">${esc(accMoney(value))}</span><span class="kpi-note">${esc(note)}</span></a>`).join("");
+}
+
+function openAccountsReports() {
+  if (!accAllowed()) return renderAccountsReport();
+  renderAccountsReport();
+  if (!state.acc.report && !state.acc.loading) loadAccountsReport();
+  if (!state.acc.cmp.data && !state.acc.cmp.loading) loadAccountsCompare();
+}
+
+async function loadAccountsReport() {
+  if (!accAllowed()) return;
+  const s = state.acc, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderAccountsReport();
+  const res = await api(`/api/accounts/report?${accQuery()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) { s.report = res.body; s.error = null; }
+  else s.error = detail(res.body);
+  renderAccountsReport();
+}
+
+async function loadAccountsCompare() {
+  if (!accAllowed()) return;
+  const s = state.acc.cmp, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderAccountsReport();
+  const params = new URLSearchParams({mode: s.mode});
+  if (s.month) params.set("month", s.month);
+  const res = await api(`/api/accounts/report/compare?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) { s.data = res.body; s.error = null; }
+  else s.error = detail(res.body);
+  renderAccountsReport();
+}
+
+function renderAccountsReport() {
+  const allowed = accAllowed();
+  ACC_PANELS.forEach(sel => { const el = $(sel); if (el) el.classList.toggle("hide", !allowed); });
+  if (!allowed) return;
+  const s = state.acc, r = s.report, cmp = s.cmp;
+  const fromEl = $("#accFrom"), toEl = $("#accTo"), monthEl = $("#accMonth");
+  const today = dayIso(new Date());
+  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = s.from; }
+  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = s.to; }
+  if (monthEl && document.activeElement !== monthEl) monthEl.value = cmp.month || (cmp.data ? cmp.data.month : "");
+  $$("[data-acc-mode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.accMode === cmp.mode)));
+
+  $("#accPerfErr").classList.toggle("hide", !s.error);
+  $("#accPerfErr").textContent = s.error ? `The accounts figures could not be loaded. Last good figures are kept. ${s.error}` : "";
+  $("#accPerfNote").textContent = r
+    ? `${fmtDate(r.from)} to ${fmtDate(r.to)} · ${plural(r.days, "day")}${r.region ? ` · ${r.region.label}` : " · all states"}${s.loading ? " · refreshing…" : ""}`
+    : s.loading ? "Loading figures from the server…" : "Choose a window and refresh.";
+
+  // The region list is always the full company, not the filtered view.
+  const stateEl = $("#accState");
+  if (stateEl && r) {
+    const rows = (r.states || []).filter(x => x.state);
+    const current = stateEl.value;
+    stateEl.innerHTML = `<option value="">All states</option>` + rows.map(x =>
+      `<option value="${esc(x.state)}"${x.state === s.state ? " selected" : ""}>${esc(x.name)}</option>`).join("");
+    if (stateEl.value !== current && s.state) stateEl.value = s.state;
+  }
+
+  if (!r) {
+    $("#accKpis").innerHTML = "";
+    ["#accPnl", "#accCmp", "#accTrend", "#accStates", "#accDrill", "#accGaps"].forEach(sel => {
+      const el = $(sel); if (el) el.innerHTML = `<p class="gap-note">No figures loaded yet.</p>`;
+    });
+    return;
+  }
+
+  $("#accKpis").innerHTML = r.cards.map(c => {
+    if (c.available === false) {
+      return `<a class="kpi cmp-card-gap" href="${esc(c.href || "#/accounts")}"><span class="kpi-label">${esc(c.label)}<span class="chip off">Gap ${esc(c.gap)}</span></span>`
+        + `<span class="kpi-value">No data yet</span><span class="kpi-note">${esc(c.note)}</span></a>`;
+    }
+    return `<a class="kpi" href="${esc(c.href || "#/accounts")}"><span class="kpi-label">${esc(c.label)}</span>`
+      + `<span class="kpi-value">${esc(accMoney(c.value))}</span>`
+      + `<span class="kpi-note">${esc(c.note)}</span></a>`;
+  }).join("");
+  $("#accPerfGaps").textContent = r.notes && r.notes.length ? r.notes.join(" ") : "";
+
+  renderAccPnl(r.profit_and_loss);
+  renderAccTrend(r);
+  renderAccStates(r);
+  renderAccDrill(r.receivables_by_distributor);
+  renderAccGaps(r.gaps);
+  renderAccountsCompare(cmp);
+}
+
+function renderAccPnl(pnl) {
+  if (!pnl) return;
+  const rows = (pnl.rows || []).map(row => {
+    if (row.available === false) {
+      const fix = row.fix ? ` <a class="link-btn" href="${esc(row.fix)}">Fix this</a>` : "";
+      return `<tr><td class="strong">${esc(row.label)}</td><td class="n"><span class="chip off">Gap ${esc(row.gap)}</span> <span class="gap-note">No data yet. ${esc(row.note || "")}</span>${fix}</td></tr>`;
+    }
+    const note = row.note ? ` <small>${esc(row.note)}</small>` : "";
+    return `<tr><td class="strong">${esc(row.label)}</td><td class="n strong">${esc(accMoney(row.value))}${note}</td></tr>`;
+  }).join("");
+  const notes = (pnl.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+  $("#accPnl").innerHTML = `<div class="tw"><table>
+      <thead><tr><th>Line</th><th class="n">Amount</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted panel-note">${esc(pnl.note || "")}</p>`
+    + (notes ? `<div class="panel-note"><b>Notes</b><ul class="gaps">${notes}</ul></div>` : "");
+}
+
+function renderAccTrend(r) {
+  const months = r.trend || [];
+  if (!months.length) {
+    $("#accTrend").innerHTML = `<p class="gap-note">No month falls in the trend window.</p>`;
+    return;
+  }
+  const selected = (r.to || "").slice(0, 7);
+  $("#accTrend").innerHTML = `<div class="tw"><table>
+      <thead><tr><th>Month</th><th class="n">Revenue</th><th class="n">Collections</th>`
+    + `<th class="n">Payments</th><th class="n">Net cash</th><th class="n">Output GST</th><th class="n">Returns</th></tr></thead><tbody>`
+    + months.map(m => {
+        const on = `${m.year}-${String(m.month).padStart(2, "0")}` === selected;
+        return `<tr${on ? ` class="on"` : ""}><td class="strong">${esc(m.label)}</td>`
+          + `<td class="n">${esc(accMoney(m.revenue))}</td><td class="n">${esc(accMoney(m.collections))}</td>`
+          + `<td class="n">${esc(accMoney(m.payments))}</td><td class="n">${esc(accMoney(m.net_cash))}</td>`
+          + `<td class="n">${esc(accMoney(m.output_gst))}</td><td class="n">${esc(accMoney(m.returns))}</td></tr>`;
+      }).join("")
+    + `</tbody></table></div><p class="muted panel-note">Net cash is receipts minus supplier payments. Output GST only; input tax is not captured (GAP-A05).</p>`;
+}
+
+function renderAccStates(r) {
+  const rows = r.states || [];
+  if (!rows.length) {
+    $("#accStates").innerHTML = `<p class="gap-note">No issued invoice falls in this window.</p>`;
+    return;
+  }
+  const total = rows.reduce((sum, x) => sum + Number(x.revenue || 0), 0);
+  $("#accStates").innerHTML = `<div class="tw"><table>
+      <thead><tr><th>State</th><th class="n">Invoices</th><th class="n">Revenue</th><th class="n">Share</th>`
+    + `<th class="n">Output GST</th><th class="n">Returns</th><th class="n">Outstanding</th><th></th></tr></thead><tbody>`
+    + rows.map(x => {
+        const share = total > 0 ? Number(x.revenue) / total * 100 : 0;
+        const btn = x.state ? `<button class="rowbtn" type="button" data-acc-state="${esc(x.state)}">Filter</button>` : "";
+        return `<tr><td class="strong">${esc(x.name)}</td><td class="n">${esc(qty(x.invoices))}</td>`
+          + `<td class="n">${esc(accMoney(x.revenue))}</td><td class="n">${esc(share.toFixed(1))}%</td>`
+          + `<td class="n">${esc(accMoney(x.output_gst))}</td><td class="n">${esc(accMoney(x.returns))}</td>`
+          + `<td class="n">${esc(accMoney(x.outstanding))}</td><td>${btn}</td></tr>`;
+      }).join("")
+    + `</tbody></table></div><p class="muted panel-note">Outstanding is grouped by the distributor's current state, because an invoice stores no distributor state snapshot apart from the buyer state used for revenue.</p>`;
+}
+
+function renderAccDrill(drill) {
+  if (!drill) return;
+  const canLedger = can("accounts:read");
+  $("#accDrillNote").textContent = `${drill.count} distributors · ${drill.note}`;
+  const rows = drill.rows || [];
+  $("#accDrill").innerHTML = rows.length ? `<div class="tw"><table>
+      <thead><tr><th>Distributor</th><th>State</th><th class="n">Invoices</th><th class="n">Outstanding</th><th></th></tr></thead><tbody>`
+    + rows.map(x => `<tr><td class="strong">${esc(x.name)}</td><td>${esc(x.state || "–")}</td>`
+        + `<td class="n">${esc(qty(x.invoices))}</td><td class="n strong">${esc(accMoney(x.outstanding))}</td>`
+        + `<td>${canLedger ? `<button class="rowbtn" type="button" data-act="acc-ledger" data-id="${x.distributor_id}">Open ledger</button>`
+                            : `<span class="gap-note">Needs accounts:read for the party ledger.</span>`}</td></tr>`).join("")
+    + `</tbody></table></div>`
+    : `<p class="gap-note">Nothing is outstanding.</p>`;
+}
+
+function renderAccGaps(gaps) {
+  const rows = gaps || [];
+  $("#accGaps").innerHTML = rows.length
+    ? `<ul class="gaps">${rows.map(g => `<li><b>${esc(g.code)}</b> ${esc(g.label)} <span>${esc(g.detail)}</span>`
+        + (g.fix ? ` <a class="link-btn" href="${esc(g.fix)}">${esc(g.fix_label || "Fix this")}</a>` : "")
+        + `</li>`).join("")}</ul>`
+    : `<p class="muted">No gaps recorded.</p>`;
+}
+
+function renderAccountsCompare(cmp) {
+  const d = cmp.data;
+  if (!d) {
+    $("#accCmp").innerHTML = `<p class="gap-note">${cmp.error ? esc(cmp.error) : "Loading comparison…"}</p>`;
+    $("#accCmpNote").textContent = "";
+    return;
+  }
+  $("#accCmpNote").textContent = `${CMP_MODES[d.mode]} · ${CMP_STATE[d.month_state]} · ${d.month_label}${cmp.loading ? " · refreshing…" : ""}`;
+  const ranges = d.ranges;
+  const rangeRow = `<div class="cmp-ranges">${cmpRange(`Selected · ${CMP_MODES[d.mode]}`, ranges.current, true)}`
+    + `${cmpRange("Previous month", ranges.previous, false)}${cmpRange("Same month last year", ranges.last_year, false)}</div>`;
+  const unit = m => v => m.unit === "amount" ? accMoney(v) : qty(v);
+  const rows = (d.metrics || []).map(m => {
+    if (!m.available) {
+      const fix = m.fix ? ` <a class="link-btn" href="${esc(m.fix)}">Fix this</a>` : "";
+      return `<tr><td class="strong">${esc(m.label)}</td><td colspan="5"><span class="chip off">Gap ${esc(m.gap || "")}</span> <span class="gap-note">No data yet. ${esc(m.note || "")}</span>${fix}</td></tr>`;
+    }
+    const f = unit(m);
+    return `<tr><td class="strong">${esc(m.label)}</td><td class="n">${esc(f(m.current))}</td>`
+      + `<td class="n">${esc(f(m.previous))}</td><td class="n">${cmpDelta(m.previous_change)}</td>`
+      + `<td class="n">${esc(f(m.last_year))}</td><td class="n">${cmpDelta(m.last_year_change)}</td></tr>`;
+  }).join("");
+  $("#accCmp").innerHTML = rangeRow + `<div class="tw"><table>
+      <thead><tr><th>Metric</th><th class="n">Selected window</th><th class="n">Previous month</th>`
+    + `<th class="n">Change</th><th class="n">Same month last year</th><th class="n">Change</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table></div>`
+    + `<p class="muted panel-note">Snapshot figures (receivables, payables) are as at each window's last day. A comparison against zero has no percentage.</p>`;
+}
+
+function setAccMode(mode) {
+  if (!CMP_MODES[mode]) return;
+  state.acc.cmp.mode = mode;
+  loadAccountsCompare();
+}
+function setAccMonth(value) {
+  state.acc.cmp.month = /^\d{4}-\d{2}$/.test(value || "") ? value : "";
+  loadAccountsCompare();
+}
+function setAccStateFilter(value) {
+  state.acc.state = /^\d{2}$/.test(value || "") ? value : "";
+  loadAccountsReport();
+}
+function setAccWindow(from, to) {
+  if (from) state.acc.from = from;
+  if (to) state.acc.to = to;
+  if (state.acc.from > state.acc.to) return;
+  loadAccountsReport();
+  loadAccountsCompare();
+}
+
+function exportAccCsv() {
+  const r = state.acc.report;
+  if (!r) return;
+  const rows = [["HERBANOVA accounts report"], ["From", r.from], ["To", r.to],
+                ["Region", r.region ? r.region.label : "All states"], ["Metric", "Amount (INR)"]];
+  (r.cards || []).forEach(c => rows.push([c.label,
+    c.available === false ? `No data yet (${c.gap})` : c.value]));
+  rows.push([], ["Profit and loss (statement)", "Amount (INR)"]);
+  (r.profit_and_loss && r.profit_and_loss.rows || []).forEach(x => rows.push([x.label,
+    x.available === false ? `No data yet (${x.gap})` : x.value]));
+  rows.push(["Note", "GST is excluded from profit; non-creditable GST is part of an expense."], [],
+    ["Month", "Revenue", "Collections", "Payments", "Net cash", "Output GST", "Returns"],
+    ...(r.trend || []).map(m => [m.label, m.revenue, m.collections, m.payments, m.net_cash, m.output_gst, m.returns]),
+    [], ["State", "Invoices", "Revenue", "Output GST", "Returns", "Outstanding"],
+    ...(r.states || []).map(x => [x.name, x.invoices, x.revenue, x.output_gst, x.returns, x.outstanding]));
+  downloadCsv(`HERBANOVA_Accounts_${r.from}_${r.to}.csv`, rows);
+}
+
+/* ---------- expenses ---------- */
+const EXP_STATUS = {pending_approval: "Waiting approval", approved: "Approved",
+                    rejected: "Rejected", reversed: "Reversed"};
+const EXP_MODES = ["cash", "bank", "upi", "cheque", "neft", "other"];
+
+function openExpenses() {
+  if (!can("expense:read")) return;
+  renderExpenses();
+  if (!state.exp.loaded && !state.exp.loading) loadExpenses();
+}
+
+async function loadExpenses() {
+  if (!can("expense:read")) return;
+  const s = state.exp, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderExpenses();
+  const params = new URLSearchParams();
+  if (s.status) params.set("status", s.status);
+  if (s.head) params.set("head_id", s.head);
+  if (s.q) params.set("q", s.q);
+  const [rows, heads, settings] = await Promise.all([
+    api(`/api/expenses?${params.toString()}`),
+    api("/api/expenses/heads"),
+    api("/api/expenses/settings"),
+  ]);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (rows.ok && Array.isArray(rows.body)) s.rows = rows.body;
+  else s.error = detail(rows.body);
+  if (heads.ok && Array.isArray(heads.body)) s.heads = heads.body;
+  if (settings.ok && settings.body && !Array.isArray(settings.body)) s.settings = settings.body;
+  s.loaded = true;
+  renderExpenses();
+}
+
+function renderExpenses() {
+  const s = state.exp, panel = $("#expPanel");
+  if (!panel || !state.user) return;
+  panel.classList.toggle("hide", !can("expense:read"));
+  $("#expNewBtn").classList.toggle("hide", !can("expense:write"));
+  $("#expHeadsBtn").classList.toggle("hide", !can("expense:write"));
+  $("#expSettingsBtn").classList.toggle("hide", state.user.role !== "admin");
+  const st = s.settings;
+  $("#expSettingsNote").textContent = st
+    ? `Tracked from ${fmtDate(st.tracked_from)} · approval ${st.approval_enabled ? `on above ₹ ${money(st.approval_threshold)}` : "off"}`
+    : s.loading ? "Loading settings…" : "";
+  $("#expErr").classList.toggle("hide", !s.error);
+  $("#expErr").textContent = s.error || "";
+
+  const headEl = $("#expHead");
+  if (headEl && document.activeElement !== headEl) {
+    headEl.innerHTML = `<option value="">All heads</option>` + s.heads.map(h =>
+      `<option value="${h.id}"${String(h.id) === String(s.head) ? " selected" : ""}>${esc(h.name)}</option>`).join("");
+  }
+  $$("[data-exp-status]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.expStatus === s.status)));
+
+  const rows = s.rows || [];
+  const writable = can("expense:write");
+  $("#expRows").innerHTML = rows.map(x => {
+    const acts = [];
+    if (x.attachment) acts.push(`<a class="rowbtn" href="${esc(x.attachment_url)}">Receipt</a>`);
+    if (writable && ["approved", "pending_approval"].includes(x.status)) {
+      acts.push(`<button class="rowbtn" type="button" data-act="exp-receipt" data-id="${x.id}">Upload</button>`);
+    }
+    if (writable && x.status === "approved") {
+      acts.push(`<button class="rowbtn" type="button" data-act="exp-reverse" data-id="${x.id}">Reverse</button>`);
+    }
+    if (x.status === "pending_approval" && can("approval:read")) {
+      acts.push(`<a class="rowbtn" href="#/approvals">Approve</a>`);
+    }
+    return `<tr><td class="strong">${esc(x.number)}</td><td>${esc(fmtDate(x.entry_date))}</td>`
+      + `<td>${esc(x.head)}</td><td class="n">${esc(money(x.amount))}</td>`
+      + `<td class="n">${esc(money(x.gst_amount))}${x.gst_creditable ? "" : ' <span class="chip off">Not creditable</span>'}</td>`
+      + `<td class="n strong">${esc(money(x.deductible_amount))}</td>`
+      + `<td><span class="pill">${esc(EXP_STATUS[x.status] || x.status)}</span>`
+      + (x.reversal_reason ? `<small>${esc(x.reversal_reason)}</small>` : "") + `</td>`
+      + `<td>${esc(x.mode)}</td><td>${esc(x.note || x.reference || "")}</td>`
+      + `<td class="rowacts">${acts.join(" ") || "–"}</td></tr>`;
+  }).join("");
+  $("#expEmpty").classList.toggle("hide", rows.length > 0);
+  $("#expEmpty").textContent = s.loading ? "Loading expenses…"
+    : s.loaded && !rows.length ? "No expense matches this filter." : "";
+  const deductible = rows.filter(x => x.status === "approved")
+    .reduce((sum, x) => sum + Number(x.deductible_amount || 0), 0);
+  $("#expTot").textContent = rows.length
+    ? `${plural(rows.length, "entry")} · ₹ ${money(deductible)} carried by approved entries shown` : "";
+}
+
+function openExpenseForm() {
+  if (!can("expense:write")) return;
+  const heads = state.exp.heads.filter(h => h.is_active && !h.is_system);
+  if (!heads.length) {
+    openDrawer("New expense",
+      "Add an expense head first; the payroll head is filled from HR.", `
+      <p class="gap-note">No expense head is available. Open <b>Expense heads</b> and add one.</p>
+      <div class="actions"><button class="btn" type="button" data-act="exp-heads">Expense heads</button>
+      <button class="btn ghost" type="button" data-act="close">Close</button></div>`);
+    return;
+  }
+  openDrawer("New expense",
+    "An expense is never edited. A mistake is reversed with a reason.", `
+    <form id="expForm" autocomplete="off">
+      <div class="row2">
+        <div><label for="x-head">Expense head</label><select id="x-head" name="head_id">
+          ${heads.map(h => `<option value="${h.id}">${esc(h.name)}</option>`).join("")}
+        </select></div>
+        <div><label for="x-date">Date</label><input id="x-date" name="entry_date" type="date" value="${dayIso(new Date())}" max="${dayIso(new Date())}" required></div>
+      </div>
+      <div class="row2">
+        <div><label for="x-amount">Amount before GST (₹)</label><input id="x-amount" name="amount" inputmode="decimal" required autocomplete="off"></div>
+        <div><label for="x-gst">GST (₹)</label><input id="x-gst" name="gst_amount" inputmode="decimal" value="0" autocomplete="off"></div>
+      </div>
+      <div class="row2">
+        <div><label for="x-mode">Paid by</label><select id="x-mode" name="mode">
+          ${EXP_MODES.map(m => `<option value="${m}"${m === "bank" ? " selected" : ""}>${m}</option>`).join("")}
+        </select></div>
+        <div><label for="x-ref">Reference (optional)</label><input id="x-ref" name="reference" maxlength="60" autocomplete="off"></div>
+      </div>
+      <label>GST that can be claimed as input credit
+        <input type="checkbox" name="gst_creditable" checked> Creditable
+      </label>
+      <label for="x-note">Note (optional)</label><input id="x-note" name="note" maxlength="300" autocomplete="off">
+      <label for="x-file">Receipt (JPEG, PNG, WebP or PDF, 5 MB)</label><input id="x-file" name="receipt" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+      <div class="note">GST that is not creditable becomes part of the expense in the profit and loss. Creditable GST never does.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save expense</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+async function saveExpense(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const f = form.elements;
+  const body = {head_id: Number(f.head_id.value), entry_date: f.entry_date.value,
+                amount: f.amount.value.trim(), gst_amount: f.gst_amount.value.trim() || "0",
+                gst_creditable: f.gst_creditable.checked, mode: f.mode.value};
+  if (f.reference.value.trim()) body.reference = f.reference.value.trim();
+  if (f.note.value.trim()) body.note = f.note.value.trim();
+  const res = await api("/api/expenses", {method: "POST", body});
+  if (!res.ok) {
+    btn.disabled = false; err.textContent = detail(res.body);
+    return;
+  }
+  const file = f.receipt.files && f.receipt.files[0];
+  if (file) {
+    const up = await uploadExpenseReceipt(res.body.id, file);
+    if (!up.ok) toast(up, "Expense saved but the receipt was not uploaded");
+  }
+  btn.disabled = false;
+  toast(res, res.body.status === "pending_approval"
+    ? "Expense saved and sent for approval" : "Expense saved");
+  closeDrawer(); loadExpenses(); loadDashboard();
+}
+
+async function uploadExpenseReceipt(id, file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const res = await fetch(`/api/expenses/${id}/attachment`,
+      {method: "POST", credentials: "same-origin", body: fd});
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* empty */ }
+    return {status: res.status, ok: res.ok, body};
+  } catch (e) {
+    return {status: 0, ok: false, body: {detail: "Cannot reach the server."}};
+  }
+}
+
+function expenseReceiptForm(id) {
+  if (!can("expense:write")) return;
+  const x = (state.exp.rows || []).find(r => r.id === Number(id));
+  if (!x) return;
+  openDrawer(`Receipt · ${x.number}`, "The file is private and served only to a signed-in role.",
+    `<form id="expReceiptForm" data-id="${x.id}">
+      <label for="xr-file">Receipt (JPEG, PNG, WebP or PDF, 5 MB)</label>
+      <input id="xr-file" name="receipt" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Upload</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveExpenseReceipt(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  const file = form.elements.receipt.files && form.elements.receipt.files[0];
+  if (!file) { err.textContent = "Choose a file first."; return; }
+  btn.disabled = true;
+  const res = await uploadExpenseReceipt(form.dataset.id, file);
+  btn.disabled = false;
+  toast(res, res.ok ? "Receipt uploaded" : "Receipt not uploaded");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadExpenses();
+}
+
+function expenseReverseForm(id) {
+  if (!can("expense:write")) return;
+  const x = (state.exp.rows || []).find(r => r.id === Number(id));
+  if (!x) return;
+  openDrawer(`Reverse ${x.number}`,
+    "The entry keeps its amount and stays on file; the profit and loss stops counting it.", `
+    <form id="expReverseForm" data-id="${x.id}">
+      <p>${esc(x.head)} · ${esc(fmtDate(x.entry_date))} · ₹ ${esc(money(x.amount))}</p>
+      <label for="xr-reason">Reason</label><input id="xr-reason" name="reason" maxlength="300" required autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Reverse expense</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveExpenseReverse(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  const reason = form.elements.reason.value.trim();
+  if (reason.length < 3) { err.textContent = "Give a reason of at least three characters."; return; }
+  btn.disabled = true;
+  const res = await api(`/api/expenses/${form.dataset.id}/reverse`, {method: "POST", body: {reason}});
+  btn.disabled = false;
+  toast(res, res.ok ? "Expense reversed" : "Not reversed");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadExpenses(); loadDashboard();
+}
+
+function openExpenseHeads() {
+  if (!can("expense:write")) return;
+  const rows = state.exp.heads || [];
+  openDrawer("Expense heads", "The payroll head is created by HR and cannot be edited here.", `
+    <form id="expHeadForm" autocomplete="off">
+      <label for="xh-name">New head</label>
+      <div class="toolbar"><input id="xh-name" name="name" maxlength="80" required autocomplete="off">
+      <button class="btn" type="submit">Add head</button></div>
+      <div class="err" role="alert"></div>
+    </form>
+    <div class="tw"><table><thead><tr><th>Head</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map(h => `<tr><td class="strong">${esc(h.name)}${h.is_system ? ' <span class="chip">Payroll</span>' : ""}</td>`
+        + `<td>${h.is_active ? "Active" : "Inactive"}</td><td>${h.is_system ? "–"
+          : `<button class="rowbtn" type="button" data-act="exp-head-toggle" data-id="${h.id}" data-on="${h.is_active ? "0" : "1"}">${h.is_active ? "Deactivate" : "Activate"}</button>`}</td></tr>`).join("")}
+    </tbody></table></div>`, true);
+}
+
+async function saveExpenseHead(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  const name = form.elements.name.value.trim();
+  if (name.length < 2) { err.textContent = "The name needs at least two characters."; return; }
+  btn.disabled = true;
+  const res = await api("/api/expenses/heads", {method: "POST", body: {name}});
+  btn.disabled = false;
+  toast(res, res.ok ? "Head added" : "Head not added");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  const r2 = await api("/api/expenses/heads");
+  if (r2.ok) state.exp.heads = r2.body;
+  openExpenseHeads(); renderExpenses();
+}
+
+async function toggleExpenseHead(id, on) {
+  const res = await api(`/api/expenses/heads/${id}`, {method: "PATCH", body: {is_active: on}});
+  toast(res, res.ok ? "Head changed" : "Head not changed");
+  if (!res.ok) return;
+  const r2 = await api("/api/expenses/heads");
+  if (r2.ok) state.exp.heads = r2.body;
+  openExpenseHeads(); renderExpenses(); loadExpenses();
+}
+
+function openExpenseSettings() {
+  if (state.user.role !== "admin") return;
+  const st = state.exp.settings;
+  if (!st) return;
+  openDrawer("Expense settings",
+    "Only the Administrator can change the approval rule or the tracking start.", `
+    <form id="expSettingsForm" autocomplete="off">
+      <label>Approval threshold
+        <input type="checkbox" name="approval_enabled"${st.approval_enabled ? " checked" : ""}> Ask for approval above the amount
+      </label>
+      <label for="xs-threshold">Approval amount (₹)</label>
+      <input id="xs-threshold" name="approval_threshold" inputmode="decimal" value="${esc(st.approval_threshold)}">
+      <label for="xs-from">Track expenses from</label>
+      <input id="xs-from" name="tracked_from" type="date" value="${esc(st.tracked_from)}" max="${dayIso(new Date())}">
+      <div class="note">A window that starts before this date reports expenses as a gap, not as zero.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save settings</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveExpenseSettings(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const f = form.elements;
+  const res = await api("/api/expenses/settings", {method: "PUT", body: {
+    approval_enabled: f.approval_enabled.checked,
+    approval_threshold: f.approval_threshold.value.trim() || "0",
+    tracked_from: f.tracked_from.value,
+  }});
+  btn.disabled = false;
+  toast(res, res.ok ? "Settings saved" : "Settings not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadExpenses(); loadDashboard();
+}
+
+function setExpenseStatus(status) {
+  state.exp.status = ["approved", "pending_approval", "rejected", "reversed"].includes(status) ? status : "";
+  loadExpenses();
+}
+function setExpenseHead(value) {
+  state.exp.head = /^\d+$/.test(value || "") ? value : "";
+  loadExpenses();
+}
+
+async function openDistributorLedger(id) {
+  const res = await api(`/api/accounts/ledger/distributors/${encodeURIComponent(id)}`);
+  if (!res.ok) return toast(res, "Ledger could not be loaded");
+  const l = res.body;
+  const rows = (l.entries || []).map(e => `<tr><td>${esc(e.date)}</td><td class="strong">${esc(e.document)}</td>`
+    + `<td>${esc(e.kind.replace(/_/g, " "))}</td><td class="n">${Number(e.debit) ? money(e.debit) : ""}</td>`
+    + `<td class="n">${Number(e.credit) ? money(e.credit) : ""}</td><td class="n">${money(e.balance)}</td>`
+    + `<td>${esc(e.note || "")}</td></tr>`).join("");
+  openDrawer(`Ledger: ${l.party}`, `${plural((l.entries || []).length, "entry")} · a document is never edited`, `
+    <div class="tw"><table>
+      <thead><tr><th>Date</th><th>Document</th><th>Kind</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th><th class="n">Balance (₹)</th><th>Note</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="7"><span class="gap-note">No entries yet.</span></td></tr>`}</tbody>
+    </table></div>
+    <p class="closing">Closing balance <b>₹ ${money(l.closing_balance)}</b></p>`, true);
+}
+
 function entryForm(kind) {
   const out = state.accounts.outstanding;
   const receipt = kind === "receipt";
@@ -628,45 +2820,899 @@ function renderFollowups() {
 function renderCustomers() {
   if (!$("#curows")) return;
   const q = ($("#cuq")?.value || "").trim().toLowerCase();
-  const list = state.dists.filter(d => !q || [d.code, d.name, d.gstin, d.territory].some(x => (x || "").toLowerCase().includes(q)));
-  $("#curows").innerHTML = list.map(d => `<tr><td class="strong">${esc(d.code)}</td><td>${esc(d.name)}</td>
-    <td>${esc(d.territory)}</td><td>${esc(d.gstin || "–")}</td><td class="n">${money(d.credit_limit)}</td>
-    <td class="n">${money(d.exposure)}</td><td>${distChip(d.status)}</td>
-    <td class="rowacts"><button class="btn ghost sm" type="button" data-act="edit-dist" data-id="${d.id}">Open</button>
-      <button class="btn ghost sm" type="button" data-act="new-so-dist" data-id="${d.id}">New order</button></td></tr>`).join("");
-  empty($("#cuempty"), !list.length, "No customer matches this search.", "Customers and distributors are one master; records are never deleted.");
+  const filter = state.distFilter;
+  const sel = $("#cuFilter");
+  if (sel && sel.value !== filter) sel.value = filter;
+  const list = state.dists.filter(d => {
+    const wanted = filter === "all" || (filter === "incomplete" ? d.needs_completion : d.status === filter);
+    if (!wanted) return false;
+    return !q || [d.code, d.name, d.gstin, d.territory].some(x => (x || "").toLowerCase().includes(q));
+  });
+  $("#curows").innerHTML = list.map(d => {
+    const lim = Number(d.credit_limit), use = Number(d.exposure);
+    const pct = lim > 0 ? Math.min(100, use / lim * 100) : (use > 0 ? 100 : 0);
+    const actions = [
+      can("distributor:write") ? `<button class="btn ghost sm" type="button" data-act="edit-dist" data-id="${d.id}">Open</button>` : "",
+      can("sales:write") ? `<button class="btn ghost sm" type="button" data-act="new-so-dist" data-id="${d.id}">New order</button>` : "",
+      can("credit:manage") ? `<button class="btn ghost sm" type="button" data-act="change-limit" data-id="${d.id}">Change limit</button>` : ""
+    ].filter(Boolean).join(" ");
+    return `<tr><td class="strong">${esc(d.code)}</td>
+      <td>${esc(d.name)}${d.needs_completion ? ` <span class="chip warn">Needs completion</span>` : ""}<small>${esc(d.territory)} · ${esc(d.gstin || "Unregistered")}</small></td>
+      <td class="n">${money(lim)}</td>
+      <td class="n">${money(use)}<div class="meter use"><i style="width:${pct.toFixed(0)}%"></i></div></td>
+      <td class="n">${money(d.available)}</td>
+      <td>${distChip(d.status)}</td>
+      <td class="rowacts">${actions}</td></tr>`;
+  }).join("");
+  const messages = {
+    incomplete: ["Every record has the details a tax document needs.", ""],
+    active: ["No active customer or distributor matches.", " Select “All” to see the blocked ones."],
+    blocked: ["No customer or distributor is blocked.", " Select “Active” to see the ones that are trading."],
+    draft: ["No record is still a draft.", " A draft record is kept out of new orders until it is made Active."],
+    "pending verification": ["Nothing is awaiting verification.", " A record in this state is kept out of new orders until it is made Active."],
+    inactive: ["No record is inactive.", " An inactive record is kept out of new orders until it is made Active."]
+  };
+  const [title, hint] = messages[filter] || ["No customer or distributor matches this search.",
+    can("distributor:write") ? " Select “New customer or distributor” to add the first one." : ""];
+  empty($("#cuempty"), !list.length, title, hint);
 }
-function renderHr() {
-  if (!$("#hrrows")) return;
-  // Staff without hr:read get their own attendance, not the company directory.
-  const wholeTeam = can("hr:read");
-  $("#hrStats").classList.toggle("hide", !wholeTeam);
-  $("#hrDirectory").classList.toggle("hide", !wholeTeam);
-  ["hr-employees", "hr-leave", "hr-od", "hr-payroll"].forEach(a =>
-    $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !wholeTeam)));
-  // Shift policy is an HR/administrator setting, not something every reader edits.
-  $$('#v-hr [data-act="hr-shifts"]').forEach(b =>
-    b.classList.toggle("hide", !(wholeTeam && can("hr:write"))));
-  if (!wholeTeam) return;
-  const d = state.hr.dashboard || {};
-  $("#hrStats").innerHTML = [
-    ["Employees", d.total_employees ?? state.hr.employees.length],
-    ["Active", d.active_employees ?? "–"],
-    ["Present today", d.present_today ?? "–"],
-    ["Absent / leave / OD", d.absent_today != null ? `${d.absent_today} / ${d.on_leave_today} / ${d.on_od_today}` : "–"],
-    ["Pending HR approvals", d.pending_approvals ?? "–"],
-    ["Salary payable", d.salary_payable != null ? "₹ " + money(d.salary_payable) : "–"]
-  ].map(([k, v]) => `<div class="stat"><span class="k">${esc(k)}</span><span class="v">${esc(String(v))}</span></div>`).join("");
-  $("#hrrows").innerHTML = state.hr.employees.map(e => `<tr><td class="strong">${esc(e.full_name)}<small>${esc(e.code)}</small></td>
-    <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td>
-    <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td></tr>`).join("");
-  empty($("#hrempty"), !state.hr.employees.length, "No employees yet.", "Add the first employee from the employee master.");
+/* ---------- free samples (FOC) ---------- */
+const FOC_REASONS = {sample: "Sample", promotional: "Promotional",
+                     replacement: "Replacement", donation: "Donation", other: "Other"};
+const FOC_STATUS = {draft: "Draft", approved: "Approved", rejected: "Rejected",
+                    reversed: "Reversed"};
+
+function openFoc() {
+  if (!can("foc:read")) return;
+  renderFoc();
+  if (!state.foc.loaded && !state.foc.loading) loadFoc();
+}
+
+async function loadFoc() {
+  if (!can("foc:read")) return;
+  const s = state.foc;
+  s.loading = true; s.error = null;
+  renderFoc();
+  const [stock, notes] = await Promise.all([
+    api("/api/foc/stock"),
+    api("/api/foc/notes?limit=200"),
+  ]);
+  if (!state.user) return;
+  s.loading = false;
+  if (stock.ok && Array.isArray(stock.body)) s.stock = stock.body;
+  else s.error = detail(stock.body);
+  if (notes.ok && Array.isArray(notes.body)) s.notes = notes.body;
+  else s.error = s.error || detail(notes.body);
+  s.loaded = true;
+  renderFoc();
+}
+
+function renderFoc() {
+  if (!$("#focPanel") || !state.user) return;
+  const s = state.foc;
+  $("#focNewBtn").classList.toggle("hide", !can("foc:write"));
+  $("#focErr").classList.toggle("hide", !s.error);
+  $("#focErr").textContent = s.error || "";
+  $("#focNote").textContent = s.loading ? "Loading free stock…"
+    : s.loaded ? `${plural(s.stock.length, "product")} with a stock position` : "";
+
+  $("#focStockRows").innerHTML = (s.stock || []).map(r =>
+    `<tr><td class="strong">${esc(r.sku || "")}</td><td>${esc(r.name || "")}</td>`
+    + `<td class="n">${esc(r.on_hand)}</td>`
+    + `<td class="n strong">${esc(r.foc_qty)}</td>`
+    + `<td class="n">${esc(r.costed_qty)}</td>`
+    + `<td class="n">${r.average == null ? "–" : esc(money(r.average))}</td></tr>`).join("");
+  empty($("#focStockEmpty"), !(s.stock || []).length,
+    s.loading ? "Loading free stock…" : "No product holds free or costed stock yet.");
+
+  const notes = s.notes || [];
+  $("#focNoteRows").innerHTML = notes.map(n => {
+    const qty = (n.lines || []).reduce((sum, l) => sum + Number(l.qty || 0), 0);
+    const acts = [];
+    if (n.status === "draft" && can("foc:approve") && n.created_by !== state.user.id) {
+      acts.push(`<button class="rowbtn" type="button" data-act="foc-approve" data-id="${n.id}">Approve</button>`);
+    }
+    if (n.status === "draft" && can("foc:write")) {
+      acts.push(`<button class="rowbtn" type="button" data-act="foc-reject" data-id="${n.id}">Reject</button>`);
+    }
+    if (n.status === "approved" && can("foc:approve")) {
+      acts.push(`<button class="rowbtn" type="button" data-act="foc-reverse" data-id="${n.id}">Reverse</button>`);
+    }
+    return `<tr><td class="strong">${esc(n.note_number)}</td>`
+      + `<td>${esc(fmtDate(n.note_date))}</td>`
+      + `<td>${esc(n.recipient_name)}${n.correction ? ' <span class="chip">Correction</span>' : ""}</td>`
+      + `<td>${esc(n.warehouse || "")}</td>`
+      + `<td>${esc(FOC_REASONS[n.reason] || n.reason)}</td>`
+      + `<td class="n">${esc(qty)}</td>`
+      + `<td class="n">${n.notional_value == null ? "–" : esc(money(n.notional_value))}</td>`
+      + `<td><span class="pill">${esc(FOC_STATUS[n.status] || n.status)}</span>`
+      + (n.rejection_reason ? `<small>${esc(n.rejection_reason)}</small>` : "")
+      + (n.reversal_reason ? `<small>${esc(n.reversal_reason)}</small>` : "") + `</td>`
+      + `<td class="rowacts">${acts.join(" ") || "–"}</td></tr>`;
+  }).join("");
+  empty($("#focNoteEmpty"), !notes.length,
+    s.loading ? "Loading free-sample notes…" : "No free-sample note has been written yet.",
+    can("foc:write") ? " Use “New free-sample note” to record one recipient at a time." : "");
+}
+
+function fillFocBatches() {
+  const product = $("#f-product"), warehouse = $("#f-wh"), batch = $("#f-batch");
+  if (!product || !warehouse || !batch) return;
+  const pid = Number(product.value), wid = Number(warehouse.value);
+  const rows = (state.batches || []).filter(b =>
+    Number(b.product_id) === pid && Number(b.warehouse_id) === wid && Number(b.on_hand) > 0);
+  batch.innerHTML = rows.length
+    ? rows.map(b => `<option value="${b.id}">${esc(b.batch_no)} · ${esc(b.on_hand)} on hand</option>`).join("")
+    : `<option value="">No batch with stock in this warehouse</option>`;
+}
+
+function focNewForm() {
+  if (!can("foc:write")) return;
+  const stock = (state.foc.stock || []).filter(r => Number(r.foc_qty) > 0);
+  if (!stock.length) {
+    openDrawer("New free-sample note", "No FOC stock is on hand.", `
+      <p class="gap-note">No product holds free stock yet. Record the purchase receipt with the
+      FOC remark first; then a note can give the stock away.</p>
+      <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`);
+    return;
+  }
+  openDrawer("New free-sample note",
+    "One recipient per note. No invoice, revenue or GST.", `
+    <form id="focForm" autocomplete="off">
+      <div class="row2">
+        <div><label for="f-date">Date</label><input id="f-date" name="note_date" type="date" value="${dayIso(new Date())}" max="${dayIso(new Date())}" required></div>
+        <div><label for="f-wh">Warehouse</label><select id="f-wh" name="warehouse_id">
+          ${(state.warehouses || []).map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join("")}
+        </select></div>
+      </div>
+      <div class="row2">
+        <div><label for="f-name">Recipient</label><input id="f-name" name="recipient_name" maxlength="150" required autocomplete="off"></div>
+        <div><label for="f-contact">Contact (optional)</label><input id="f-contact" name="recipient_contact" maxlength="120" autocomplete="off"></div>
+      </div>
+      <label for="f-address">Address (optional)</label><input id="f-address" name="recipient_address" maxlength="300" autocomplete="off">
+      <div class="row2">
+        <div><label for="f-reason">Reason</label><select id="f-reason" name="reason">
+          ${Object.entries(FOC_REASONS).map(([k, v]) => `<option value="${k}"${k === "sample" ? " selected" : ""}>${v}</option>`).join("")}
+        </select></div>
+        <div><label for="f-notional">Notional value (₹, memo only)</label><input id="f-notional" name="notional_value" inputmode="decimal" autocomplete="off"></div>
+      </div>
+      <label for="f-reason-note">Note (optional)</label><input id="f-reason-note" name="reason_note" maxlength="300" autocomplete="off">
+      <div class="row3">
+        <div><label for="f-product">Product</label><select id="f-product" name="product_id">
+          ${stock.map(r => `<option value="${r.product_id}">${esc(r.sku)} · ${esc(r.foc_qty)} FOC</option>`).join("")}
+        </select></div>
+        <div><label for="f-batch">Batch</label><select id="f-batch" name="batch_id"></select></div>
+        <div><label for="f-qty">Quantity</label><input id="f-qty" name="qty" inputmode="decimal" required autocomplete="off"></div>
+      </div>
+      <div class="note">The quantity is checked against the product's FOC stock at approval. A zero-rate sample never changes the weighted average of purchased stock. A second Administrator must approve the note.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save draft</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+  fillFocBatches();
+  const productSel = $("#f-product"), whSel = $("#f-wh");
+  if (productSel) productSel.addEventListener("change", fillFocBatches);
+  if (whSel) whSel.addEventListener("change", fillFocBatches);
+}
+
+async function saveFocNote(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const f = form.elements;
+  if (!f.batch_id.value) {
+    btn.disabled = false; err.textContent = "Choose a batch that holds stock in this warehouse.";
+    return;
+  }
+  const body = {
+    note_date: f.note_date.value, warehouse_id: Number(f.warehouse_id.value),
+    recipient_name: f.recipient_name.value.trim(),
+    reason: f.reason.value,
+    lines: [{product_id: Number(f.product_id.value), batch_id: Number(f.batch_id.value),
+             qty: f.qty.value.trim()}],
+  };
+  if (f.recipient_address.value.trim()) body.recipient_address = f.recipient_address.value.trim();
+  if (f.recipient_contact.value.trim()) body.recipient_contact = f.recipient_contact.value.trim();
+  if (f.reason_note.value.trim()) body.reason_note = f.reason_note.value.trim();
+  if (f.notional_value.value.trim()) body.notional_value = f.notional_value.value.trim();
+  const res = await api("/api/foc/notes", {method: "POST", body});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Free-sample note saved as a draft");
+  closeDrawer(); loadFoc();
+}
+
+async function focApprove(id) {
+  const res = await api(`/api/foc/notes/${id}/approve`, {method: "POST"});
+  toast(res, res.ok ? "Free-sample note approved; stock has left the ledger" : "Not approved");
+  if (res.ok) loadFoc();
+}
+
+function focReasonForm(id, mode) {
+  const verb = mode === "reject" ? "Reject" : "Reverse";
+  openDrawer(`${verb} free-sample note`,
+    "The original note and its movements stay on file.", `
+    <form id="focReasonForm" data-id="${id}" data-mode="${mode}">
+      <label for="f-why">Reason</label>
+      <input id="f-why" name="reason" maxlength="300" required autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${verb}</button>
+      <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveFocReason(form) {
+  const err = $(".err", form);
+  const reason = form.elements.reason.value.trim();
+  if (!reason) { err.textContent = "Give a reason."; return; }
+  const res = await api(`/api/foc/notes/${form.dataset.id}/${form.dataset.mode}`,
+                        {method: "POST", body: {reason}});
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, form.dataset.mode === "reject" ? "Note rejected" : "Note reversed; stock is back");
+  closeDrawer(); loadFoc();
+}
+
+/* ---------- HR workspace ---------- */
+function hrSetRange(from, to) {
+  state.hr.from = from;
+  state.hr.to = to;
+}
+function hrInitRange() {
+  if (!state.hr.from || !state.hr.to) {
+    const w = dashWindow("month");
+    hrSetRange(w.from, w.to);
+  }
 }
 async function openHr() {
-  const [d, e] = await Promise.all([api("/api/hr/dashboard"), api("/api/hr/employees")]);
+  hrInitRange();
+  if (!can("hr:read")) {
+    state.hr.dashboard = null;
+    renderHr();
+    return;
+  }
+  const site = hrSiteParams();
+  const [d, e, f, b, o] = await Promise.all([
+    api(`/api/hr/dashboard?from_date=${encodeURIComponent(state.hr.from)}&to_date=${encodeURIComponent(state.hr.to)}${site}`),
+    api("/api/hr/employees?page_size=200&sort=name"),
+    api("/api/hr/saved-filters?view=employees"),
+    api("/api/hr/branches"),
+    api("/api/hr/offices")]);
   state.hr.dashboard = d.ok ? d.body : null;
+  state.hr.error = d.ok ? null : detail(d.body);
   state.hr.employees = e.ok ? e.body : [];
+  state.hr.saved = f.ok ? f.body : [];
+  state.hr.branches = b.ok ? b.body : [];
+  state.hr.offices = o.ok ? o.body : [];
+  fillHrSites();
   if (state.view === "hr") { renderHead(); renderHr(); }
+}
+function hrSiteParams() {
+  const q = new URLSearchParams();
+  if (state.hr.branchFilter) q.set("branch_id", state.hr.branchFilter);
+  if (state.hr.officeFilter) q.set("office_id", state.hr.officeFilter);
+  const s = q.toString();
+  return s ? `&${s}` : "";
+}
+function fillHrSites() {
+  const branches = state.hr.branches || [];
+  const offices = state.hr.offices || [];
+  const branch = state.hr.branchFilter || "";
+  const shown = offices.filter(o => !branch || String(o.branch_id) === branch);
+  const fill = (id, value, allLabel, rows) => {
+    const sel = $("#" + id);
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${esc(allLabel)}</option>` + rows.map(x =>
+      `<option value="${x.id}">${esc(x.name)}${x.branch ? ` · ${esc(x.branch)}` : ""}</option>`).join("");
+    sel.value = [...sel.options].some(o => o.value === value) ? value : "";
+  };
+  fill("hrBranchFilter", branch, "All branches", branches);
+  fill("hrOfficeFilter", state.hr.officeFilter || "", "All offices", shown);
+}
+function setHrSite(kind, value) {
+  if (kind === "office") {
+    state.hr.officeFilter = value;
+    const office = (state.hr.offices || []).find(o => String(o.id) === value);
+    if (office && office.branch_id) state.hr.branchFilter = String(office.branch_id);
+  } else {
+    state.hr.branchFilter = value;
+    const office = (state.hr.offices || []).find(o => String(o.id) === state.hr.officeFilter);
+    if (office && String(office.branch_id) !== value) state.hr.officeFilter = "";
+  }
+  fillHrSites();
+  renderHrDirectory();
+  openHr();
+}
+function setHrRangePreset(key) {
+  const w = dashWindow(key === "30" ? "30d" : "month");
+  hrSetRange(w.from, w.to);
+  $$("[data-hrr]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.hrr === key)));
+  $("#hrDateError").classList.add("hide");
+  openHr();
+}
+function applyHrRange() {
+  const from = $("#hrFrom").value, to = $("#hrTo").value, err = $("#hrDateError");
+  err.classList.add("hide");
+  if (!from || !to) { err.textContent = "Choose both dates."; err.classList.remove("hide"); return; }
+  if (to < from) { err.textContent = "The end date cannot be before the start date."; err.classList.remove("hide"); return; }
+  $$("[data-hrr]").forEach(b => b.setAttribute("aria-pressed", "false"));
+  hrSetRange(from, to);
+  openHr();
+}
+function exportHr() {
+  const q = new URLSearchParams();
+  const search = ($("#hrq").value || "").trim();
+  if (search) q.set("q", search);
+  if ($("#hrStatus").value) q.set("status", $("#hrStatus").value);
+  if ($("#hrDept").value) q.set("department", $("#hrDept").value);
+  if (state.hr.branchFilter) q.set("branch_id", state.hr.branchFilter);
+  if (state.hr.officeFilter) q.set("office_id", state.hr.officeFilter);
+  const s = q.toString();
+  location.href = "/api/hr/employees/export.csv" + (s ? "?" + s : "");
+}
+function hrKpi(label, value, note, opts = {}) {
+  const gap = opts.gap ? `<span class="chip off">No data yet</span>` : "";
+  return `<div class="kpi${opts.gap ? " cmp-card-gap" : ""}">
+    <span class="kpi-label">${esc(label)}${gap}</span>
+    <span class="kpi-value">${esc(value)}</span>
+    <span class="kpi-note">${esc(note)}</span></div>`;
+}
+function hrNumber(value) {
+  return value == null ? "No data yet" : qty(value);
+}
+function renderHrKpis(d) {
+  const att = d.needs_attention || {};
+  const stale = (att.stale_approvals && att.stale_approvals.count) || 0;
+  const tiles = [
+    hrKpi("On the rolls", hrNumber(d.active_employees),
+      `${hrNumber(d.inactive_employees)} inactive · ${hrNumber(d.total_employees)} records`),
+    hrKpi("Present today", hrNumber(d.present_today),
+      `${hrNumber(d.late_today)} late · ${hrNumber(d.early_today)} early departure`),
+    hrKpi("Not in today", hrNumber((d.absent_today || 0) + (d.on_leave_today || 0) + (d.on_od_today || 0)),
+      `${hrNumber(d.absent_today)} absent · ${hrNumber(d.on_leave_today)} leave · ${hrNumber(d.on_od_today)} on duty`),
+    hrKpi("Joiners this month", hrNumber(d.new_joiners_month),
+      `${hrNumber(d.exits_month)} exits this month; ${hrNumber(d.exits_in_range)} in the chosen range`),
+    hrKpi("Approvals waiting", hrNumber(d.pending_approvals),
+      `${hrNumber(d.pending_leave)} leave; ${stale} older than three days`),
+    hrKpi("Probation ending", hrNumber(d.probation_ending_soon),
+      "Within 30 days. Confirm or extend on the profile."),
+    hrKpi("Documents expiring", hrNumber(d.documents_expiring),
+      "Within 60 days.")];
+  if (d.payroll_visible) {
+    tiles.push(d.payroll_status
+      ? hrKpi("Salary payable this month", `₹ ${money(d.salary_payable)}`,
+              `Payroll period is ${d.payroll_status}. Costs stay off the HR email.`)
+      : hrKpi("Salary payable this month", "", "No payroll period exists for this month yet.", {gap: true}));
+  }
+  $("#hrKpis").innerHTML = tiles.join("");
+}
+function renderHrAttention(d) {
+  const a = d.needs_attention || {};
+  const rows = [];
+  if (a.missing_punches && a.missing_punches.count) {
+    rows.push(`<li><a class="att-item att-warn" href="#/hr" data-act="hr-attention" data-kind="punches">
+      <span class="att-body"><b>Missing punches</b><span>${a.missing_punches.count} attendance row(s) have no check-in or check-out.</span></span>
+      <span class="att-go">View</span></a></li>`);
+  }
+  if (a.negative_leave && a.negative_leave.count) {
+    rows.push(`<li><a class="att-item att-bad" href="#/hr" data-act="hr-attention" data-kind="leave">
+      <span class="att-body"><b>Leave balance below zero</b><span>${a.negative_leave.count} balance(s) are over-used this year.</span></span>
+      <span class="att-go">View</span></a></li>`);
+  }
+  if (a.stale_approvals && a.stale_approvals.count) {
+    rows.push(`<li><a class="att-item att-warn" href="#/approvals">
+      <span class="att-body"><b>Approvals older than three days</b><span>${a.stale_approvals.count} request(s) have waited too long.</span></span>
+      <span class="att-go">Open</span></a></li>`);
+  }
+  if (a.incomplete_records && a.incomplete_records.count) {
+    rows.push(`<li><a class="att-item att-off" href="#/hr" data-act="hr-attention" data-kind="records">
+      <span class="att-body"><b>Incomplete employee records</b><span>${a.incomplete_records.count} active record(s) are missing a field.</span></span>
+      <span class="att-go">View</span></a></li>`);
+  }
+  $("#hrAttentionNote").textContent = rows.length ? `${rows.length} group(s)` : "All clear";
+  $("#hrAttention").innerHTML = rows.length ? rows.join("")
+    : `<li><div class="att-empty">Nothing needs attention in this range.</div></li>`;
+}
+function hrTrendChart(points) {
+  const last = points.slice(-31);
+  if (!last.length) return `<p class="gap-note">No data yet: no attendance rows in this range.</p>`;
+  const totals = last.map(p => (p.present || 0) + (p.absent || 0) + (p.leave || 0) + (p.od || 0));
+  const max = Math.max(1, ...totals);
+  const segs = [
+    ["present", "pr", p => p.present || 0, "moss"],
+    ["leave", "lv", p => p.leave || 0, "turmeric"],
+    ["on duty", "od", p => p.od || 0, "info"],
+    ["absent", "ab", p => p.absent || 0, "bad"]];
+  const cols = last.map((p, i) => {
+    const bars = segs.map(([name, cls, val]) => {
+      const n = val(p);
+      return n ? `<span class="hr-seg ${cls}" style="height:${(n / max) * 100}%"></span>` : "";
+    }).join("");
+    const dayLabel = i % 7 === 0 || i === last.length - 1
+      ? p.date.slice(8) : "";
+    const label = `${p.date}: ${p.present || 0} present, ${p.absent || 0} absent, ` +
+      `${p.leave || 0} leave, ${p.od || 0} on duty`;
+    return `<div class="hr-col" title="${esc(label)}">
+      <div class="hr-stack" role="img" aria-label="${esc(label)}">${bars}</div>
+      <span class="hr-date">${esc(dayLabel)}</span></div>`;
+  }).join("");
+  const legend = `<div class="hr-legend">
+    <span><i class="pr"></i>Present</span><span><i class="lv"></i>Leave</span>
+    <span><i class="od"></i>On duty</span><span><i class="ab"></i>Absent</span></div>`;
+  return `<div class="hr-trend">${cols}</div>${legend}`;
+}
+function renderHrTrend(d) {
+  const trend = d.attendance_trend || [];
+  const anyRows = trend.some(p => (p.present || 0) + (p.absent || 0) + (p.leave || 0) + (p.od || 0));
+  $("#hrTrend").innerHTML = anyRows ? hrTrendChart(trend)
+    : `<p class="gap-note">No data yet: no attendance rows between ${esc(fmtDate(d.from_date))} and ${esc(fmtDate(d.to_date))}.</p>`;
+  $("#hrTrendNote").textContent = `${fmtDate(d.from_date)} – ${fmtDate(d.to_date)}`;
+  const mix = d.leave_by_type || [];
+  $("#hrLeaveMix").innerHTML = `<h3 class="hr-sub">Approved leave by type</h3>` + (mix.length
+    ? `<div class="tw"><table class="hr-mini"><thead><tr><th>Type</th><th class="n">Days</th><th class="n">Applications</th></tr></thead><tbody>
+        ${mix.map(x => `<tr><td>${esc(x.name)}<small>${esc(x.code)}</small></td><td class="n">${qty(x.days)}</td><td class="n">${x.applications}</td></tr>`).join("")}
+      </tbody></table></div>`
+    : `<p class="gap-note">No data yet: no approved leave in this range.</p>`);
+}
+function renderHrCalendar(d) {
+  const rows = [];
+  (d.birthdays || []).forEach(x => rows.push([x.date, `<b>${esc(x.full_name)}</b>`, `turns ${x.turning}`, "birthday"]));
+  (d.anniversaries || []).forEach(x => rows.push([x.date, `<b>${esc(x.full_name)}</b>`, `${x.years} year(s)`, "anniversary"]));
+  (d.holidays || []).forEach(x => rows.push([x.date, `<b>${esc(x.name)}</b>`, "holiday", "holiday"]));
+  rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  $("#hrCalendar").innerHTML = rows.length
+    ? `<ul class="hr-list">${rows.slice(0, 12).map(([date, name, what, kind]) =>
+        `<li><span class="hr-list-when">${esc(fmtDate(date))}<small>${esc(what)}</small></span>
+          <span class="hr-list-who">${name}</span><span class="chip ${kind === "holiday" ? "warn" : "ok"}">${esc(kind)}</span></li>`).join("")}</ul>`
+    : `<p class="gap-note">No birthdays, work anniversaries or holidays in the next 30 days.</p>`;
+}
+function renderHrShape(d) {
+  const depts = (d.by_department || []).slice().sort((a, b) => b.employees - a.employees);
+  const total = depts.reduce((s, x) => s + x.employees, 0) || 1;
+  const bars = depts.map(x => `<div class="hr-bar-row">
+    <span class="hr-bar-label">${esc(x.department)}</span>
+    <span class="hr-bar-track"><i style="width:${Math.round(x.employees / total * 100)}%"></i></span>
+    <b>${x.employees}</b></div>`).join("");
+  const branches = (d.by_branch || []).map(x =>
+    `<li><span>${esc(x.branch)}</span><b>${x.employees}</b></li>`).join("");
+  const offices = (d.by_office || []).map(x =>
+    `<li><span>${esc(x.office)}</span><b>${x.employees}</b></li>`).join("");
+  $("#hrShape").innerHTML = (depts.length
+    ? `<div class="hr-bars">${bars}</div>`
+    : `<p class="gap-note">No data yet: no active employees are assigned to a department.</p>`)
+    + (branches ? `<h3 class="hr-sub">By branch</h3><ul class="hr-split">${branches}</ul>`
+      : `<p class="gap-note">No branch has active employees yet.</p>`)
+    + (offices ? `<h3 class="hr-sub">By office</h3><ul class="hr-split">${offices}</ul>`
+      : `<p class="gap-note">No office has active employees yet.</p>`);
+}
+function renderHrDirectory() {
+  const q = ($("#hrq").value || "").trim().toLowerCase();
+  const status = $("#hrStatus").value;
+  const dept = $("#hrDept").value;
+  const branch = state.hr.branchFilter || "";
+  const office = state.hr.officeFilter || "";
+  const all = state.hr.employees || [];
+  const list = all.filter(e => (!q || [e.code, e.full_name, e.department, e.designation,
+      e.branch_name, e.office_name].some(x => (x || "").toLowerCase().includes(q)))
+    && (!status || e.status === status)
+    && (!dept || (e.department || "Unassigned") === dept)
+    && (!branch || String(e.branch_id) === branch)
+    && (!office || String(e.office_id) === office));
+  $("#hrrows").innerHTML = list.map(e => `<tr>
+    <td class="strong">${esc(e.full_name)}<small>${esc(e.code)}</small></td>
+    <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td>
+    <td>${e.office_name ? esc(e.office_name) : "–"}<small>${esc(e.branch_name || "No branch")}</small></td>
+    <td>${esc(fmtDate(e.joining_date))}</td>
+    <td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span>${e.attendance_required === false
+      ? ` <span class="chip warn" title="${esc(`Not required by policy: ${e.attendance_rule || "default"}`)}">No attendance</span>` : ""}</td>
+    <td class="rowacts"><button class="btn ghost sm" type="button" data-act="hr-profile" data-id="${e.id}">Open</button></td></tr>`).join("");
+  $("#hrDirNote").textContent = all.length === 200
+    ? `Showing the first 200 employees; narrow the search to see the rest. ${list.length} match.`
+    : `${list.length} of ${plural(all.length, "employee")}.`;
+  empty($("#hrempty"), !list.length, all.length ? "No employee matches these filters." : "No employees yet.",
+    all.length ? "Clear the search, status, department, branch or office filter." : "Add the first employee with “New employee”.");
+}
+function fillHrSaved() {
+  const sel = $("#hrSaved");
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = `<option value="">Saved filters</option>` +
+    (state.hr.saved || []).map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
+  sel.value = (state.hr.saved || []).some(f => String(f.id) === keep) ? keep : "";
+}
+function applyHrFilter() {
+  const id = Number($("#hrSaved").value);
+  const f = (state.hr.saved || []).find(x => x.id === id);
+  if (!f) { toast({ok: false, status: 422, body: {detail: "Choose a saved filter first."}}, "No filter"); return; }
+  const p = f.params || {};
+  $("#hrq").value = p.q || "";
+  $("#hrStatus").value = p.status || "";
+  $("#hrDept").value = p.department || "";
+  state.hr.branchFilter = p.branch_id ? String(p.branch_id) : "";
+  state.hr.officeFilter = p.office_id ? String(p.office_id) : "";
+  fillHrSites();
+  renderHrDirectory();
+  openHr();
+}
+function hrFilterSaveForm() {
+  $("#hrSavedBox").innerHTML = `<form id="hrSavedForm" novalidate><h3>Save this view</h3>
+    <label>Name</label><input name="name" maxlength="60" autocomplete="off">
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="submit">Save filter</button>
+      <button class="btn ghost" type="button" data-act="hr-filter-cancel">Cancel</button></div></form>`;
+}
+async function saveHrFilter(form) {
+  const name = form.elements.name.value.trim(), err = $(".err", form);
+  err.textContent = "";
+  if (name.length < 2) { err.textContent = "Give the view a name."; return; }
+  const res = await api("/api/hr/saved-filters", {method: "POST", body: {name, view: "employees",
+    params: {q: $("#hrq").value.trim(), status: $("#hrStatus").value,
+             department: $("#hrDept").value,
+             branch_id: state.hr.branchFilter || "",
+             office_id: state.hr.officeFilter || ""}}});
+  toast(res, res.ok ? "Filter saved" : "Filter not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  $("#hrSavedBox").innerHTML = "";
+  state.hr.saved = [...(state.hr.saved || []), res.body].sort((a, b) => a.name.localeCompare(b.name));
+  fillHrSaved();
+  $("#hrSaved").value = String(res.body.id);
+}
+async function deleteHrFilter() {
+  const id = Number($("#hrSaved").value);
+  if (!id) { toast({ok: false, status: 422, body: {detail: "Choose a saved filter first."}}, "No filter"); return; }
+  const res = await api(`/api/hr/saved-filters/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Filter deleted" : "Filter not deleted");
+  if (!res.ok) return;
+  state.hr.saved = (state.hr.saved || []).filter(f => f.id !== id);
+  fillHrSaved();
+}
+function fillHrDepartments(d) {
+  const sel = $("#hrDept"), keep = sel.value;
+  const names = new Set((d.by_department || []).map(x => x.department));
+  (state.hr.employees || []).forEach(e => names.add(e.department || "Unassigned"));
+  sel.innerHTML = `<option value="">All departments</option>` +
+    [...names].sort().map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  sel.value = [...names].includes(keep) ? keep : "";
+}
+function renderHr() {
+  if (!$("#hrKpis")) return;
+  const wholeTeam = can("hr:read");
+  ["#hrDateTools", "#hrKpis", "#hrDirectory"].forEach(s => $(s).classList.toggle("hide", !wholeTeam));
+  $("#hrExport").classList.toggle("hide", !wholeTeam);
+  $("#hrImport").classList.toggle("hide", !can("hr:write"));
+  $("#hrAdd").classList.toggle("hide", !can("hr:write"));
+  // Staff get the self-service panel instead of the team task grid.
+  $("#hrTasks").classList.toggle("hide", !wholeTeam);
+  // Payroll is a closed book: the API needs hr:payroll_prepare to even list a period.
+  $$('#v-hr [data-act="hr-payroll"]').forEach(b =>
+    b.classList.toggle("hide", !(wholeTeam && can("hr:payroll_prepare"))));
+  // Shift, notices, locks, letter templates and site policy are HR/administrator settings.
+  ["hr-shifts", "hr-notices", "hr-locks", "hr-letters", "hr-sites"].forEach(a =>
+    $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !(wholeTeam && can("hr:write")))));
+  $$('#v-hr [data-act="hr-reports"]').forEach(b =>
+    b.classList.toggle("hide", !(wholeTeam && can("hr:reports"))));
+  // The leave calendar is a whole-team view; staff see only their own leave.
+  $$('#v-hr [data-act="hr-calendar"]').forEach(b => b.classList.toggle("hide", !wholeTeam));
+  $$("#v-hr .hr-team-only").forEach(el => el.classList.toggle("hide", !wholeTeam));
+  $("#hrSelf").classList.toggle("hide", wholeTeam || !can("hr:attendance_self"));
+  if (!wholeTeam) {
+    $("#hrRangeNote").textContent = "Your own attendance, leave and payslips.";
+    if (can("hr:attendance_self")) renderHrSelf();
+    return;
+  }
+  refreshHrUnread();
+  const d = state.hr.dashboard || {};
+  if (!d.from_date) {
+    $("#hrKpis").innerHTML = "";
+    $("#hrSiteNote").textContent = "";
+    $("#hrAttention").innerHTML = `<li><div class="att-empty">${esc(state.hr.error || "The HR figures did not load. Refresh to try again.")}</div></li>`;
+    $("#hrTrend").innerHTML = "";
+    $("#hrCalendar").innerHTML = "";
+    $("#hrShape").innerHTML = "";
+    renderHrDirectory();
+    return;
+  }
+  $("#hrFrom").value = state.hr.from;
+  $("#hrTo").value = state.hr.to;
+  $("#hrRangeNote").textContent = `${fmtDate(d.from_date)} – ${fmtDate(d.to_date)} · today ${fmtDate(d.date)}`;
+  fillHrSites();
+  $("#hrSiteNote").textContent = d.attendance_required_today == null ? ""
+    : `${d.attendance_required_today} of ${d.active_employees} active employee(s) must mark attendance `
+      + `today${d.attendance_exempt_today ? `; ${d.attendance_exempt_today} exempt` : ""}.`;
+  fillHrDepartments(d);
+  fillHrSaved();
+  renderHrKpis(d);
+  renderHrAttention(d);
+  renderHrTrend(d);
+  renderHrCalendar(d);
+  renderHrShape(d);
+  renderHrDirectory();
+}
+function hrAttention(kind) {
+  const a = (state.hr.dashboard && state.hr.dashboard.needs_attention) || {};
+  const block = a[kind] || {rows: [], count: 0};
+  let rows = "";
+  if (kind === "records") {
+    rows = (block.rows || []).map(x => `<tr><td class="strong">${esc(x.full_name)}<small>${esc(x.code)}</small></td>
+      <td>${esc((x.missing || []).join(", "))}</td>
+      <td><button class="btn ghost sm" type="button" data-act="hr-edit-emp" data-id="${x.employee_id}">Complete</button></td></tr>`).join("");
+  } else if (kind === "punches") {
+    rows = (block.rows || []).map(x => `<tr><td>${esc(x.employee)}</td><td>${esc(fmtDate(x.date))}</td>
+      <td></td></tr>`).join("");
+  } else {
+    rows = (block.rows || []).map(x => `<tr><td>${esc(x.employee)}</td><td>${esc(String(x.year))}</td></tr>`).join("");
+  }
+  const title = kind === "records" ? "Incomplete employee records"
+    : kind === "punches" ? "Attendance missing a punch" : "Leave balances below zero";
+  openDrawer(title, `${block.count || 0} item(s). Showing up to 20; the count is complete.`, `
+    <div class="tw"><table><thead><tr><th>Employee</th><th>${kind === "records" ? "Missing" : kind === "punches" ? "Date" : "Year"}</th><th></th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="3" class="empty-row">Nothing here now.</td></tr>'}</tbody></table></div>`, true);
+}
+/* ---------- employee profile ---------- */
+async function hrProfile(id) {
+  const [r, bal, br, off, sh, lt] = await Promise.all([
+    api(`/api/hr/employees/${id}/profile`),
+    api(`/api/hr/leave/balances?employee_id=${id}`),
+    api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts"),
+    api("/api/hr/letters/templates")]);
+  if (!r.ok) { toast(r, "Employee not loaded"); return; }
+  const names = rows => Object.fromEntries((rows && rows.ok ? rows.body : []).map(x => [x.id, x.name]));
+  state.hr.profile = {...r.body,
+    balances: bal.ok ? bal.body.balances : [],
+    balanceYear: bal.ok ? bal.body.year : null,
+    branchNames: names(br), officeNames: names(off), shiftNames: names(sh),
+    letterTemplates: lt.ok ? lt.body.templates.filter(t => t.active) : []};
+  hrProfileDrawer("overview");
+}
+function hrProfileValue(value) {
+  return value == null || value === "" ? "—" : esc(value);
+}
+function hrProfileOverview(p) {
+  const e = p.employee;
+  const row = (label, value) => `<dt>${esc(label)}</dt><dd>${hrProfileValue(value)}</dd>`;
+  const branch = p.branchNames[e.branch_id], office = p.officeNames[e.office_id];
+  const shift = p.shiftNames[e.shift_id];
+  const dept = e.department || "Unassigned";
+  const req = p.attendance_requirement;
+  const attendance = req
+    ? `${req.required ? "Required" : "Not required"} · self check-in ${req.self_service ? "on" : "off"}${req.attendance_mode ? ` · ${req.attendance_mode}` : ""} · ${req.source}`
+    : null;
+  const personal = [
+    row("Status", e.status), row("Department", dept), row("Designation", e.designation),
+    row("Employment type", e.employment_type), row("Joined", fmtDate(e.joining_date)),
+    row("Probation ends", e.probation_end_date ? fmtDate(e.probation_end_date) : "—"),
+    row("Confirmed", e.confirmation_date ? fmtDate(e.confirmation_date) : "—"),
+    row("Branch", branch), row("Office", office), row("Shift", shift),
+    row("Attendance policy", attendance),
+    row("Phone", e.phone), row("Email", e.email),
+    row("Date of birth", e.date_of_birth ? fmtDate(e.date_of_birth) : "—"),
+    row("Address", e.address), row("Emergency contact", [e.emergency_name, e.emergency_phone].filter(Boolean).join(" · "))];
+  if (e.date_of_exit) personal.push(row("Exited on", fmtDate(e.date_of_exit)), row("Exit reason", e.exit_reason));
+  const confidential = p.can_edit_confidential ? `
+    <h3 class="hr-sub">Bank and statutory numbers</h3>
+    <dl class="dl">
+      ${row("Bank", e.bank_name)}${row("Account", e.bank_account_no)}${row("IFSC", e.bank_ifsc)}
+      ${row("PAN", e.pan)}${row("UAN", e.uan)}${row("ESI number", e.esi_no)}
+    </dl>`
+    : `<p class="gap-note">Bank, PAN and statutory numbers are hidden for your role. The server masks them rather than sending them to the browser.</p>`;
+  const bals = p.balances || [];
+  const balances = `<h3 class="hr-sub">Leave balances ${p.balanceYear ? `in ${p.balanceYear}` : ""}</h3>` +
+    (bals.length ? `<div class="tw"><table class="hr-mini"><thead><tr><th>Type</th><th class="n">Entitled</th><th class="n">Carried</th><th class="n">Used</th><th class="n">Pending</th><th class="n">Available</th></tr></thead><tbody>
+      ${bals.map(x => `<tr><td>${esc(x.name)}</td><td class="n">${qty(x.entitled)}</td><td class="n">${qty(x.carried)}</td><td class="n">${qty(x.used)}</td><td class="n">${qty(x.pending)}</td><td class="n strong">${qty(x.available)}</td></tr>`).join("")}
+      </tbody></table></div>`
+    : `<p class="gap-note">No data yet: no leave types are configured.</p>`);
+  return `<dl class="dl">${personal.join("")}</dl>${confidential}${balances}`;
+}
+function hrProfileDocuments(p) {
+  const canEdit = p.can_edit;
+  return `<div class="actions" style="margin-top:0">
+      ${canEdit ? `<button class="btn" type="button" data-act="hr-doc-new" data-id="${p.employee.id}">Add a document</button>` : ""}</div>
+    <div class="tw"><table><thead><tr><th>Document</th><th>Number</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>
+      ${(p.documents || []).map(x => {
+        const days = x.expires_on ? daysUntil(x.expires_on) : null;
+        return `<tr><td class="strong">${esc(x.title)}<small>${esc(x.doc_type)}</small></td>
+          <td>${x.number ? esc(x.number) + (x.number_masked ? ' <span class="chip off">masked</span>' : "") : "—"}</td>
+          <td>${x.expires_on ? esc(fmtDate(x.expires_on)) + (days != null && days < 30 ? ` <span class="chip warn">${days < 0 ? "expired" : days + " days"}</span>` : "") : "—"}</td>
+          <td><span class="chip ${x.status === "active" ? "ok" : "off"}">${esc(x.status)}</span></td>
+          <td class="rowacts">${canEdit ? `<button class="btn ghost sm" type="button" data-act="hr-doc-edit" data-id="${x.id}">Edit</button>` : ""}</td></tr>`;
+      }).join("") || '<tr><td colspan="5" class="empty-row">No documents recorded.</td></tr>'}
+    </tbody></table></div>
+    <p class="note">Documents are never deleted. When one is replaced, mark it replaced so the history stays intact.</p>`;
+}
+function hrProfileAssets(p) {
+  const canEdit = p.can_edit;
+  return `<div class="actions" style="margin-top:0">
+      ${canEdit ? `<button class="btn" type="button" data-act="hr-asset-new" data-id="${p.employee.id}">Issue an asset</button>` : ""}</div>
+    <div class="tw"><table><thead><tr><th>Asset</th><th>Serial</th><th>Issued</th><th>Returned</th><th>Condition</th><th></th></tr></thead><tbody>
+      ${(p.assets || []).map(x => `<tr><td class="strong">${esc(x.name)}<small>${esc(x.asset_type)}</small></td>
+        <td>${esc(x.serial_no || "—")}</td><td>${esc(fmtDate(x.issued_on))}</td>
+        <td>${x.returned_on ? esc(fmtDate(x.returned_on)) : '<span class="chip warn">in use</span>'}</td>
+        <td>${esc(x.condition_note || "—")}</td>
+        <td class="rowacts">${canEdit && !x.returned_on ? `<button class="btn ghost sm" type="button" data-act="hr-asset-return" data-id="${x.id}">Return</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No assets issued.</td></tr>'}
+    </tbody></table></div>`;
+}
+function hrProfileHistory(p) {
+  return `<div class="tw"><table><thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Changes</th></tr></thead><tbody>
+    ${(p.history || []).map(x => `<tr><td>${esc(fmtStamp(x.at))}</td><td>${esc(x.action)}</td><td>${esc(x.actor)}</td>
+      <td><code>${esc(JSON.stringify(x.changes || {}))}</code></td></tr>`).join("") || '<tr><td colspan="4" class="empty-row">No changes recorded yet.</td></tr>'}
+    </tbody></table></div>`;
+}
+function hrProfileOutputs(p) {
+  const e = p.employee;
+  const letters = (p.letterTemplates || []).map(t =>
+    `<button class="btn ghost sm" type="button" data-act="hr-letter" data-code="${esc(t.code)}" data-emp="${e.id}">${esc(t.name)} (PDF)</button>`).join("");
+  return `<div class="actions hr-wrap" style="margin-top:0">
+      <button class="btn ghost" type="button" data-act="hr-card" data-emp="${e.id}">ID card (PDF)</button>
+      <button class="btn ghost" type="button" data-act="hr-statement" data-emp="${e.id}">Leave statement (PDF)</button>
+    </div>
+    <h3 class="hr-sub">Letters</h3>
+    <p class="note">Each letter is filled on the server from this record. A date the record does not hold stops the letter instead of printing a blank, and every download is audited.</p>
+    <div class="actions hr-wrap">${letters || '<span class="muted">No active letter template.</span>'}</div>`;
+}
+function hrProfileDrawer(tab) {
+  const p = state.hr.profile;
+  if (!p) return;
+  const e = p.employee;
+  const tabs = [["overview", "Overview"], ["documents", `Documents (${(p.documents || []).length})`],
+                ["assets", `Assets (${(p.assets || []).length})`], ["outputs", "Letters & ID"],
+                ["history", "History"]];
+  const body = tab === "documents" ? hrProfileDocuments(p)
+    : tab === "assets" ? hrProfileAssets(p)
+    : tab === "outputs" ? hrProfileOutputs(p)
+    : tab === "history" ? hrProfileHistory(p) : hrProfileOverview(p);
+  openDrawer(`${e.full_name} · ${e.code}`,
+    `${e.designation || "No designation"} · ${e.department || "No department"} · ${e.status}`, `
+    <div class="seg compact hr-tabs" role="group" aria-label="Profile section">
+      ${tabs.map(([k, label]) => `<button type="button" data-hrp="${k}" aria-pressed="${k === tab}">${esc(label)}</button>`).join("")}
+    </div>
+    <div id="hrProfileBody">${body}</div>
+    <div class="actions">
+      ${p.can_edit ? `<button class="btn" type="button" data-act="hr-edit-emp" data-id="${e.id}">Edit employee</button>` : ""}
+      <button class="btn ghost" type="button" data-act="close">Close</button></div>`, true);
+}
+function hrDocForm(employeeId, docId) {
+  const p = state.hr.profile;
+  const x = docId ? (p.documents || []).find(d => d.id === Number(docId)) : null;
+  openDrawer(x ? "Edit document" : "Add a document",
+    "A number is stored masked for readers without confidential rights. Documents are never deleted.", `
+    <form id="hrDocForm" data-id="${x ? x.id : ""}" data-emp="${employeeId}" novalidate>
+      <div class="row2"><div><label>Type</label><input name="doc_type" value="${esc(x ? x.doc_type : "")}" placeholder="licence, contract, ID" autocomplete="off"></div>
+      <div><label>Title</label><input name="title" value="${esc(x ? x.title : "")}" autocomplete="off"></div></div>
+      <label>Number</label><input name="number" value="${esc(x && x.number ? x.number : "")}" autocomplete="off">
+      <div class="row2"><div><label>Issued on</label><input name="issued_on" type="date" value="${x && x.issued_on ? x.issued_on : ""}"></div>
+      <div><label>Expires on</label><input name="expires_on" type="date" value="${x && x.expires_on ? x.expires_on : ""}"></div></div>
+      <label>Status</label><select name="status"><option value="active"${!x || x.status === "active" ? " selected" : ""}>Active</option>
+        <option value="expired"${x && x.status === "expired" ? " selected" : ""}>Expired</option>
+        <option value="replaced"${x && x.status === "replaced" ? " selected" : ""}>Replaced</option></select>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save document</button><button class="btn ghost" type="button" data-act="hr-profile-tab" data-tab="documents">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrDoc(form) {
+  const f = form.elements, err = $(".err", form), emp = form.dataset.emp, id = form.dataset.id;
+  err.textContent = "";
+  if (!f.doc_type.value.trim() || !f.title.value.trim()) { err.textContent = "Give the document a type and a title."; return; }
+  if (f.issued_on.value && f.expires_on.value && f.expires_on.value < f.issued_on.value) {
+    err.textContent = "The expiry cannot be before the issue date."; return;
+  }
+  const body = {doc_type: f.doc_type.value.trim(), title: f.title.value.trim(),
+    number: f.number.value.trim() || null, issued_on: f.issued_on.value || null,
+    expires_on: f.expires_on.value || null, status: f.status.value};
+  const res = await api(id ? `/api/hr/employees/${emp}/documents/${id}` : `/api/hr/employees/${emp}/documents`,
+    {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? "Document saved" : "Document not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrProfile(emp);
+  hrProfileDrawer("documents");
+}
+function hrAssetForm(employeeId) {
+  openDrawer("Issue an asset", "Returned assets stay on the record; the issue date is kept.", `
+    <form id="hrAssetForm" data-emp="${employeeId}" novalidate>
+      <div class="row2"><div><label>Type</label><input name="asset_type" placeholder="Laptop, phone, vehicle" autocomplete="off"></div>
+      <div><label>Name</label><input name="name" autocomplete="off"></div></div>
+      <div class="row2"><div><label>Serial number</label><input name="serial_no" autocomplete="off"></div>
+      <div><label>Issued on</label><input name="issued_on" type="date" value="${isoDay(0)}"></div></div>
+      <label>Condition note</label><input name="condition_note" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Record the issue</button><button class="btn ghost" type="button" data-act="hr-profile-tab" data-tab="assets">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrAsset(form) {
+  const f = form.elements, err = $(".err", form), emp = form.dataset.emp;
+  err.textContent = "";
+  if (!f.asset_type.value.trim() || !f.name.value.trim()) { err.textContent = "Give the asset a type and a name."; return; }
+  if (!f.issued_on.value) { err.textContent = "Choose the issue date."; return; }
+  const res = await api(`/api/hr/employees/${emp}/assets`, {method: "POST", body: {
+    asset_type: f.asset_type.value.trim(), name: f.name.value.trim(),
+    serial_no: f.serial_no.value.trim() || null, issued_on: f.issued_on.value,
+    condition_note: f.condition_note.value.trim() || null}});
+  toast(res, res.ok ? "Asset issued" : "Asset not recorded");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrProfile(emp);
+  hrProfileDrawer("assets");
+}
+function hrAssetReturnForm(assetId) {
+  const p = state.hr.profile, x = (p.assets || []).find(a => a.id === Number(assetId));
+  if (!p || !x) return;
+  openDrawer(`Return ${x.name}`, "The asset stays in the employee's history as returned.", `
+    <form id="hrAssetReturnForm" data-id="${x.id}" data-emp="${p.employee.id}" novalidate>
+      <label>Returned on</label><input name="returned_on" type="date" value="${isoDay(0)}">
+      <label>Condition note</label><input name="condition_note" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Record the return</button><button class="btn ghost" type="button" data-act="hr-profile-tab" data-tab="assets">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrAssetReturn(form) {
+  const f = form.elements, err = $(".err", form), emp = form.dataset.emp;
+  err.textContent = "";
+  if (!f.returned_on.value) { err.textContent = "Choose the return date."; return; }
+  const res = await api(`/api/hr/assets/${form.dataset.id}/return`, {method: "POST", body: {
+    returned_on: f.returned_on.value, condition_note: f.condition_note.value.trim() || null}});
+  toast(res, res.ok ? "Asset returned" : "Return not recorded");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrProfile(emp);
+  hrProfileDrawer("assets");
+}
+/* ---------- letters and printable output ---------- */
+async function hrLetters() {
+  const r = await api("/api/hr/letters/templates");
+  if (!r.ok) { toast(r, "Templates not loaded"); return; }
+  state.hr.letterTemplates = r.body.templates;
+  const placeholders = (r.body.placeholders || []).map(x => `<code>{${esc(x)}}</code>`).join(" ");
+  openDrawer("Letter templates", "Edits change the wording of every future letter. Every generated letter is a draft until signed and sealed.", `
+    <p class="note">Placeholders are filled from the employee record: ${placeholders}. A word in braces that is not on this list is refused when you save.</p>
+    <div class="tw"><table><thead><tr><th>Template</th><th>Code</th><th>Status</th><th></th></tr></thead><tbody>
+      ${r.body.templates.map(t => `<tr><td class="strong">${esc(t.name)}</td><td>${esc(t.code)}</td>
+        <td><span class="chip ${t.active ? "ok" : "off"}">${t.active ? "active" : "retired"}</span></td>
+        <td class="rowacts"><button class="btn ghost sm" type="button" data-act="hr-letter-edit" data-id="${t.id}">Edit</button></td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="note">Open an employee's profile and choose “Letters &amp; ID” to download a filled letter, an ID card or a leave statement.</p>`, true);
+}
+function hrLetterForm(id) {
+  const t = (state.hr.letterTemplates || []).find(x => x.id === Number(id));
+  if (!t) return;
+  openDrawer(`Edit ${t.name}`, "The body is plain text. Blank lines separate paragraphs.", `
+    <form id="hrLetForm" data-id="${t.id}" novalidate>
+      <label>Template name</label><input name="name" value="${esc(t.name)}" maxlength="120" autocomplete="off">
+      <label>Body</label><textarea name="body" rows="16" spellcheck="false">${esc(t.body)}</textarea>
+      <label class="check"><input type="checkbox" name="active"${t.active ? " checked" : ""}> Active — a retired template cannot generate letters</label>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save template</button><button class="btn ghost" type="button" data-act="hr-letters">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrLetterTemplate(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  if (f.name.value.trim().length < 3 || f.body.value.trim().length < 20) {
+    err.textContent = "Give the template a name and a body of at least 20 characters."; return;
+  }
+  const res = await api(`/api/hr/letters/templates/${form.dataset.id}`, {method: "PATCH", body: {
+    name: f.name.value.trim(), body: f.body.value.trim(), active: f.active.checked}});
+  toast(res, res.ok ? "Template saved" : "Template not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await hrLetters();
+}
+async function downloadOutput(url) {
+  const res = await fetch(url, {credentials: "same-origin"});
+  if (!res.ok) {
+    let message = `Download failed (${res.status})`;
+    try { message = detail(await res.json()) || message; } catch (err) { /* not JSON */ }
+    toast({ok: false, body: {detail: message}}, "Not downloaded");
+    return;
+  }
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const found = /filename="?([^";]+)"?/.exec(disposition);
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(await res.blob());
+  link.download = found ? found[1] : "hr-output.pdf";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+}
+function downloadAttendanceSheet() {
+  const [y, m] = (state.hr.mxMonth || "").split("-").map(Number);
+  if (!y || !m) { toast({ok: false, body: {detail: "Choose a month first."}}, "No month"); return; }
+  const q = new URLSearchParams({year: y, month: m});
+  if (state.hr.mxDept) q.set("department", state.hr.mxDept);
+  downloadOutput(`/api/hr/outputs/attendance-sheet?${q}`);
 }
 async function hrEmployees() {
   const [e, b, o, s] = await Promise.all([api("/api/hr/employees"), api("/api/hr/branches"),
@@ -679,47 +3725,6 @@ async function hrEmployees() {
   openDrawer("Employee master", `${emps.length} employee record(s). Deactivate, never delete.`, `
     ${can("hr:write") ? `<div class="actions"><button class="btn" type="button" data-act="hr-new-emp">New employee</button></div>` : ""}
     <div class="tw"><table><thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Designation</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`, true);
-}
-async function hrEmployeeForm(id) {
-  const x = id ? state.hr.employees.find(e => e.id === Number(id)) : null;
-  const [b, o, s] = await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts")]);
-  const opts = (arr, sel, label) => (arr.ok ? arr.body : []).map(v => `<option value="${v.id}"${sel === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
-  openDrawer(x ? `Edit ${x.code}` : "New employee", "The HR master extends the existing employee record; the login link is unchanged.", `
-    <form id="hrEmpForm" data-id="${x ? x.id : ""}" novalidate>
-      <div class="row2"><div><label>Employee code</label><input name="code" value="${x ? esc(x.code) : ""}"${x ? " readonly" : ""} autocomplete="off"></div>
-      <div><label>Full name</label><input name="full_name" value="${x ? esc(x.full_name) : ""}" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Department</label><input name="department" value="${x ? esc(x.department || "") : ""}" autocomplete="off"></div>
-      <div><label>Designation</label><input name="designation" value="${x ? esc(x.designation || "") : ""}" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Phone</label><input name="phone" value="${x ? esc(x.phone || "") : ""}" autocomplete="off"></div>
-      <div><label>Email</label><input name="email" value="${x ? esc(x.email || "") : ""}" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Joining date</label><input name="joining_date" type="date" value="${x && x.joining_date ? x.joining_date : ""}"></div>
-      <div><label>Employment type</label><input name="employment_type" value="${x ? esc(x.employment_type || "") : ""}" placeholder="Full time / Contract" autocomplete="off"></div></div>
-      <div class="row2"><div><label>Branch</label><select name="branch_id"><option value="">—</option>${opts(b, x ? x.branch_id : null, v => v.name)}</select></div>
-      <div><label>Office / work location</label><select name="office_id"><option value="">—</option>${opts(o, x ? x.office_id : null, v => v.name)}</select></div></div>
-      <div class="row2"><div><label>Shift</label><select name="shift_id"><option value="">—</option>${opts(s, x ? x.shift_id : null, v => v.name)}</select></div>
-      <div><label>Status</label><select name="status"><option value="active"${x && x.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${x && x.status === "inactive" ? " selected" : ""}>Inactive</option></select></div></div>
-      <div class="err" role="alert"></div>
-      <div class="actions"><button class="btn" type="submit">${x ? "Save employee" : "Create employee"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
-    </form>`, true);
-}
-async function saveHrEmployee(form) {
-  const f = form.elements, err = $(".err", form), id = form.dataset.id ? Number(form.dataset.id) : null;
-  err.textContent = "";
-  const body = {full_name: f.full_name.value.trim(), department: f.department.value || null,
-                designation: f.designation.value || null, phone: f.phone.value || null,
-                email: f.email.value || null, joining_date: f.joining_date.value || null,
-                employment_type: f.employment_type.value || null,
-                branch_id: f.branch_id.value ? Number(f.branch_id.value) : null,
-                office_id: f.office_id.value ? Number(f.office_id.value) : null,
-                shift_id: f.shift_id.value ? Number(f.shift_id.value) : null,
-                status: f.status.value};
-  if (!body.full_name || body.full_name.length < 2) { err.textContent = "Enter the employee's full name."; return; }
-  if (!id) body.code = f.code.value.trim();
-  if (!id && !body.code) { err.textContent = "Enter an employee code."; return; }
-  const res = await api(id ? `/api/hr/employees/${id}` : "/api/hr/employees", {method: id ? "PATCH" : "POST", body});
-  toast(res, res.ok ? "Employee saved" : "Employee not saved");
-  if (!res.ok) { err.textContent = detail(res.body); return; }
-  closeDrawer(); openHr();
 }
 const HR_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const hrTime = v => (v || "").slice(0, 5);
@@ -788,29 +3793,325 @@ async function saveHrShift(form) {
   if (!res.ok) { err.textContent = detail(res.body); return; }
   hrShifts();
 }
+
+/* ---------- HR: branches, offices and attendance policy ---------- */
+const HR_MODE = {office: "Office", gps: "GPS", both: "Office or GPS"};
+const hrMode = v => (v ? HR_MODE[v] || v : "Office default");
+function hrRuleScore(r) {
+  return (r.employee_id ? 1000 : 0) + (r.office_id ? 100 : 0)
+    + (r.designation ? 10 : 0) + (r.branch_id ? 1 : 0);
+}
+function hrRuleTarget(r) {
+  const bits = [];
+  if (r.branch) bits.push(`Branch: ${r.branch}`);
+  if (r.office) bits.push(`Office: ${r.office}`);
+  if (r.designation) bits.push(`Designation: ${r.designation}`);
+  if (r.employee) bits.push(`Employee: ${r.employee}`);
+  return bits.join(" · ") || "Whole company";
+}
+function hrEffective(r) {
+  if (!r.effective_from && !r.effective_to) return "Always";
+  return `${r.effective_from ? fmtDate(r.effective_from) : "start"} – ${r.effective_to ? fmtDate(r.effective_to) : "open"}`;
+}
+async function hrSiteData() {
+  const [b, o, r, s, e] = await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"),
+    api("/api/hr/attendance-rules"), api("/api/hr/shifts"), api("/api/hr/employees?page_size=200&sort=name")]);
+  if (b.ok) state.hr.branches = b.body;
+  if (o.ok) state.hr.offices = o.body;
+  if (r.ok) state.hr.rules = r.body;
+  if (s.ok) state.hr.shifts = s.body;
+  if (e.ok) state.hr.siteEmps = e.body;
+  if (b.ok && o.ok) fillHrSites();
+  if (!(b.ok && o.ok && r.ok)) {
+    toast({ok: false, body: {detail: "Some branch, office or rule data did not load. Try Refresh."}},
+          "Site data incomplete");
+  }
+  return {branches: state.hr.branches || [], offices: state.hr.offices || [],
+          rules: state.hr.rules || [], shifts: state.hr.shifts || [],
+          employees: state.hr.siteEmps || []};
+}
+async function hrSites() {
+  await hrSiteData();
+  const branches = state.hr.branches || [], offices = state.hr.offices || [];
+  const rules = [...(state.hr.rules || [])].sort((a, b) =>
+    hrRuleScore(b) - hrRuleScore(a) || a.priority - b.priority || a.id - b.id);
+  const writable = can("hr:write");
+  const edit = (act, id, label) => writable
+    ? `<button class="btn ghost sm" type="button" data-act="${act}" data-id="${id}">${label}</button>` : "";
+  const branchRows = branches.map(b => `<tr><td class="strong">${esc(b.name)}<small>${esc(b.code)}</small></td>
+    <td>${esc(b.address || "–")}</td><td>${esc(b.hr_admin || "–")}</td>
+    <td class="n">${b.active_employees}</td>
+    <td><span class="chip ${b.status === "active" ? "ok" : "off"}">${esc(b.status)}</span></td>
+    <td class="rowacts">${edit("hr-edit-branch", b.id, "Edit")}</td></tr>`).join("");
+  const officeRows = offices.map(o => `<tr><td class="strong">${esc(o.name)}<small>${esc(o.code)}</small></td>
+    <td>${esc(o.branch || "–")}</td><td>${esc(hrMode(o.attendance_mode))}</td>
+    <td>${o.latitude != null && o.longitude != null
+      ? `${esc(String(o.latitude))}, ${esc(String(o.longitude))} · ${o.geofence_radius_m} m`
+      : '<span class="muted">No geofence</span>'}</td>
+    <td>${esc(o.hr_admin || "–")}</td><td class="n">${o.active_employees}</td>
+    <td><span class="chip ${o.status === "active" ? "ok" : "off"}">${esc(o.status)}</span></td>
+    <td class="rowacts">${edit("hr-edit-office", o.id, "Edit")}</td></tr>`).join("");
+  const ruleRows = rules.map(r => `<tr><td class="strong">${esc(hrRuleTarget(r))}<small>${esc(r.source)}</small></td>
+    <td><span class="chip ${r.required ? "ok" : "off"}">${r.required ? "Required" : "Not required"}</span></td>
+    <td>${r.self_service ? "On" : "Off"}</td>
+    <td>${esc(r.shift || "Office default")}</td><td>${esc(hrMode(r.attendance_mode))}</td>
+    <td>${esc(hrEffective(r))}</td><td class="n">${r.priority}</td>
+    <td><span class="chip ${r.active ? "ok" : "off"}">${r.active ? "active" : "inactive"}</span></td>
+    <td class="rowacts">${edit("hr-edit-rule", r.id, "Edit")}${writable
+      ? ` <button class="btn ghost sm" type="button" data-act="hr-rule-delete" data-id="${r.id}">Delete</button>` : ""}</td></tr>`).join("");
+  openDrawer("Branches, offices & attendance policy",
+    "A branch groups offices. An employee belongs to one office, and that office belongs to one branch. Every change is audited.", `
+    <div class="note">Who must mark attendance: the most specific active rule wins — employee, then office, then designation, then branch, then the company default. With no rule at all, attendance is required. A rule can set its own shift and attendance mode but never overrides the office’s own mode unless the rule dates are in force.</div>
+    ${writable ? `<div class="actions" style="margin-top:0">
+      <button class="btn" type="button" data-act="hr-new-branch">New branch</button>
+      <button class="btn" type="button" data-act="hr-new-office">New office</button>
+      <button class="btn" type="button" data-act="hr-new-rule">New attendance rule</button>
+      <button class="btn ghost" type="button" data-act="hr-sites">Refresh</button></div>` : ""}
+    <h3>Branches</h3>
+    <div class="tw"><table><thead><tr><th>Branch</th><th>Address</th><th>HR responsible</th><th class="n">Active staff</th><th>Status</th><th></th></tr></thead>
+      <tbody>${branchRows || '<tr><td colspan="6" class="empty-row">No branches configured. Attendance is still required company-wide.</td></tr>'}</tbody></table></div>
+    <h3>Offices and work locations</h3>
+    <div class="tw"><table><thead><tr><th>Office</th><th>Branch</th><th>Mode</th><th>Geofence</th><th>HR responsible</th><th class="n">Active staff</th><th>Status</th><th></th></tr></thead>
+      <tbody>${officeRows || '<tr><td colspan="8" class="empty-row">No offices configured.</td></tr>'}</tbody></table></div>
+    <h3>Attendance requirements</h3>
+    <div class="tw"><table><thead><tr><th>Rule applies to</th><th>Attendance</th><th>Self check-in</th><th>Shift</th><th>Mode</th><th>Effective</th><th class="n">Priority</th><th>Status</th><th></th></tr></thead>
+      <tbody>${ruleRows || '<tr><td colspan="9" class="empty-row">No rule yet. Every employee must mark attendance with the office default.</td></tr>'}</tbody></table></div>
+    <div class="note">A branch or office with active staff cannot be switched off or moved until those people are reassigned. Deactivate, never delete.</div>`, true);
+  $("#drawer").classList.add("hr-wide");
+}
+function hrSiteSelect(rows, selected, label) {
+  return `<option value="">—</option>` + rows.map(v =>
+    `<option value="${v.id}"${selected === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+}
+function hrAdminField(selected) {
+  const emps = state.hr.siteEmps || [];
+  return `<label>HR responsible at this site</label><select name="hr_admin_id">${hrSiteSelect(emps, selected,
+    v => `${v.full_name} (${v.code})`)}</select>`;
+}
+async function hrBranchForm(id) {
+  await hrSiteData();
+  const x = id ? (state.hr.branches || []).find(b => b.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Branch not found"}}, "Branch not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", address: "", hr_admin_id: null, status: "active"};
+  openDrawer(x ? `Edit ${x.name}` : "New branch",
+    "The HR responsible at a branch is the employee who answers for its attendance; it does not change who can approve leave.", `
+    <form id="hrBranchForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrb-code">Branch code</label><input id="hrb-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hrb-name">Branch name</label><input id="hrb-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <label for="hrb-addr">Address</label><input id="hrb-addr" name="address" value="${esc(v.address || "")}" autocomplete="off">
+      ${hrAdminField(v.hr_admin_id)}
+      ${x ? `<label for="hrb-status">Status</label><select id="hrb-status" name="status"><option value="active"${v.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${v.status !== "active" ? " selected" : ""}>Inactive</option></select>` : ""}
+      <div class="note">A code cannot be changed once the branch exists. An inactive branch keeps its history and accepts no new assignment.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save branch</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+async function saveHrBranch(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const body = {name: f.name.value.trim(), address: f.address.value.trim() || null,
+                hr_admin_id: f.hr_admin_id.value ? Number(f.hr_admin_id.value) : null};
+  if (!id) body.code = f.code.value.trim().toUpperCase();
+  else body.status = f.status.value;
+  if ((body.name || "").length < 2) { err.textContent = "Enter the branch name."; return; }
+  if (!id && (body.code || "").length < 2) { err.textContent = "Enter a branch code of at least two characters."; return; }
+  const res = await api(id ? `/api/hr/branches/${id}` : "/api/hr/branches",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Branch updated" : "Branch created") : "Branch not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrSites();
+}
+async function hrOfficeForm(id) {
+  await hrSiteData();
+  const x = id ? (state.hr.offices || []).find(o => o.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Office not found"}}, "Office not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", branch_id: null, address: "", latitude: null,
+                  longitude: null, geofence_radius_m: 200, attendance_mode: "both",
+                  hr_admin_id: null, status: "active"};
+  const branches = state.hr.branches || [];
+  openDrawer(x ? `Edit ${x.name}` : "New office",
+    "The geofence centre and radius decide whether a GPS check-in counts at this office. Leave both coordinates empty for an office without GPS.", `
+    <form id="hrOfficeForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hro-code">Office code</label><input id="hro-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hro-name">Office name</label><input id="hro-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <div class="row2"><div><label for="hro-branch">Branch</label><select id="hro-branch" name="branch_id">${hrSiteSelect(branches, v.branch_id, b => b.name)}</select></div>
+      <div><label for="hro-mode">Attendance mode</label><select id="hro-mode" name="attendance_mode">
+        <option value="office"${v.attendance_mode === "office" ? " selected" : ""}>Office</option>
+        <option value="gps"${v.attendance_mode === "gps" ? " selected" : ""}>GPS</option>
+        <option value="both"${v.attendance_mode === "both" ? " selected" : ""}>Office or GPS</option></select></div></div>
+      <label for="hro-addr">Address</label><input id="hro-addr" name="address" value="${esc(v.address || "")}" autocomplete="off">
+      <div class="row2"><div><label for="hro-lat">Latitude</label><input id="hro-lat" name="latitude" inputmode="decimal" value="${v.latitude == null ? "" : esc(String(v.latitude))}" autocomplete="off"></div>
+      <div><label for="hro-lon">Longitude</label><input id="hro-lon" name="longitude" inputmode="decimal" value="${v.longitude == null ? "" : esc(String(v.longitude))}" autocomplete="off"></div></div>
+      <label for="hro-radius">Geofence radius (metres)</label><input id="hro-radius" name="geofence_radius_m" type="number" min="1" max="100000" value="${v.geofence_radius_m}">
+      ${hrAdminField(v.hr_admin_id)}
+      ${x ? `<label for="hro-status">Status</label><select id="hro-status" name="status"><option value="active"${v.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${v.status !== "active" ? " selected" : ""}>Inactive</option></select>` : ""}
+      <div class="note">Self check-in still depends on the attendance rule: an employee exempt at this office is refused a check-in even when GPS matches.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save office</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+async function saveHrOffice(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const lat = f.latitude.value.trim(), lon = f.longitude.value.trim();
+  const body = {name: f.name.value.trim(), branch_id: f.branch_id.value ? Number(f.branch_id.value) : null,
+                address: f.address.value.trim() || null,
+                latitude: lat === "" ? null : Number(lat), longitude: lon === "" ? null : Number(lon),
+                geofence_radius_m: Number(f.geofence_radius_m.value),
+                attendance_mode: f.attendance_mode.value,
+                hr_admin_id: f.hr_admin_id.value ? Number(f.hr_admin_id.value) : null};
+  if (!id) body.code = f.code.value.trim().toUpperCase();
+  else body.status = f.status.value;
+  if ((body.name || "").length < 2) { err.textContent = "Enter the office name."; return; }
+  if (!id && (body.code || "").length < 2) { err.textContent = "Enter an office code of at least two characters."; return; }
+  if ((lat === "") !== (lon === "")) { err.textContent = "Give both the latitude and the longitude, or neither."; return; }
+  if (lat !== "" && (!(body.latitude >= -90 && body.latitude <= 90)
+      || !(body.longitude >= -180 && body.longitude <= 180))) {
+    err.textContent = "Latitude must be between -90 and 90 and longitude between -180 and 180."; return;
+  }
+  if (!(body.geofence_radius_m >= 1)) { err.textContent = "Enter the geofence radius in metres."; return; }
+  const res = await api(id ? `/api/hr/offices/${id}` : "/api/hr/offices",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Office updated" : "Office created") : "Office not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrSites();
+}
+async function hrRuleForm(id) {
+  await hrSiteData();
+  const x = id ? (state.hr.rules || []).find(r => r.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Attendance rule not found"}}, "Rule not loaded"); return; }
+  const v = x || {id: "", branch_id: null, office_id: null, designation: "", employee_id: null,
+                  required: true, self_service: true, shift_id: null, attendance_mode: null,
+                  effective_from: null, effective_to: null, priority: 100, active: true, note: ""};
+  const branches = state.hr.branches || [], shifts = state.hr.shifts || [];
+  const emps = state.hr.siteEmps || [];
+  const designations = [...new Set(emps.map(e => e.designation).filter(Boolean))].sort();
+  const offices = (state.hr.offices || []).filter(o => !v.branch_id || o.branch_id === v.branch_id);
+  openDrawer(x ? `Edit rule ${x.id}` : "New attendance rule",
+    "Leave a target empty to mean “any”. The more targets you fill, the more specific the rule and the earlier it is applied.", `
+    <form id="hrRuleForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrr-branch">Branch</label><select id="hrr-branch" name="branch_id">${hrSiteSelect(branches, v.branch_id, b => b.name)}</select></div>
+      <div><label for="hrr-office">Office / work location</label><select id="hrr-office" name="office_id"><option value="">—</option>${offices.map(o => `<option value="${o.id}" data-branch="${o.branch_id == null ? "" : o.branch_id}"${v.office_id === o.id ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></div></div>
+      <div class="row2"><div><label for="hrr-des">Designation</label><input id="hrr-des" name="designation" list="hrr-deslist" value="${esc(v.designation || "")}" autocomplete="off" placeholder="Any designation">
+        <datalist id="hrr-deslist">${designations.map(d => `<option value="${esc(d)}"></option>`).join("")}</datalist></div>
+      <div><label for="hrr-emp">Employee</label><select id="hrr-emp" name="employee_id">${hrSiteSelect(emps, v.employee_id,
+        e => `${e.full_name} (${e.code})`)}</select></div></div>
+      <div class="row2"><div><label for="hrr-req">Attendance</label><select id="hrr-req" name="required">
+        <option value="true"${v.required ? " selected" : ""}>Required</option><option value="false"${v.required ? "" : " selected"}>Not required</option></select></div>
+      <div><label for="hrr-self">Self check-in</label><select id="hrr-self" name="self_service">
+        <option value="true"${v.self_service ? " selected" : ""}>On</option><option value="false"${v.self_service ? "" : " selected"}>Off</option></select></div></div>
+      <div class="row2"><div><label for="hrr-shift">Shift</label><select id="hrr-shift" name="shift_id">${hrSiteSelect(shifts, v.shift_id, s => s.name)}</select></div>
+      <div><label for="hrr-mode">Attendance mode</label><select id="hrr-mode" name="attendance_mode">
+        <option value=""${v.attendance_mode ? "" : " selected"}>Office default</option>
+        <option value="office"${v.attendance_mode === "office" ? " selected" : ""}>Office</option>
+        <option value="gps"${v.attendance_mode === "gps" ? " selected" : ""}>GPS</option>
+        <option value="both"${v.attendance_mode === "both" ? " selected" : ""}>Office or GPS</option></select></div></div>
+      <div class="row2"><div><label for="hrr-from">Effective from</label><input id="hrr-from" name="effective_from" type="date" value="${v.effective_from || ""}"></div>
+      <div><label for="hrr-to">Effective to</label><input id="hrr-to" name="effective_to" type="date" value="${v.effective_to || ""}"></div></div>
+      <div class="row2"><div><label for="hrr-prio">Priority (1 comes first)</label><input id="hrr-prio" name="priority" type="number" min="1" max="1000" value="${v.priority}"></div>
+      <div><label for="hrr-active">Status</label><select id="hrr-active" name="active">
+        <option value="true"${v.active ? " selected" : ""}>Active</option><option value="false"${v.active ? "" : " selected"}>Inactive</option></select></div></div>
+      <label for="hrr-note">Note</label><input id="hrr-note" name="note" maxlength="200" value="${esc(v.note || "")}" autocomplete="off">
+      <div class="note">Two active rules cannot target exactly the same people. Only one company-wide rule can exist at a time. Dates are inclusive and may be left open.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save rule</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+  const bSel = $("#hrr-branch"), oSel = $("#hrr-office");
+  const syncOffices = () => {
+    const want = bSel.value;
+    $$("option[data-branch]", oSel).forEach(op => {
+      op.hidden = !!(want && op.dataset.branch !== want);
+    });
+    const cur = oSel.selectedOptions[0];
+    if (cur && cur.hidden) oSel.value = "";
+  };
+  bSel.addEventListener("change", syncOffices);
+  oSel.addEventListener("change", () => {
+    const br = oSel.selectedOptions[0] ? oSel.selectedOptions[0].dataset.branch : "";
+    if (br) { bSel.value = br; syncOffices(); }
+  });
+  syncOffices();
+}
+async function saveHrRule(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const num = v => (v ? Number(v) : null);
+  const body = {branch_id: num(f.branch_id.value), office_id: num(f.office_id.value),
+                designation: f.designation.value.trim() || null,
+                employee_id: num(f.employee_id.value),
+                required: f.required.value === "true", self_service: f.self_service.value === "true",
+                shift_id: num(f.shift_id.value), attendance_mode: f.attendance_mode.value || null,
+                effective_from: f.effective_from.value || null, effective_to: f.effective_to.value || null,
+                priority: Number(f.priority.value || 100), active: f.active.value === "true",
+                note: f.note.value.trim() || null};
+  if (body.effective_from && body.effective_to && body.effective_to < body.effective_from) {
+    err.textContent = "The end date cannot be before the start date."; return;
+  }
+  if (!(body.priority >= 1 && body.priority <= 1000)) { err.textContent = "Priority must be between 1 and 1000."; return; }
+  const res = await api(id ? `/api/hr/attendance-rules/${id}` : "/api/hr/attendance-rules",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Rule updated" : "Rule created") : "Rule not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrSites();
+}
+async function hrRuleDelete(id) {
+  const row = (state.hr.rules || []).find(r => r.id === Number(id));
+  if (!confirm(`Delete attendance rule ${id}${row ? ` (${hrRuleTarget(row)})` : ""}? The employees it covers fall back to the next matching rule or the company default.`)) return;
+  const res = await api(`/api/hr/attendance-rules/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Rule deleted" : "Rule not deleted");
+  if (res.ok) hrSites();
+}
 async function hrAttendance() {
-  const [a, o] = await Promise.all([api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
-    can("hr:read") ? api("/api/hr/offices") : Promise.resolve({ok: false, body: []})]);
+  const [a, o, pol] = await Promise.all([api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
+    can("hr:read") ? api("/api/hr/offices") : Promise.resolve({ok: false, body: []}),
+    can("hr:attendance_self") ? api("/api/hr/attendance-rules/resolve") : Promise.resolve({ok: false, body: null})]);
   const rows = a.ok ? a.body : [];
   const offices = o.ok ? o.body : [];
+  const all = state.hr.employees || [];
+  const eligible = all.filter(e => e.attendance_required !== false);
+  const exempt = all.length - eligible.length;
+  const policy = pol.ok ? pol.body : null;
   openDrawer("Attendance — today", "GPS is requested only for check-in/out and never tracked in the background.", `
     <div class="actions">
       ${can("hr:attendance_self") ? `<button class="btn" type="button" data-act="hr-checkin">Check in</button><button class="btn ghost" type="button" data-act="hr-checkout">Check out</button>` : ""}
       <button class="btn ghost" type="button" data-act="hr-refresh-att">Refresh</button></div>
+    ${policy ? `<div class="note">Your policy: attendance ${policy.required ? "required" : "not required"} · self check-in ${policy.self_service ? "on" : "off"}${policy.attendance_mode ? ` · ${esc(policy.attendance_mode)} mode` : ""} · ${esc(policy.source)}.</div>` : ""}
     <div class="tw"><table><thead><tr><th>Employee</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Location</th><th>Late</th></tr></thead><tbody>
       ${rows.map(x => `<tr><td>${esc(x.employee)}<small>${esc(x.employee_code)}</small></td><td>${esc(x.status)}</td><td>${esc(fmtStamp(x.check_in))}</td><td>${esc(fmtStamp(x.check_out))}</td><td>${esc(x.geofence_result)}</td><td class="n">${x.late_minutes}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No attendance recorded today.</td></tr>'}
     </tbody></table></div>
     ${can("hr:attendance_manage") ? `<form id="hrManualForm" novalidate><h3>Manual attendance</h3>
-      <div class="row2"><div><label>Employee</label><select name="employee_id">${state.hr.employees.map(e => `<option value="${e.id}">${esc(e.full_name)} (${esc(e.code)})</option>`).join("")}</select></div>
+      <div class="row2"><div><label>Employee</label><select name="employee_id">${eligible.map(e => `<option value="${e.id}">${esc(e.full_name)} (${esc(e.code)})</option>`).join("")}</select></div>
       <div><label>Date</label><input name="date" type="date" value="${isoDay(0)}"></div></div>
       <label>Status</label><select name="status"><option value="present">Present</option><option value="absent">Absent</option><option value="half_day">Half day</option><option value="paid_leave">Paid leave</option><option value="unpaid_leave">Unpaid leave</option><option value="od">On duty</option><option value="late">Late</option><option value="early_departure">Early departure</option></select>
       <label>Remarks (required)</label><input name="remarks" autocomplete="off">
+      ${exempt ? `<div class="note">${exempt} employee(s) are exempt from attendance by policy and are not listed here. Change the rule under “Branches, offices &amp; attendance policy”.</div>` : ""}
+      ${!eligible.length ? `<div class="note">No employee must mark attendance. Add an attendance rule before recording it manually.</div>` : ""}
       <div class="note">A manual entry is audited with your name, the old value and the new value.</div>
-      <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Save manual attendance</button></div></form>` : ""}
+      <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit"${eligible.length ? "" : " disabled"}>Save manual attendance</button></div></form>` : ""}
     ${offices.length ? `<div class="note">Configured offices: ${offices.length}. Geofence validation runs on the server.</div>` : ""}`, true);
 }
+async function hrSelfPolicy() {
+  const r = await api("/api/hr/attendance-rules/resolve");
+  if (!r.ok) { toast(r, "Check-in not recorded"); return null; }
+  return r.body;
+}
 async function hrCheckIn() {
-  const body = {source: "gps"};
+  const policy = await hrSelfPolicy();
+  if (!policy) return;
+  if (!policy.required) {
+    toast({ok: false, status: 409, body: {detail:
+      `Attendance is not required for you (${policy.source}). Nothing was recorded.`}}, "Check-in not needed");
+    return;
+  }
+  if (!policy.self_service) {
+    toast({ok: false, status: 409, body: {detail:
+      `Self check-in is switched off (${policy.source}). HR records your attendance.`}}, "Check-in not needed");
+    return;
+  }
+  const body = {source: policy.attendance_mode === "gps" ? "gps" : "web"};
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(async pos => {
       body.latitude = pos.coords.latitude; body.longitude = pos.coords.longitude;
@@ -863,11 +4164,12 @@ async function saveHrLeave(form) {
   hrLeave();
 }
 async function hrOd() {
-  const [a, e] = await Promise.all([api("/api/hr/od"), api("/api/hr/employees")]);
+  const [a, e] = await Promise.all([api("/api/hr/od"),
+    can("hr:read") ? api("/api/hr/employees?page_size=200") : Promise.resolve({ok: false, body: []})]);
   const rows = a.ok ? a.body : [], emps = e.ok ? e.body : [];
   openDrawer("On duty (OD)", "Approved OD is reflected in attendance and payroll.", `
     <form id="hrOdForm" novalidate><h3>New OD request</h3>
-      <div class="row2"><div><label>Employee</label><select name="employee_id">${emps.map(x => `<option value="${x.id}">${esc(x.full_name)} (${esc(x.code)})</option>`).join("")}</select></div>
+      <div class="row2">${emps.length ? `<div><label>Employee</label><select name="employee_id">${emps.map(x => `<option value="${x.id}">${esc(x.full_name)} (${esc(x.code)})</option>`).join("")}</select></div>` : ""}
       <div><label>Date</label><input name="date" type="date" value="${isoDay(0)}"></div></div>
       <div class="row2"><div><label>Visit type</label><input name="visit_type" placeholder="Customer visit / Field work" autocomplete="off"></div>
       <div><label>Destination</label><input name="destination" autocomplete="off"></div></div>
@@ -877,7 +4179,8 @@ async function hrOd() {
       ${rows.map(x => `<tr><td>${esc(x.employee)}</td><td>${esc(fmtDate(x.date))}</td><td>${esc(x.visit_type)}</td><td>${esc(x.purpose)}</td><td>${esc(x.status)}</td><td>${esc(x.decision_remarks || "–")}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No OD requests.</td></tr>'}</tbody></table></div>`, true);
 }
 async function saveHrOd(form) {
-  const f = form.elements, err = $(".err", form), body = {employee_id: Number(f.employee_id.value), date: f.date.value, visit_type: f.visit_type.value.trim(), purpose: f.purpose.value.trim(), destination: f.destination.value.trim() || null};
+  const f = form.elements, err = $(".err", form), body = {date: f.date.value, visit_type: f.visit_type.value.trim(), purpose: f.purpose.value.trim(), destination: f.destination.value.trim() || null};
+  if (f.employee_id) body.employee_id = Number(f.employee_id.value);
   err.textContent = "";
   if (!body.visit_type || !body.purpose) { err.textContent = "Visit type and purpose are required."; return; }
   const res = await api("/api/hr/od", {method: "POST", body});
@@ -895,10 +4198,10 @@ async function hrPayroll() {
       <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Create period</button></div></form>
     <div class="tw"><table><thead><tr><th>Period</th><th>Status</th><th class="n">Entries</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
       ${rows.map(x => `<tr><td class="strong">${x.year}-${String(x.month).padStart(2, "0")}</td><td>${esc(x.status)}</td><td class="n">${x.entries}</td><td class="n">${money(x.net)}</td>
-        <td class="rowacts">${["draft", "under_review"].includes(x.status) ? `<button class="btn ghost sm" type="button" data-act="pay-prepare" data-id="${x.id}">${x.status === "draft" ? "Prepare" : "Recalculate"}</button>` : ""}
-        ${x.status === "under_review" ? `<button class="btn ghost sm" type="button" data-act="pay-submit" data-id="${x.id}">Submit for approval</button>` : ""}
-        ${x.status === "approved" ? `<button class="btn ghost sm" type="button" data-act="pay-process" data-id="${x.id}">Process</button>` : ""}
-        ${x.status === "processed" ? `<button class="btn ghost sm" type="button" data-act="pay-paid" data-id="${x.id}">Mark paid</button>` : ""}
+        <td class="rowacts">${can("hr:payroll_prepare") && ["draft", "under_review"].includes(x.status) ? `<button class="btn ghost sm" type="button" data-act="pay-prepare" data-id="${x.id}">${x.status === "draft" ? "Prepare" : "Recalculate"}</button>` : ""}
+        ${can("hr:payroll_prepare") && x.status === "under_review" ? `<button class="btn ghost sm" type="button" data-act="pay-submit" data-id="${x.id}">Submit for approval</button>` : ""}
+        ${can("hr:payroll_approve") && x.status === "approved" ? `<button class="btn ghost sm" type="button" data-act="pay-process" data-id="${x.id}">Process</button>` : ""}
+        ${can("hr:payroll_approve") && x.status === "processed" ? `<button class="btn ghost sm" type="button" data-act="pay-paid" data-id="${x.id}">Mark paid</button>` : ""}
         <button class="btn ghost sm" type="button" data-act="pay-open" data-id="${x.id}">Open</button></td></tr>`).join("") || '<tr><td colspan="5" class="empty-row">No payroll periods.</td></tr>'}</tbody></table></div>`, true);
 }
 async function hrPayrollOpen(id) {
@@ -909,7 +4212,7 @@ async function hrPayrollOpen(id) {
     <div class="tw"><table><thead><tr><th>Employee</th><th>Department</th><th class="n">Payable days</th><th class="n">LOP</th><th class="n">Gross (₹)</th><th class="n">Deductions (₹)</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
       ${p.entries.map(e => `<tr><td>${esc(e.employee)}<small>${esc(e.employee_code)}</small></td><td>${esc(e.department || "–")}</td><td class="n">${qty(e.payable_days)}</td><td class="n">${qty(e.lop_days)}</td><td class="n">${money(e.gross)}</td><td class="n">${money(e.deductions)}</td><td class="n strong">${money(e.net)}</td>
         <td>${can("hr:confidential") ? `<a class="link-btn" href="/api/hr/payroll/entries/${e.id}/slip" download>Slip</a>` : ""}</td></tr>`).join("")}</tbody></table></div>
-    <a class="btn ghost" href="/api/reports/hr_payroll/export?format=xlsx" download>Download salary register (Excel)</a>`, true);
+    ${can("hr:reports") && can("report:export") ? `<a class="btn ghost" href="/api/reports/hr_payroll/export?format=xlsx" download>Download salary register (Excel)</a>` : ""}`, true);
 }
 async function saveHrPeriod(form) {
   const f = form.elements, err = $(".err", form);
@@ -926,10 +4229,815 @@ async function hrPayrollAction(act, id) {
   if (!res.ok) return;
   await hrPayroll();
 }
+
+/* ---------- HR: monthly attendance ---------- */
+const HR_MX = {
+  present: ["P", "ok", "Present"], late: ["L", "warn", "Late"],
+  early_departure: ["E", "warn", "Early departure"],
+  half_day: ["H", "warn", "Half day"], paid_leave: ["L", "lev", "Paid leave"],
+  unpaid_leave: ["U", "lev", "Unpaid leave"], od: ["O", "od", "On duty"],
+  absent: ["A", "bad", "Absent"], weekly_off: ["W", "off", "Weekly off"],
+  holiday: ["F", "off", "Holiday"], correction_pending: ["C", "warn", "Correction pending"]
+};
+function hrMxCell(c) {
+  if (c.not_required) {
+    return `<td class="hr-mx-c off" title="${esc(`${fmtDate(c.date)} · Not required by policy`)}">–</td>`;
+  }
+  const [code, cls, label] = HR_MX[c.status] || ["·", "none", "Not recorded"];
+  const bits = [fmtDate(c.date), label];
+  if (c.check_in) bits.push(`in ${fmtStamp(c.check_in)}`);
+  if (c.check_out) bits.push(`out ${fmtStamp(c.check_out)}`);
+  if (c.worked_minutes) bits.push(`${Math.floor(c.worked_minutes / 60)}h ${c.worked_minutes % 60}m`);
+  if (c.late_minutes) bits.push(`${c.late_minutes} min late`);
+  return `<td class="hr-mx-c ${cls}" title="${esc(bits.join(" · "))}">${code}</td>`;
+}
+async function hrMonthly() {
+  const now = new Date();
+  const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const month = ($("#hrMxMonth") && $("#hrMxMonth").value) || state.hr.mxMonth || fallback;
+  state.hr.mxMonth = month;
+  state.hr.mxDept = ($("#hrMxDept") && $("#hrMxDept").value) || state.hr.mxDept || "";
+  const depts = [...new Set((state.hr.employees || []).map(e => e.department).filter(Boolean))].sort();
+  const branches = state.hr.branches || [];
+  const offices = (state.hr.offices || []).filter(o =>
+    !state.hr.mxBranch || String(o.branch_id) === state.hr.mxBranch);
+  openDrawer("Monthly attendance", "A blank day was not recorded. It is a gap, not an absence. A day the policy exempts is marked “not required”.", `
+    <div class="toolbar">
+      <label class="hr-field">Month <input id="hrMxMonth" type="month" value="${esc(state.hr.mxMonth)}"></label>
+      <label class="hr-field">Department <select id="hrMxDept"><option value="">All departments</option>
+        ${depts.map(d => `<option value="${esc(d)}"${d === state.hr.mxDept ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+      <label class="hr-field">Branch <select id="hrMxBranch"><option value="">All branches</option>
+        ${branches.map(b => `<option value="${b.id}"${String(b.id) === state.hr.mxBranch ? " selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>
+      <label class="hr-field">Office <select id="hrMxOffice"><option value="">All offices</option>
+        ${offices.map(o => `<option value="${o.id}"${String(o.id) === state.hr.mxOffice ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></label>
+      <button class="btn ghost" type="button" data-act="hr-monthly-refresh">Refresh</button>
+      <button class="btn ghost" type="button" data-act="hr-sheet">Sheet (PDF)</button>
+    </div>
+    <div class="hr-legend"><span class="hr-lg ok">P</span> present
+      <span class="hr-lg warn">L</span> late <span class="hr-lg warn">H</span> half day
+      <span class="hr-lg lev">L / U</span> leave <span class="hr-lg od">O</span> on duty
+      <span class="hr-lg bad">A</span> absent <span class="hr-lg off">W / F</span> weekly off / holiday
+      <span class="hr-lg off">–</span> not required
+      <span class="hr-lg none">·</span> not recorded</div>
+    <div id="hrMxBody" aria-live="polite"><p class="muted">Loading…</p></div>`, true);
+  $("#drawer").classList.add("hr-wide");
+  await loadHrMx();
+}
+async function loadHrMx() {
+  const box = $("#hrMxBody");
+  if (!box) return;
+  const [y, m] = (state.hr.mxMonth || "").split("-").map(Number);
+  if (!y || !m) { box.innerHTML = `<p class="muted">Choose a month.</p>`; return; }
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  const q = new URLSearchParams({year: y, month: m});
+  if (state.hr.mxDept) q.set("department", state.hr.mxDept);
+  if (state.hr.mxBranch) q.set("branch_id", state.hr.mxBranch);
+  if (state.hr.mxOffice) q.set("office_id", state.hr.mxOffice);
+  const r = await api(`/api/hr/attendance/monthly?${q}`);
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  if (!d.employees.length) {
+    box.innerHTML = `<div class="empty">No active employee matches this month and filter.</div>`;
+    return;
+  }
+  const head = d.days.map(day => `<th class="hr-mx-d" scope="col">${Number(day.slice(8, 10))}</th>`).join("");
+  const rows = d.employees.map(e => `<tr><th scope="row" class="hr-mx-name">${esc(e.name)}<small>${esc(e.code)}</small></th>
+    ${e.calendar.map(hrMxCell).join("")}
+    <td class="n">${qty(e.summary.present_days)}</td><td class="n">${qty(e.summary.leave_days)}</td>
+    <td class="n">${e.summary.absent_days}</td><td class="n">${e.summary.missing_days}</td>
+    <td class="n">${e.summary.not_required_days || 0}</td></tr>`).join("");
+  const t = d.totals;
+  box.innerHTML = `<div class="tw hr-mx-wrap"><table class="hr-mx">
+      <thead><tr><th scope="col">Employee</th>${head}<th class="n">Present</th><th class="n">Leave</th><th class="n">Absent</th><th class="n">Not recorded</th><th class="n">Not required</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr><th scope="row">All ${d.employees.length} employee(s)</th><td colspan="${d.days.length}"></td>
+        <td class="n">${qty(t.present_days)}</td><td class="n">${qty(t.leave_days)}</td>
+        <td class="n">${t.absent_days}</td><td class="n">${t.missing_days}</td>
+        <td class="n">${t.not_required_days || 0}</td></tr></tfoot>
+    </table></div>
+    <p class="note">${t.missing_days} employee-day(s) have no attendance row. HR reports count them as gaps until they are recorded. ${t.not_required_days || 0} employee-day(s) are exempt by policy and are not gaps.</p>`;
+}
+
+/* ---------- HR: leave calendar ---------- */
+async function hrCalendar() {
+  const now = new Date();
+  const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const month = ($("#hrCalMonth") && $("#hrCalMonth").value) || state.hr.calMonth || fallback;
+  state.hr.calMonth = month;
+  state.hr.calDept = ($("#hrCalDept") && $("#hrCalDept").value) || state.hr.calDept || "";
+  const depts = [...new Set((state.hr.employees || []).map(e => e.department).filter(Boolean))].sort();
+  openDrawer("Leave calendar", "Approved and pending leave for the month, with holidays. Nothing here is deducted until an application is approved.", `
+    <div class="toolbar">
+      <label class="hr-field">Month <input id="hrCalMonth" type="month" value="${esc(state.hr.calMonth)}"></label>
+      <label class="hr-field">Department <select id="hrCalDept"><option value="">All departments</option>
+        ${depts.map(d => `<option value="${esc(d)}"${d === state.hr.calDept ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+      <button class="btn ghost" type="button" data-act="hr-calendar-refresh">Refresh</button>
+    </div>
+    <div id="hrCalBody" aria-live="polite"><p class="muted">Loading…</p></div>`, true);
+  await loadHrCal();
+}
+async function loadHrCal() {
+  const box = $("#hrCalBody");
+  if (!box) return;
+  const [y, m] = (state.hr.calMonth || "").split("-").map(Number);
+  if (!y || !m) { box.innerHTML = `<p class="muted">Choose a month.</p>`; return; }
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  const q = new URLSearchParams({year: y, month: m});
+  if (state.hr.calDept) q.set("department", state.hr.calDept);
+  const r = await api(`/api/hr/leave/calendar?${q}`);
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  const daysIn = new Date(y, m, 0).getDate();
+  const firstDow = new Date(y, m - 1, 1).getDay();
+  const holidays = {};
+  d.holidays.forEach(h => { holidays[h.date] = h.name; });
+  const pad = n => String(n).padStart(2, "0");
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push('<div class="hr-cal-cell blank"></div>');
+  for (let day = 1; day <= daysIn; day++) {
+    const iso = `${y}-${pad(m)}-${pad(day)}`;
+    const dow = new Date(y, m - 1, day).getDay();
+    const on = d.entries.filter(e => e.date_from <= iso && e.date_to >= iso);
+    const approved = on.filter(e => e.status === "approved");
+    const pending = on.filter(e => e.status === "pending");
+    const names = approved.slice(0, 3).map(e => `<span class="hr-cal-chip">${esc(e.employee)}</span>`).join("");
+    cells.push(`<div class="hr-cal-cell${dow === 0 || dow === 6 ? " wknd" : ""}${holidays[iso] ? " hol" : ""}">
+      <div class="hr-cal-n">${day}${holidays[iso] ? `<span class="hr-cal-tag">${esc(holidays[iso])}</span>` : ""}</div>
+      <div class="hr-cal-list">${names}
+        ${approved.length > 3 ? `<span class="muted">+${approved.length - 3} more</span>` : ""}
+        ${pending.length ? `<span class="hr-cal-chip pend">${pending.length} pending</span>` : ""}</div></div>`);
+  }
+  const entries = d.entries.map(e => `<tr><td class="strong">${esc(e.employee)}</td><td>${esc(e.leave_type)}</td>
+    <td>${esc(fmtDate(e.date_from))} – ${esc(fmtDate(e.date_to))}</td><td class="n">${qty(e.days)}</td>
+    <td><span class="chip ${e.status === "approved" ? "ok" : "warn"}">${esc(e.status)}</span></td></tr>`).join("");
+  box.innerHTML = `<div class="hr-cal-grid" role="grid" aria-label="Leave calendar ${esc(state.hr.calMonth)}">
+      ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(x => `<div class="hr-cal-head" role="columnheader">${x}</div>`).join("")}
+      ${cells.join("")}</div>
+    <h3>Applications in ${esc(state.hr.calMonth)}</h3>
+    <div class="tw"><table><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th class="n">Days</th><th>Status</th></tr></thead>
+      <tbody>${entries || '<tr><td colspan="5" class="empty-row">No leave applications and no holidays in this month.</td></tr>'}</tbody></table></div>`;
+}
+
+/* ---------- HR: reports ---------- */
+async function hrReports() {
+  const [r, b, o] = await Promise.all([api("/api/hr/reports"), api("/api/hr/branches"),
+                                       api("/api/hr/offices")]);
+  const items = r.ok ? r.body : [];
+  const branches = b.ok ? b.body : [];
+  const offices = (o.ok ? o.body : []).filter(x =>
+    !state.hr.repBranch || String(x.branch_id) === state.hr.repBranch);
+  state.hr.repKey = state.hr.repKey || "headcount";
+  openDrawer("HR reports", "Every report states its filters and lists missing data instead of filling it with zeroes.", `
+    <div class="toolbar">
+      <label class="hr-field">From <input id="hrRepFrom" type="date"></label>
+      <label class="hr-field">To <input id="hrRepTo" type="date"></label>
+      <label class="hr-field">Branch <select id="hrRepBranch"><option value="">All branches</option>
+        ${branches.map(x => `<option value="${x.id}"${String(x.id) === state.hr.repBranch ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+      <label class="hr-field">Office <select id="hrRepOffice"><option value="">All offices</option>
+        ${offices.map(x => `<option value="${x.id}"${String(x.id) === state.hr.repOffice ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+      <button class="btn ghost" type="button" data-act="hr-report-refresh">Refresh</button>
+    </div>
+    <div class="tw"><table><thead><tr><th>Report</th><th>Access</th><th></th></tr></thead><tbody>
+      ${items.map(x => `<tr><td class="strong">${esc(x.title)}<small>${esc(x.key)}</small></td>
+        <td>${x.available ? `<span class="chip ok">open</span>` : `<span class="chip warn">restricted</span>`}</td>
+        <td class="rowacts">${x.available ? `<button class="btn ghost sm" type="button" data-act="hr-report-view" data-key="${esc(x.key)}">View</button>
+          <button class="btn ghost sm" type="button" data-act="hr-report-file" data-key="${esc(x.key)}" data-format="csv">CSV</button>
+          <button class="btn ghost sm" type="button" data-act="hr-report-file" data-key="${esc(x.key)}" data-format="pdf">PDF</button>` : `<span class="muted">Ask the Administrator for confidential HR rights.</span>`}</td></tr>`).join("") || '<tr><td colspan="3" class="empty-row">No reports for your role.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">A branch or office filter narrows every report to the employees assigned there. The header of each report repeats the filter the server applied.</div>
+    <div id="hrReportBody" aria-live="polite"><p class="muted">Choose View to open a report.</p></div>`, true);
+  $("#drawer").classList.add("hr-wide");
+  await hrReportView(state.hr.repKey);
+}
+function hrReportQuery() {
+  const q = new URLSearchParams();
+  const from = $("#hrRepFrom") && $("#hrRepFrom").value;
+  const to = $("#hrRepTo") && $("#hrRepTo").value;
+  if (from) q.set("from_date", from);
+  if (to) q.set("to_date", to);
+  if (state.hr.repBranch) q.set("branch_id", state.hr.repBranch);
+  if (state.hr.repOffice) q.set("office_id", state.hr.repOffice);
+  return q.toString();
+}
+async function hrReportView(key) {
+  const box = $("#hrReportBody");
+  if (!box) return;
+  state.hr.repKey = key;
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  const r = await api(`/api/hr/reports/${encodeURIComponent(key)}?${hrReportQuery()}`);
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  const filters = Object.entries(d.filters || {}).map(([k, v]) =>
+    `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v == null ? "–" : String(v))}</dd>`).join("");
+  const summary = Object.entries(d.summary || {}).filter(([, v]) => v === null || typeof v !== "object")
+    .map(([k, v]) => `<div class="hr-sum"><b>${esc(k.replace(/_/g, " "))}</b><span>${esc(v == null ? "No data yet" : String(v))}</span></div>`).join("");
+  const head = (d.columns || []).map(c => `<th>${esc(c.label)}</th>`).join("");
+  const rows = (d.rows || []).slice(0, 100).map(row =>
+    `<tr>${d.columns.map(c => `<td>${esc(row[c.key] == null ? "–" : String(row[c.key]))}</td>`).join("")}</tr>`).join("");
+  box.innerHTML = `<h3>${esc(d.title)}</h3>
+    <dl class="hr-filters">${filters || "<dt>Filters</dt><dd>None</dd>"}</dl>
+    <div class="hr-sums">${summary}</div>
+    ${d.no_data ? `<div class="empty">No data yet for these filters.</div>` : `<div class="tw"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+      ${d.rows.length > 100 ? `<p class="note">Showing the first 100 of ${d.rows.length} rows. Download the CSV for all of them.</p>` : ""}`}
+    ${(d.gaps || []).length ? `<h3>No data yet</h3><ul class="hr-gaps">${d.gaps.map(g => `<li>${esc(g)}</li>`).join("")}</ul>` : ""}`;
+}
+function hrReportFile(key, format) {
+  const q = hrReportQuery();
+  const a = document.createElement("a");
+  a.href = `/api/hr/reports/${encodeURIComponent(key)}?format=${format}${q ? "&" + q : ""}`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast({ok: true, status: 200}, `${key} ${format.toUpperCase()} requested`);
+}
+
+/* ---------- HR: announcements ---------- */
+async function hrNotices() {
+  const [a, n] = await Promise.all([api("/api/hr/announcements?include_inactive=true"),
+    api("/api/hr/notifications?limit=5")]);
+  const rows = a.ok ? a.body : [];
+  const unread = n.ok ? n.body.unread : 0;
+  openDrawer("Announcements", "Publishing notifies every active user with a linked employee record.", `
+    ${can("hr:write") ? `<form id="hrNoticeForm" novalidate><h3>Publish an announcement</h3>
+      <label>Title</label><input name="title" maxlength="200" autocomplete="off">
+      <label>Message</label><textarea name="body" rows="4" maxlength="4000"></textarea>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Publish</button>
+        <button class="btn ghost" type="button" data-act="hr-digest">Send daily digest now</button></div></form>` : ""}
+    <h3>Published</h3>
+    <div class="tw"><table><thead><tr><th>Title</th><th>Published</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map(x => `<tr><td class="strong">${esc(x.title)}<small>${esc((x.body || "").slice(0, 140))}</small></td>
+        <td>${esc(fmtStamp(x.published_at))}</td><td><span class="chip ${x.active ? "ok" : "off"}">${x.active ? "active" : "hidden"}</span></td>
+        <td class="rowacts">${can("hr:write") && x.active ? `<button class="btn ghost sm" type="button" data-act="hr-notice-hide" data-id="${x.id}">Hide</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="4" class="empty-row">No announcements yet.</td></tr>'}
+    </tbody></table></div>
+    <p class="note">${unread ? `${unread} notification(s) are waiting in your bell.` : "Your notification bell is clear."}</p>`, true);
+}
+async function saveHrNotice(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const body = {title: f.title.value.trim(), body: f.body.value.trim()};
+  if (body.title.length < 3) { err.textContent = "Give the announcement a title."; return; }
+  if (body.body.length < 3) { err.textContent = "Write the message."; return; }
+  const res = await api("/api/hr/announcements", {method: "POST", body});
+  toast(res, res.ok ? `Announcement published to ${res.body.notified} user(s)` : "Announcement not published");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrNotices();
+}
+
+/* ---------- HR: period locks ---------- */
+async function hrLocks(unlockId) {
+  const [l, p] = await Promise.all([api("/api/hr/period-locks"),
+    can("hr:payroll_prepare") ? api("/api/hr/payroll/periods") : Promise.resolve({ok: false, body: []})]);
+  const rows = l.ok ? l.body : [];
+  const periods = p.ok ? p.body : [];
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const now = new Date();
+  const scopes = can("hr:payroll_prepare") ? ["attendance", "payroll"] : ["attendance"];
+  openDrawer("Period locks", "A locked month rejects attendance and payroll edits. Only the Administrator may unlock one.", `
+    ${unlockId ? `<form id="hrUnlockForm" data-id="${unlockId}" novalidate><h3>Unlock period</h3>
+      <label>Reason (kept in the audit trail)</label><input name="reason" minlength="5" maxlength="300" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Unlock</button><button class="btn ghost" type="button" data-act="hr-locks">Cancel</button></div></form>` : ""}
+    <form id="hrLockForm" novalidate><h3>Lock a month</h3>
+      <div class="row2">
+        <div><label>Scope</label><select name="scope">${scopes.map(s => `<option value="${s}">${s === "attendance" ? "Attendance" : "Payroll"}</option>`).join("")}</select></div>
+        <div><label>Year</label><input name="year" inputmode="numeric" value="${now.getFullYear()}"></div>
+      </div>
+      <div class="row2"><div><label>Month</label><select name="month">${months.map((m, i) => `<option value="${i + 1}"${i + 1 === now.getMonth() + 1 ? " selected" : ""}>${m}</option>`).join("")}</select></div>
+      <div><label>Reason</label><input name="reason" minlength="5" maxlength="300" autocomplete="off"></div></div>
+      <div class="note">Lock the previous month once it is reconciled. A payroll lock also freezes that month's payroll entries.</div>
+      <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit">Lock month</button></div></form>
+    <h3>Lock history</h3>
+    <div class="tw"><table><thead><tr><th>Scope</th><th>Month</th><th>Status</th><th>Locked</th><th>Reason</th><th></th></tr></thead><tbody>
+      ${rows.map(x => `<tr><td>${esc(x.scope)}</td><td>${months[x.month - 1]} ${x.year}</td>
+        <td><span class="chip ${x.active ? "warn" : "off"}">${x.active ? "locked" : "open"}</span></td>
+        <td>${esc(x.locked_by || "–")}<small>${esc(fmtStamp(x.locked_at))}</small></td>
+        <td>${esc(x.reason || "–")}${x.unlock_reason ? `<small>Unlocked: ${esc(x.unlock_reason)}</small>` : ""}</td>
+        <td class="rowacts">${x.active && state.user.role === "admin" ? `<button class="btn ghost sm" type="button" data-act="hr-lock-unlock" data-id="${x.id}">Unlock</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-row">No period has been locked yet.</td></tr>'}
+    </tbody></table></div>
+    ${periods.length ? "" : ""}`, true);
+}
+async function saveHrLock(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const body = {scope: f.scope.value, year: Number(f.year.value), month: Number(f.month.value),
+                reason: f.reason.value.trim()};
+  if (!(body.year >= 2000 && body.year <= 2100)) { err.textContent = "Enter a four-digit year."; return; }
+  if (body.reason.length < 5) { err.textContent = "Give a reason of at least five characters."; return; }
+  const res = await api("/api/hr/period-locks", {method: "POST", body});
+  toast(res, res.ok ? `${body.scope} ${body.year}-${String(body.month).padStart(2, "0")} locked` : "Month not locked");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrLocks();
+}
+async function saveHrUnlock(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const reason = f.reason.value.trim();
+  if (reason.length < 5) { err.textContent = "Give a reason of at least five characters."; return; }
+  const res = await api(`/api/hr/period-locks/${form.dataset.id}/unlock`, {method: "POST", body: {reason}});
+  toast(res, res.ok ? "Period unlocked" : "Period not unlocked");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  hrLocks();
+}
+
+/* ---------- HR: employee import ---------- */
+function hrImport() {
+  state.hr.importText = null;
+  openDrawer("Import employees", "Nothing is created until you confirm. The server validates every row and keeps an undo record.", `
+    <p class="muted">Download the template, fill one employee per row, then choose the file. Bank and ID columns need confidential HR rights.</p>
+    <div class="actions"><a class="btn ghost" href="/api/hr/employees/import-template.csv" download>Download template (CSV)</a></div>
+    <label class="hr-field">CSV file <input id="hrImportFile" type="file" accept=".csv,text/csv"></label>
+    <div class="actions"><button class="btn" type="button" data-act="hr-import-check">Check the file</button>
+      <button class="btn hide" id="hrImportGo" type="button" data-act="hr-import-commit">Import valid rows</button></div>
+    <div id="hrImportBody" aria-live="polite"></div>`, true);
+}
+async function hrImportCheck() {
+  const box = $("#hrImportBody"), file = $("#hrImportFile") && $("#hrImportFile").files[0];
+  if (!file) { toast({ok: false, status: 422, body: {detail: "Choose a CSV file first."}}, "No file"); return; }
+  box.innerHTML = `<p class="muted">Checking…</p>`;
+  const text = await file.text();
+  state.hr.importText = text;
+  const r = await api("/api/hr/employees/import", {method: "POST",
+    body: {filename: file.name, csv_text: text, commit: false}});
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  const errs = d.errors.map(e => `<li>Row ${e.row}${e.code ? ` (${esc(e.code)})` : ""}: ${esc(e.errors.join("; "))}</li>`).join("");
+  box.innerHTML = `<div class="hr-sums"><div class="hr-sum"><b>Valid rows</b><span>${d.valid_rows}</span></div>
+      <div class="hr-sum"><b>Rows with errors</b><span>${d.error_rows}</span></div></div>
+    ${d.preview.length ? `<div class="tw"><table><thead><tr><th>Code</th><th>Name</th><th>Department</th></tr></thead><tbody>
+      ${d.preview.map(p => `<tr><td>${esc(p.code)}</td><td>${esc(p.full_name)}</td><td>${esc(p.department || "–")}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${errs ? `<h3>Rows that cannot be imported</h3><ul class="hr-gaps">${errs}</ul>` : ""}
+    <p class="note">${d.valid_rows ? "Check the preview, then choose Import valid rows. Rows with errors are left out." : "Nothing in this file can be imported yet."}</p>`;
+  $("#hrImportGo").classList.toggle("hide", !d.valid_rows);
+}
+async function hrImportCommit() {
+  const box = $("#hrImportBody");
+  if (!state.hr.importText) { toast({ok: false, status: 422, body: {detail: "Check the file first."}}, "No file"); return; }
+  const file = $("#hrImportFile") && $("#hrImportFile").files[0];
+  const r = await api("/api/hr/employees/import", {method: "POST",
+    body: {filename: file ? file.name : "import.csv", csv_text: state.hr.importText, commit: true}});
+  toast(r, r.ok ? `Imported ${r.body.valid_rows} employee(s)` : "Import failed");
+  if (!r.ok) { box.innerHTML = `<p class="muted">${esc(detail(r.body))}</p>`; return; }
+  const d = r.body;
+  box.innerHTML = `<div class="hr-sums"><div class="hr-sum"><b>Created</b><span>${d.valid_rows}</span></div>
+      <div class="hr-sum"><b>Left out</b><span>${d.error_rows}</span></div></div>
+    <p class="note">The import is recorded in the audit trail. If it was a mistake, undo it now.</p>
+    <div class="actions"><button class="btn ghost" type="button" data-act="hr-import-undo" data-id="${d.batch_id}">Undo this import</button></div>`;
+  $("#hrImportGo").classList.add("hide");
+  openHr();
+}
+async function hrImportUndo(id) {
+  const r = await api(`/api/hr/employees/import-batches/${id}/undo`, {method: "POST", body: {}});
+  toast(r, r.ok ? "Import undone" : "Import not undone");
+  if (r.ok) hrImport();
+}
+
+/* ---------- HR: notifications and self-service ---------- */
+async function refreshHrUnread() {
+  const el = $("#hrUnread");
+  if (!el) return;
+  const r = await api("/api/hr/notifications?limit=1");
+  const n = r.ok ? r.body.unread : 0;
+  el.textContent = n > 99 ? "99+" : String(n);
+  el.classList.toggle("hide", !n);
+}
+async function hrNotifications() {
+  const r = await api("/api/hr/notifications?limit=50");
+  const items = r.ok ? r.body.items : [];
+  const unread = r.ok ? r.body.unread : 0;
+  openDrawer("Notifications", unread ? `${unread} unread` : "You are up to date.", `
+    ${unread ? `<div class="actions"><button class="btn ghost" type="button" data-act="hr-notes-readall">Mark all read</button></div>` : ""}
+    <ul class="hr-notes">${items.map(n => `<li class="hr-note${n.read_at ? "" : " unread"}">
+      <b>${esc(n.title)}</b><p>${esc(n.body || "")}</p>
+      <small>${esc(fmtStamp(n.created_at))}${n.link ? ` · <a href="${esc(n.link)}">Open</a>` : ""}</small>
+      ${n.read_at ? "" : `<button class="btn ghost sm" type="button" data-act="hr-note-read" data-id="${n.id}">Mark read</button>`}
+    </li>`).join("") || `<li class="muted">No notifications yet. Announcements and approvals appear here.</li>`}</ul>`, true);
+  refreshHrUnread();
+}
+async function hrPayslips() {
+  const r = await api("/api/hr/me/payslips");
+  const rows = r.ok ? r.body : [];
+  openDrawer("My payslips", "Only payslips released by payroll appear here. Each download is checked against your own employee record.", `
+    ${rows.length ? `<div class="tw"><table><thead><tr><th>Period</th><th class="n">Gross (₹)</th><th class="n">Deductions (₹)</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
+      ${rows.map(x => `<tr><td class="strong">${x.year}-${String(x.month).padStart(2, "0")}</td>
+        <td class="n">${money(x.gross)}</td><td class="n">${money(x.deductions)}</td><td class="n strong">${money(x.net)}</td>
+        <td><a class="link-btn" href="/api/hr/me/payslips/${x.entry_id}" download>PDF</a></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">No payslip has been released yet. Payroll releases them after a period is processed.</div>`}`, true);
+}
+async function renderHrSelf() {
+  const box = $("#hrSelfBody");
+  if (!box) return;
+  const [a, p, n] = await Promise.all([
+    api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
+    api("/api/hr/me/payslips"),
+    api("/api/hr/announcements?limit=3")]);
+  const today = a.ok ? a.body : [];
+  const slips = p.ok ? p.body.slice(0, 3) : [];
+  const notes = n.ok ? n.body : [];
+  box.innerHTML = `<h3>Today</h3>
+    ${today.length ? `<div class="tw"><table><thead><tr><th>Status</th><th>Check-in</th><th>Check-out</th><th class="n">Worked</th></tr></thead><tbody>
+      ${today.map(x => `<tr><td>${esc(x.status)}</td><td>${esc(fmtStamp(x.check_in))}</td><td>${esc(fmtStamp(x.check_out))}</td>
+        <td class="n">${x.worked_minutes ? `${Math.floor(x.worked_minutes / 60)}h ${x.worked_minutes % 60}m` : "–"}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No attendance recorded today. Open “My attendance” to check in.</p>`}
+    <h3>Recent payslips</h3>
+    ${slips.length ? `<div class="tw"><table><thead><tr><th>Period</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
+      ${slips.map(x => `<tr><td>${x.year}-${String(x.month).padStart(2, "0")}</td><td class="n">${money(x.net)}</td>
+        <td><a class="link-btn" href="/api/hr/me/payslips/${x.entry_id}" download>PDF</a></td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No payslip has been released yet.</p>`}
+    <h3>Announcements</h3>
+    ${notes.length ? `<ul class="hr-notes">${notes.map(x => `<li class="hr-note"><b>${esc(x.title)}</b><p>${esc(x.body || "")}</p>
+      <small>${esc(fmtStamp(x.published_at))}</small></li>`).join("")}</ul>` : `<p class="muted">No announcements yet.</p>`}`;
+}
 function renderSettings() {
   if (!$("#setEmprows")) return;
+  const panel = $("#emailPanel");
+  if (panel) {
+    const showEmail = srAllowed() && featureOn("scheduled");
+    panel.classList.toggle("hide", !showEmail);
+    if (showEmail && !state.email.loaded && !state.email.loading) loadEmailSettings();
+    if (showEmail) renderEmailSettings();
+  }
+  renderDbResetPanel();
   $("#setEmprows").innerHTML = state.employees.slice(0, 50).map(e => `<tr><td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
     <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td><td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td></tr>`).join("");
+}
+
+/* ---------- guarded database reset (four server-enforced steps) ---------- */
+const dbReset = {status: null, loaded: false, run: null};
+
+function dbResetPanelRow(c) {
+  return `<li><span class="chip ${c.ok ? "ok" : "bad"}">${c.ok ? "Ready" : "Blocked"}</span>
+    <b>${esc(c.key.replace(/_/g, " "))}</b> <span class="muted">${esc(c.detail)}</span></li>`;
+}
+async function renderDbResetPanel(force) {
+  const panel = $("#dbResetPanel");
+  if (!panel) return;
+  const allowed = can("db:reset");
+  panel.classList.toggle("hide", !allowed);
+  if (!allowed) return;
+  if (!dbReset.loaded || force) {
+    const res = await api("/api/db-reset/status");
+    if (!res.ok) {
+      $("#dbResetBody").innerHTML = `<p class="muted">${esc(detail(res.body))}</p>`;
+      return;
+    }
+    dbReset.status = res.body;
+    dbReset.loaded = true;
+  }
+  const s = dbReset.status;
+  $("#dbResetState").textContent = s.enabled ? "Administrator only." : "Switched off on this server.";
+  const maintenance = s.maintenance
+    ? `<div class="note bad">A reset run is in progress. Writes are paused until it finishes
+       (started ${esc(fmtStamp(s.maintenance.started_at))}).</div>` : "";
+  const locked = s.locked
+    ? `<div class="note bad">Locked after ${s.max_attempts} wrong attempts until
+       ${esc(fmtStamp(s.locked_until))}.</div>` : "";
+  const off = s.enabled ? "" : `<div class="note">Database reset is switched off in this deployment.
+    The Administrator can enable it with <b>DB_RESET_ENABLED=true</b> and the two backup directories.</div>`;
+  $("#dbResetBody").innerHTML = `
+    ${off}${locked}${maintenance}
+    <ul class="hr-notes">${(s.prerequisites.checks || []).map(dbResetPanelRow).join("")}</ul>
+    <div class="note">The reset never runs from this screen alone: the server takes two encrypted backups,
+      verifies both by restoring them, and asks for a separate reset key within ten minutes.</div>
+    <div class="actions"><button class="btn" type="button" data-act="reset-db"${s.enabled && !s.locked && !s.maintenance ? "" : " disabled"}>Start a reset…</button>
+      ${s.maintenance ? `<button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run and resume writes</button>` : ""}</div>
+    ${(s.recent || []).length ? `<h3>Recent reset events</h3><div class="tw"><table><thead><tr><th>When</th><th>Event</th><th>Actor</th><th>Run</th></tr></thead><tbody>
+      ${s.recent.slice().reverse().map(x => `<tr><td>${esc(fmtStamp(x.at))}</td><td>${esc(x.event)}</td><td>${esc(x.actor || "–")}</td><td>${esc(x.run_id || "–")}</td></tr>`).join("")}
+    </tbody></table></div>` : ""}`;
+}
+function dbResetTime(iso) {
+  if (!iso) return "–";
+  try { return new Date(iso).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
+  catch (e) { return iso; }
+}
+async function dbResetOpen() {
+  dbReset.run = null;
+  if (!dbReset.loaded) {
+    const res = await api("/api/db-reset/status");
+    if (!res.ok) { toast(res, "Reset status not loaded"); return; }
+    dbReset.status = res.body;
+    dbReset.loaded = true;
+  }
+  const s = dbReset.status;
+  openDrawer("Reset database",
+    "Four steps, each enforced by the server. Nothing is cleared until the fourth succeeds.", `
+    <div id="dbResetStep"></div>`, true);
+  if (!s.enabled) {
+    $("#dbResetStep").innerHTML = `<div class="note bad">Database reset is switched off on this server.
+      The Administrator must set <b>DB_RESET_ENABLED=true</b>, two backup directories on different devices
+      and <b>DB_RESET_ENCRYPTION_KEY</b>.</div>
+      <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`;
+    return;
+  }
+  if (s.locked) {
+    $("#dbResetStep").innerHTML = `<div class="note bad">Locked after ${s.max_attempts} wrong attempts
+      until ${esc(fmtStamp(s.locked_until))}.</div>
+      <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`;
+    return;
+  }
+  if (s.maintenance) {
+    $("#dbResetStep").innerHTML = `<div class="note bad">A reset run is already in progress.</div>
+      <div class="actions"><button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel that run</button>
+      <button class="btn ghost" type="button" data-act="close">Close</button></div>`;
+    return;
+  }
+  dbResetStep1();
+}
+function dbResetStep1() {
+  const s = dbReset.status || {phrase: ""};
+  $("#dbResetStep").innerHTML = `
+    <p class="sub">Step 1 of 4 — confirm who you are and what should be cleared.</p>
+    <form id="dbResetForm1" novalidate>
+      <label>Mode</label>
+      <select name="mode">
+        <option value="business" selected>Business data only — keeps users, employees, roles, settings and master data</option>
+        <option value="full">Full reset — drops the schema, replays migrations, recreates the base Administrator</option>
+      </select>
+      <label>Your own login password</label>
+      <input type="password" name="password" autocomplete="current-password">
+      <label>Type the confirmation phrase exactly</label>
+      <input name="phrase" autocomplete="off" spellcheck="false" placeholder="${esc(s.phrase || "RESET database")}">
+      <div class="note">Database: <b>${esc(s.database || "–")}</b>. The phrase is case-sensitive.
+        Three wrong attempts lock the feature.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Take the backups</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`;
+}
+async function dbResetBegin(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const res = await api("/api/db-reset/begin", {method: "POST", body: {
+    mode: f.mode.value, password: f.password.value, phrase: f.phrase.value}});
+  if (!res.ok) { err.textContent = detail(res.body); toast(res, "Reset not started"); return; }
+  dbReset.run = {id: res.body.run_id, token: res.body.token, mode: res.body.mode};
+  dbResetStep2(res.body);
+}
+function dbResetStep2(begin) {
+  const modeText = begin.mode === "full"
+    ? "This mode deletes users, roles, employees and settings. Only the base Administrator survives."
+    : "This mode clears documents, stock, payments and HR transactions; users, employees, roles, settings and master data stay.";
+  $("#dbResetStep").innerHTML = `
+    <p class="sub">Step 1 of 4 complete. Step 2 — take two encrypted backups on different devices.</p>
+    <div class="note">${esc(modeText)} Writes are paused while the backup is taken.</div>
+    <div class="note">Each copy is encrypted before it leaves the server. A copy without the key cannot be read.</div>
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="button" data-act="dbreset-backup">Make the backups now</button>
+      <button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run</button></div>`;
+}
+async function dbResetBackup() {
+  const step = $("#dbResetStep");
+  if (!dbReset.run) return;
+  step.querySelectorAll("button").forEach(b => b.disabled = true);
+  const res = await api("/api/db-reset/backup", {method: "POST",
+    body: {run_id: dbReset.run.id, token: dbReset.run.token}});
+  if (!res.ok) {
+    step.querySelector(".err").textContent = detail(res.body);
+    step.querySelectorAll("button").forEach(b => b.disabled = false);
+    return;
+  }
+  dbReset.run.token = res.body.token;
+  const rows = Object.entries(res.body.backups || {}).map(([label, b]) => `<tr>
+    <td>${esc(label)}</td><td>${esc(b.path)}</td><td><code>${esc(b.sha256.slice(0, 16))}…</code></td>
+    <td class="n">${b.bytes.toLocaleString()}</td></tr>`).join("");
+  step.innerHTML = `
+    <p class="sub">Step 2 of 4 complete. Writes are now paused.</p>
+    <div class="tw"><table><thead><tr><th>Copy</th><th>Encrypted file</th><th>SHA-256</th><th class="n">Bytes</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="note">${res.body.tables} tables, ${res.body.rows.toLocaleString()} rows captured.</div>
+    <p class="sub">Step 3 of 4 — prove both copies can be restored.</p>
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="button" data-act="dbreset-verify">Verify both backups</button>
+      <button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run</button></div>`;
+}
+async function dbResetVerify() {
+  const step = $("#dbResetStep");
+  if (!dbReset.run) return;
+  step.querySelectorAll("button").forEach(b => b.disabled = true);
+  step.querySelector(".err").textContent = "";
+  const res = await api("/api/db-reset/verify", {method: "POST",
+    body: {run_id: dbReset.run.id, token: dbReset.run.token}});
+  if (!res.ok) {
+    step.querySelector(".err").textContent = detail(res.body);
+    step.querySelectorAll("button").forEach(b => b.disabled = false);
+    return;
+  }
+  dbReset.run.token = res.body.token;
+  const checks = res.body.checks.map(c => `<tr><td>${esc(c.backup)}</td><td>${esc(c.key.replace(/_/g, " "))}</td>
+    <td><span class="chip ${c.ok ? "ok" : "bad"}">${c.ok ? "Passed" : "Failed"}</span></td>
+    <td>${esc(c.detail)}</td></tr>`).join("");
+  step.innerHTML = `
+    <p class="sub">Step 3 of 4 complete. Both copies were decrypted, restored and compared.</p>
+    <div class="tw"><table><thead><tr><th>Copy</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>${checks}</tbody></table></div>
+    <p class="sub">Step 4 of 4 — confirm with the separate reset key.</p>
+    <form id="dbResetForm4" novalidate>
+      <label>Reset key (not your password)</label>
+      <input type="password" name="reset_key" autocomplete="off">
+      <div class="note">This confirmation expires at ${esc(dbResetTime(res.body.expires_at))}
+        (${res.body.confirm_minutes} minutes after verification). After that you must take a fresh backup.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn danger" type="submit">Reset the database now</button>
+        <button class="btn ghost" type="button" data-act="dbreset-cancel">Cancel the run</button></div>
+    </form>`;
+}
+async function dbResetExecute(form) {
+  const err = $(".err", form);
+  err.textContent = "";
+  if (!dbReset.run) return;
+  const full = dbReset.run.mode === "full";
+  const question = full
+    ? "Full reset: every user, employee, document and setting is removed and only the base Administrator is recreated. Continue?"
+    : "Clear business data now? Documents, stock, payments and HR transactions are removed. This cannot be undone except from the verified backups.";
+  if (!confirm(question)) return;
+  form.querySelectorAll("button").forEach(b => b.disabled = true);
+  const res = await api("/api/db-reset/execute", {method: "POST", body: {
+    run_id: dbReset.run.id, token: dbReset.run.token, reset_key: form.elements.reset_key.value}});
+  if (!res.ok) {
+    err.textContent = detail(res.body);
+    form.querySelectorAll("button").forEach(b => b.disabled = false);
+    toast(res, "Reset not run");
+    return;
+  }
+  dbReset.loaded = false;
+  const r = res.body.result || {};
+  $("#dbResetStep").innerHTML = `
+    <p class="sub">The reset completed at ${esc(fmtStamp(res.body.completed_at))}.</p>
+    <div class="note"><b>${esc(res.body.mode === "full" ? "Full reset" : "Business data only")}</b>
+      ${res.body.mode === "full"
+        ? "— the schema was rebuilt, migrations replayed and the base Administrator recreated."
+        : `— ${r.tables_cleared || 0} tables cleared, ${(r.rows_cleared || 0).toLocaleString()} rows removed.`}</div>
+    ${res.body.sign_in_again ? `<div class="note bad">Every session has ended. Sign in again as <b>admin</b>
+      with your existing password; you will be asked to change it.</div>` : ""}
+    <div class="note">The audit trail, both backup paths and the result are stored outside the database in the reset log.</div>
+    <div class="actions"><button class="btn" type="button" data-act="close">Close</button></div>`;
+  toast(res, "Database reset completed");
+}
+async function dbResetCancel() {
+  const runId = (dbReset.run && dbReset.run.id)
+    || (dbReset.status && dbReset.status.maintenance && dbReset.status.maintenance.run_id);
+  if (!runId) { closeDrawer(); return; }
+  if (!confirm("Cancel this reset run and let the application accept writes again?")) return;
+  const res = await api("/api/db-reset/cancel", {method: "POST", body: {run_id: runId}});
+  if (!res.ok) { toast(res, "The run was not cancelled"); return; }
+  dbReset.run = null;
+  dbReset.loaded = false;
+  closeDrawer();
+  renderDbResetPanel(true);
+  toast(res, "Reset cancelled");
+}
+
+/* ---------- SMTP settings and the test composer ---------- */
+async function loadEmailSettings(force) {
+  if (!(srAllowed() && featureOn("scheduled")) || state.email.loading) return;
+  if (state.email.loaded && !force) { renderEmailSettings(); return; }
+  state.email.loading = true;
+  state.email.error = null;
+  if (!state.email.settings && $("#emBody")) $("#emBody").innerHTML = `<p class="muted">Loading email settings…</p>`;
+  const [s, m] = await Promise.all([api("/api/email-settings"),
+    api("/api/email-settings/test-messages?limit=20")]);
+  state.email.loading = false;
+  if (!s.ok) {
+    state.email.error = detail(s.body);
+    if ($("#emBody") && !$("#emailSettingsForm")) $("#emBody").innerHTML = `<p class="err">${esc(state.email.error)}</p>`;
+    return;
+  }
+  state.email.settings = s.body;
+  state.email.messages = m.ok ? m.body : [];
+  state.email.loaded = true;
+  renderEmailSettings();
+}
+
+function emailTypeLabel(key) {
+  const t = state.email.settings && state.email.settings.message_types.find(x => x.key === key);
+  return t ? t.label : key;
+}
+
+function applyEmailType(force) {
+  const cfg = state.email.settings, sel = $("#em-type");
+  if (!cfg || !sel) return;
+  const meta = cfg.message_types.find(t => t.key === sel.value);
+  if (!meta) return;
+  if (force || !$("#em-subject").value.trim()) $("#em-subject").value = meta.subject;
+  if (force || !$("#em-body").value.trim()) $("#em-body").value = meta.body;
+}
+
+function renderEmailSettings() {
+  const cfg = state.email.settings;
+  if (!cfg) return;
+  if ($("#emailSettingsForm")) { renderEmailOutbox(); return; }
+  const status = $("#emStatus");
+  if (status) status.innerHTML = [
+    `<span class="chip ${cfg.smtp_ready ? "ok" : "warn"}">${cfg.smtp_ready ? "SMTP configured" : "SMTP not configured"}</span>`,
+    `<span class="chip ${cfg.enabled ? "ok" : "off"}">${cfg.enabled ? "Sending enabled" : "Sending off"}</span>`,
+    `<span class="chip ${cfg.mode === "live" ? "warn" : "ok"}">${cfg.mode === "live" ? "Live mode" : "Test mode"}</span>`,
+    `<span class="chip ${cfg.password_set ? "ok" : "off"}">${cfg.password_set ? "Password stored" : "No password"}</span>`,
+    cfg.password_unreadable ? '<span class="chip bad">Saved password cannot be read: enter it again</span>' : ""
+  ].join(" ");
+  const typeOpts = cfg.message_types.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join("");
+  $("#emBody").innerHTML = `
+    ${cfg.stored ? "" : '<div class="note">No settings have been saved here yet, so the deployment environment is in use. Saving this form overrides it.</div>'}
+    <form id="emailSettingsForm" novalidate>
+      <div class="row2"><div><label for="em-host">SMTP host</label><input id="em-host" name="host" value="${esc(cfg.host)}" placeholder="smtp.example.com" autocomplete="off"></div>
+      <div><label for="em-port">Port</label><input id="em-port" name="port" type="number" min="1" max="65535" value="${Number(cfg.port) || 587}"></div></div>
+      <div class="row2"><div><label for="em-security">Connection security</label><select id="em-security" name="security">
+          <option value="none"${cfg.security === "none" ? " selected" : ""}>None</option>
+          <option value="starttls"${cfg.security === "starttls" ? " selected" : ""}>STARTTLS</option>
+          <option value="ssl"${cfg.security === "ssl" ? " selected" : ""}>SSL/TLS</option></select></div>
+        <div><label for="em-enabled">Sending</label><select id="em-enabled" name="enabled">
+          <option value="0"${cfg.enabled ? "" : " selected"}>Switched off</option>
+          <option value="1"${cfg.enabled ? " selected" : ""}>Enabled</option></select></div></div>
+      <div class="row2"><div><label for="em-mode">Delivery mode</label><select id="em-mode" name="mode">
+          <option value="test"${cfg.mode === "test" ? " selected" : ""}>Test mode: every message is a test</option>
+          <option value="live"${cfg.live_allowed ? "" : " disabled"}${cfg.mode === "live" ? " selected" : ""}>Live mode (deployment approval required)</option></select></div><div></div></div>
+      <label for="em-user">SMTP username</label><input id="em-user" name="username" value="${esc(cfg.username)}" autocomplete="off">
+      <label for="em-pass">SMTP password</label><input id="em-pass" name="password" type="password" autocomplete="new-password"
+        placeholder="${cfg.password_set ? "Stored: leave blank to keep it" : "Not set"}">
+      <p class="sub" style="margin:6px 0 0">The password is stored encrypted and never shown again.
+        <label style="display:inline;margin:0"><input id="em-clear" type="checkbox" style="width:auto;margin:0 4px 0 8px">Remove the saved password</label></p>
+      <div class="row2"><div><label for="em-from">From address</label><input id="em-from" name="from_address" type="email" value="${esc(cfg.from_address)}" placeholder="reports@example.com"></div>
+        <div><label for="em-reply">Reply-To</label><input id="em-reply" name="reply_to" type="email" value="${esc(cfg.reply_to)}" placeholder="Optional"></div></div>
+      <div class="row2"><div><label for="em-test-to">Default test To</label><input id="em-test-to" name="test_to" value="${esc(cfg.test_to)}" placeholder="Administrator address"></div>
+        <div><label for="em-test-cc">Default test CC</label><input id="em-test-cc" name="test_cc" value="${esc(cfg.test_cc)}" placeholder="Optional"></div></div>
+      <div class="note">Messages are always test messages: the subject carries [TEST], and only the addresses above are used.
+        Live delivery also needs the deployment to be approved for it; until then the server keeps test mode.
+        ${cfg.live_allowed ? "" : "Live mode is not approved for this deployment."}</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save SMTP settings</button>
+        <button class="btn ghost" type="button" data-act="email-reload">Reload</button></div>
+    </form>
+    <h3 style="margin-top:22px">Send a test email</h3>
+    <form id="emailTestForm" novalidate>
+      <div class="row2"><div><label for="em-type">Message type</label><select id="em-type" name="message_type">${typeOpts}</select></div>
+        <div><label for="em-deliver">What happens</label><select id="em-deliver" name="deliver">
+          <option value="0">Dry run: save only, no SMTP</option>
+          <option value="1">Deliver through SMTP</option></select></div></div>
+      <div class="row2"><div><label for="em-to">To</label><input id="em-to" name="to" value="${esc(cfg.test_to || cfg.suggested_to)}" placeholder="name@example.com"></div>
+        <div><label for="em-cc">CC</label><input id="em-cc" name="cc" value="${esc(cfg.test_cc)}" placeholder="Optional"></div></div>
+      <label for="em-subject">Subject</label><input id="em-subject" name="subject" maxlength="250" autocomplete="off">
+      <label for="em-body">Message body</label><textarea id="em-body" name="body" rows="5"></textarea>
+      <div class="note">A dry run stores the exact message below and opens no connection. Switching to “Deliver” uses the saved SMTP settings.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Send test email</button></div>
+    </form>
+    <h3 style="margin-top:22px">Recent test messages</h3>
+    <div class="tw"><table>
+      <thead><tr><th>When</th><th>Type</th><th>To</th><th>Subject</th><th>How</th><th>Status</th><th>Error</th></tr></thead>
+      <tbody id="emOutRows"></tbody>
+    </table></div>
+    <div class="empty hide" id="emOutEmpty"></div>`;
+  applyEmailType(false);
+  renderEmailOutbox();
+}
+
+function renderEmailOutbox() {
+  const body = $("#emOutRows");
+  if (!body) return;
+  body.innerHTML = state.email.messages.map(m => `<tr>
+    <td>${esc(fmtStamp(m.created_at))}</td><td>${esc(emailTypeLabel(m.message_type))}</td>
+    <td>${esc(m.to)}${m.cc ? `<small>CC ${esc(m.cc)}</small>` : ""}</td>
+    <td>${esc(m.subject)}</td><td>${m.mode === "smtp" ? "SMTP" : "Dry run"}</td>
+    <td><span class="chip ${m.status === "sent" ? "ok" : m.status === "captured" ? "warn" : "bad"}">${esc(m.status)}</span></td>
+    <td>${m.error ? esc(m.error) : "–"}</td></tr>`).join("");
+  empty($("#emOutEmpty"), !state.email.messages.length, "No test email has been sent yet.", "");
+}
+
+async function saveEmailSettings(f) {
+  const err = $(".err", f), btn = $("button[type=submit]", f);
+  err.textContent = "";
+  btn.disabled = true;
+  const res = await api("/api/email-settings", {method: "PUT", body: {
+    enabled: $("#em-enabled").value === "1", mode: $("#em-mode") ? $("#em-mode").value : "test",
+    host: $("#em-host").value.trim(), port: Number($("#em-port").value) || 0,
+    security: $("#em-security").value, username: $("#em-user").value.trim(),
+    password: $("#em-pass").value || null, clear_password: $("#em-clear").checked,
+    from_address: $("#em-from").value.trim(), reply_to: $("#em-reply").value.trim(),
+    test_to: $("#em-test-to").value.trim(), test_cc: $("#em-test-cc").value.trim()}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  state.email.settings = res.body;
+  $("#emBody").innerHTML = "";
+  renderEmailSettings();
+  toast(res, "SMTP settings saved");
+}
+
+async function sendEmailTest(f) {
+  const err = $(".err", f), btn = $("button[type=submit]", f);
+  err.textContent = "";
+  btn.disabled = true;
+  const res = await api("/api/email-settings/test", {method: "POST", body: {
+    message_type: $("#em-type").value, to: $("#em-to").value.trim(),
+    cc: $("#em-cc").value.trim(), subject: $("#em-subject").value.trim(),
+    body: $("#em-body").value, deliver: $("#em-deliver").value === "1"}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  const made = res.body;
+  state.email.messages = [made, ...state.email.messages].slice(0, 20);
+  renderEmailOutbox();
+  toast(res, made.status === "sent" ? "Test email sent"
+    : made.status === "captured" ? "Dry run saved; no email was sent"
+    : `Not sent: ${made.error || "SMTP refused the message"}`);
 }
 
 function renderProducts() {
@@ -1105,10 +5213,30 @@ function renderLedger() {
     rows.length ? "" : " Every stock change is recorded here, with who made it and why.");
 }
 
+function warehouseCapacityNote(id) {
+  const w = state.warehouses.find(x => String(x.id) === String(id));
+  if (!w) return "";
+  if (w.capacity_units === null || w.capacity_units === undefined)
+    return "Capacity has not been set for this warehouse (GAP-D03), so the fill level cannot be checked.";
+  const free = Number(w.free_units);
+  const space = free < 0 ? `${qty(-free)} units over capacity` : `${qty(free)} units free`;
+  return `${qty(w.used_units)} of ${qty(w.capacity_units)} units used; ${space}. A receipt beyond the free space is blocked unless an Administrator overrides it.`;
+}
+
 function renderWarehouses() {
+  const CAP_STATE = {ok: ["Within capacity", "ok"], high: ["Above 80%", "warn"],
+                     over: ["Over capacity", "bad"], full: ["Full", "warn"]};
   const rows = state.warehouses.map(w => {
-    const bs = state.batches.filter(b => b.warehouse_id === w.id && Number(b.on_hand) > 0);
-    return `<tr><td class="strong">${esc(w.name)}</td><td class="n">${bs.length}</td><td class="n">${esc(qty(bs.reduce((s, b) => s + Number(b.on_hand), 0)))}</td></tr>`;
+    const used = Number(w.used_units ?? 0);
+    const hasCap = w.capacity_units !== null && w.capacity_units !== undefined;
+    const st = hasCap ? (CAP_STATE[w.capacity_state] || [w.capacity_state, "off"]) : ["Not set", "off"];
+    const pct = hasCap ? `<span class="strong">${Number(w.utilisation_pct).toFixed(1)}%</span>` : `<span class="muted">No data yet</span>`;
+    return `<tr><td class="strong">${esc(w.name)}${w.capacity_note ? `<small>${esc(w.capacity_note)}</small>` : ""}</td>
+      <td class="n">${Number(w.batches ?? 0)}</td><td class="n">${esc(qty(used))}</td>
+      <td class="n">${hasCap ? esc(qty(w.capacity_units)) : `<span class="muted">Not set</span>`}</td>
+      <td class="n">${hasCap ? esc(qty(w.free_units)) : `<span class="muted">—</span>`}</td>
+      <td class="n">${pct} <span class="chip ${st[1]}">${esc(st[0])}</span></td>
+      <td class="n">${can("stock:write") ? `<button class="btn ghost sm" type="button" data-act="edit-capacity" data-id="${w.id}">Edit capacity</button>` : ""}</td></tr>`;
   });
   $("#wrows").innerHTML = rows.join("");
   empty($("#wempty"), !rows.length, "No warehouses yet.", can("stock:write") ? " Select “New warehouse” to add the first one." : "");
@@ -1293,16 +5421,62 @@ function warehouseForm() {
   openDrawer("New warehouse", "Goods are received into a warehouse, so add one before the first receipt.", `
     <form id="whForm" novalidate>
       <label for="f-wh">Warehouse name</label><input id="f-wh" name="name" placeholder="Main store" autocomplete="off">
+      <div class="row2">
+        <div><label for="f-wh-cap">Capacity in units (optional)</label><input id="f-wh-cap" name="capacity_units" inputmode="numeric" placeholder="Leave blank if not measured" autocomplete="off"></div>
+        <div><label for="f-wh-note">Capacity note (optional)</label><input id="f-wh-note" name="capacity_note" maxlength="40" placeholder="e.g. rack space" autocomplete="off"></div>
+      </div>
+      <p class="note">Blank capacity means it has not been measured; it never means zero.</p>
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">Save warehouse</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`);
 }
+function capacityInput(form, name) {
+  const raw = form.elements[name].value.trim();
+  if (!raw) return {ok: true, value: null};
+  if (!/^\d+$/.test(raw)) return {ok: false, error: "Capacity must be a whole number of units."};
+  return {ok: true, value: Number(raw)};
+}
 async function saveWarehouse(form) {
   const err = $(".err", form), btn = $("button[type=submit]", form);
   err.textContent = ""; btn.disabled = true;
-  const res = await api("/api/warehouses", {method: "POST", body: {name: new FormData(form).get("name")}});
+  const cap = capacityInput(form, "capacity_units");
+  if (!cap.ok) { err.textContent = cap.error; btn.disabled = false; form.elements.capacity_units.focus(); return; }
+  const body = {name: form.elements.name.value.trim(), capacity_units: cap.value,
+                capacity_note: form.elements.capacity_note.value.trim() || null};
+  const res = await api("/api/warehouses", {method: "POST", body});
   btn.disabled = false;
   toast(res, res.ok ? "Warehouse saved" : "Warehouse not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); loadAll();
+}
+function capacityForm(id) {
+  const w = state.warehouses.find(x => Number(x.id) === Number(id));
+  if (!w) return;
+  const hasCap = w.capacity_units !== null && w.capacity_units !== undefined;
+  openDrawer("Warehouse capacity", w.name, `
+    <p class="note">${hasCap
+      ? `${esc(qty(w.used_units))} units are on hand, ${esc(qty(w.free_units))} free of ${esc(qty(w.capacity_units))}.`
+      : `${esc(qty(w.used_units))} units are on hand. Capacity has not been set for this warehouse.`}</p>
+    <form id="capForm" data-id="${w.id}" novalidate>
+      <div class="row2">
+        <div><label for="c-units">Capacity in units</label><input id="c-units" name="capacity_units" inputmode="numeric" value="${hasCap ? w.capacity_units : ""}" placeholder="Leave blank to clear" autocomplete="off"></div>
+        <div><label for="c-note">Capacity note (optional)</label><input id="c-note" name="capacity_note" maxlength="40" value="${esc(w.capacity_note || "")}" placeholder="e.g. rack space" autocomplete="off"></div>
+      </div>
+      <p class="note">Clearing the capacity records that it is not known; it never means zero.</p>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save capacity</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+async function saveCapacity(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = ""; btn.disabled = true;
+  const cap = capacityInput(form, "capacity_units");
+  if (!cap.ok) { err.textContent = cap.error; btn.disabled = false; form.elements.capacity_units.focus(); return; }
+  const res = await api(`/api/warehouses/${Number(form.dataset.id)}/capacity`, {
+    method: "PUT", body: {capacity_units: cap.value,
+                          capacity_note: form.elements.capacity_note.value.trim() || null}});
+  btn.disabled = false;
+  toast(res, res.ok ? "Capacity saved" : "Capacity not saved");
   if (!res.ok) { err.textContent = detail(res.body); return; }
   closeDrawer(); loadAll();
 }
@@ -1411,7 +5585,9 @@ function poDetail(id, result) {
       <div class="note">Enter what actually arrived in this delivery. The order stays open until every line is received in full, and each receipt posts its own stock-ledger movements.</div>
       <form id="rcvForm" data-po="${po.id}" novalidate>
         <label for="r-wh">Warehouse</label>
-        <select id="r-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join("")}</select>
+        <select id="r-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}${w.capacity_units != null ? ` — ${esc(qty(w.used_units))} of ${esc(qty(w.capacity_units))} units` : " — capacity not set"}</option>`).join("")}</select>
+        <p class="note" id="rWhNote">${warehouseCapacityNote(state.warehouses.length === 1 ? state.warehouses[0].id : "")}</p>
+        <div class="hide" id="rOverBox"><label class="check"><input type="checkbox" name="allow_over_capacity"> Receive over capacity (Administrator only; recorded in the audit log)</label></div>
         <div class="row2"><div><label for="r-dn">Supplier delivery-note number</label><input id="r-dn" name="delivery_note" placeholder="Optional, blocks a repeat" autocomplete="off"></div>
         <div><label for="r-own">Who owns the stock</label><select id="r-own" name="owner"><option value="HERBANOVA">HERBANOVA</option><option value="MANUFACTURER">Manufacturer</option></select></div></div>
         <div class="rcv">${po.lines.map((l, i) => { const rest = Math.max(Number(l.qty) - Number(l.received_qty || 0), 0);
@@ -1452,6 +5628,8 @@ async function postReceipt(form) {
   }
   if (!lines.length) { err.textContent = "Enter a received quantity for at least one line."; return; }
   const body = {warehouse_id: Number(wh), lines, owner: form.elements.owner.value};
+  if (form.elements.allow_over_capacity && form.elements.allow_over_capacity.checked)
+    body.allow_over_capacity = true;
   const dn = form.elements.delivery_note.value.trim();
   if (dn) body.delivery_note = dn;
   const id = Number(form.dataset.po);
@@ -1459,7 +5637,17 @@ async function postReceipt(form) {
   const res = await api(`/api/purchase-orders/${id}/receive`, {method: "POST", body});
   btn.disabled = false;
   toast(res, res.ok ? `Receipt ${res.body.grn_number} posted` : "Receipt not posted");
-  if (!res.ok) { err.textContent = detail(res.body); return; }
+  if (!res.ok) {
+    const msg = detail(res.body);
+    err.textContent = msg;
+    // Only the server decides who may override; the control is merely revealed
+    // after the block so an Administrator can choose to record the overage.
+    if (res.status === 409 && /capacity/i.test(msg)) {
+      const box = $("#rOverBox", form);
+      if (box) box.classList.remove("hide");
+    }
+    return;
+  }
   await loadAll();
   poDetail(id, res.body);
 }
@@ -1521,9 +5709,9 @@ function renderApprovals() {
 }
 
 // One status vocabulary, shared with the API (COR-001). An unknown value must
-// never throw: renderDists runs before renderLeads and renderUsers, so a single
-// bad chip would blank every section after it. Every value the API can store is
-// listed here, so the form can offer them and the chip can name them.
+// never throw: one bad chip in the party master would blank every section
+// rendered after it. Every value the API can store is listed here, so the form
+// can offer them and the chip can name them.
 const DSTAT = {
   active: ["ok", "Active"],
   blocked: ["bad", "Blocked"],
@@ -1541,40 +5729,6 @@ function distChip(status) {
 function distGaps(d) {
   const gaps = (d.completion_missing || []).map(k => DSTAT_MISSING[k] || k);
   return gaps.length ? gaps.join(", ") : "none";
-}
-
-function renderDists() {
-  const filter = state.distFilter;
-  const showed = state.dists.filter(d => {
-    if (filter === "incomplete") return !!d.needs_completion;
-    if (DIST_STATUSES.includes(filter)) return d.status === filter;
-    return true;
-  });
-  $("#drows").innerHTML = showed.map(d => {
-    const lim = Number(d.credit_limit), use = Number(d.exposure);
-    const pct = lim > 0 ? Math.min(100, use / lim * 100) : (use > 0 ? 100 : 0);
-    const actions = [
-      can("distributor:write") ? `<button class="btn ghost sm" type="button" data-act="edit-dist" data-id="${d.id}">Edit</button>` : "",
-      can("credit:manage") ? `<button class="btn ghost sm" type="button" data-act="change-limit" data-id="${d.id}">Change limit</button>` : ""
-    ].join(" ");
-    return `<tr><td class="strong">${esc(d.code)}</td>
-      <td>${esc(d.name)}${d.needs_completion ? ` <span class="chip warn">Needs completion</span>` : ""}<small>${esc(d.territory)}</small></td>
-      <td class="n">${money(lim)}</td>
-      <td class="n">${money(use)}<div class="meter use"><i style="width:${pct.toFixed(0)}%"></i></div></td>
-      <td class="n">${money(d.available)}</td>
-      <td>${distChip(d.status)}</td>
-      <td>${actions}</td></tr>`;
-  }).join("");
-  const messages = {
-    incomplete: ["Every distributor has the details a tax document needs.", ""],
-    active: ["No active distributor matches.", " Select “All” to see the blocked ones."],
-    blocked: ["No distributor is blocked.", " Select “Active” to see the ones that are trading."],
-    draft: ["No distributor is still a draft.", " A draft record is kept out of new orders until it is made Active."],
-    "pending verification": ["Nothing is awaiting verification.", " A record in this state is kept out of new orders until it is made Active."],
-    inactive: ["No distributor is inactive.", " An inactive record is kept out of new orders until it is made Active."]
-  };
-  const [title, hint] = messages[filter] || ["No distributors yet.", can("distributor:write") ? " Select “New distributor” to add the first one." : ""];
-  empty($("#dempty"), !showed.length, title, hint);
 }
 
 /* --- new sales order --- */
@@ -1652,8 +5806,13 @@ function soDetail(id, result, err) {
   let foot = "";
   if (err) foot += `<div class="err" role="alert">${esc(err)}</div>`;
   if (result) {
+    const src = result.source_warehouse;
+    const space = src
+      ? `<p class="muted">${esc(src.name)} now holds ${esc(qty(src.used_units))} units${src.capacity_units != null
+          ? ` of ${esc(qty(src.capacity_units))} (${Number(src.utilisation_pct).toFixed(1)}%)` : ""}.</p>`
+      : "";
     foot += `<div class="done"><b>Dispatched. Stock has been issued, earliest expiry first.</b><ul>${result.allocations.map(x =>
-      `<li>${esc(qty(x.qty))} of ${esc(x.sku)} from batch ${esc(x.batch_no)}${x.expiry ? `, expires ${esc(fmtDate(x.expiry))}` : ""}.</li>`).join("")}</ul></div>
+      `<li>${esc(qty(x.qty))} of ${esc(x.sku)} from batch ${esc(x.batch_no)}${x.expiry ? `, expires ${esc(fmtDate(x.expiry))}` : ""}.</li>`).join("")}</ul>${space}</div>
       <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`;
   } else if (o.status === "draft") {
     foot += can("sales:write")
@@ -1669,7 +5828,7 @@ function soDetail(id, result, err) {
         <div class="note">Check the discount slab and the GST shown above first: they are what the invoice will charge. Stock is taken from the chosen warehouse, earliest expiry first. Credit and stock are checked again now. An order is dispatched once.</div>
         <form id="dispForm" data-id="${o.id}" novalidate>
           <label for="d-wh">Warehouse</label>
-          <select id="d-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join("")}</select>
+          <select id="d-wh" name="warehouse">${state.warehouses.length > 1 ? `<option value="">Select a warehouse</option>` : ""}${state.warehouses.map(w => `<option value="${w.id}">${esc(w.name)}${w.capacity_units != null ? ` — ${esc(qty(w.used_units))} of ${esc(qty(w.capacity_units))} units` : ""}</option>`).join("")}</select>
           <div class="err" role="alert"></div>
           <div class="actions"><button class="btn" type="submit">Dispatch goods</button><button class="btn ghost" type="button" data-act="close">Close</button></div></form>`
         : `<div class="note">Add a warehouse before dispatching.</div>`;
@@ -1832,13 +5991,14 @@ function invDetail(id, err, notice) {
         <div class="note">Only non-financial fields can be amended. Amounts and tax are corrected with a credit or debit note.</div>
         <div class="err" role="alert"></div>
         <div class="actions"><button class="btn ghost" type="submit">Save amendment</button></div></form>`;
-    else foot += `<div class="note">After billing, only an Administrator can amend an issued invoice. You may request a non-financial change; an Administrator must approve it.</div>
+    else if (can("invoice:write")) foot += `<div class="note">After billing, only an Administrator can amend an issued invoice. You may request a non-financial change; an Administrator must approve it.</div>
       <form id="amendReqForm" data-id="${inv.id}" novalidate><h3>Request a post-billing change</h3>
         <div class="row2"><div><label for="ar-dc">Delivery challan</label><input id="ar-dc" name="challan" value="${esc(inv.delivery_challan_number || "")}"></div>
         <div><label for="ar-veh">Vehicle</label><input id="ar-veh" name="vehicle" value="${esc(inv.vehicle_number || "")}"></div></div>
         <label for="ar-r">Reason</label><input id="ar-r" name="reason" placeholder="Why is the change needed?" autocomplete="off">
         <div class="err" role="alert"></div>
         <div class="actions"><button class="btn ghost" type="submit">Send for Administrator approval</button></div></form>`;
+    else foot += `<div class="note">After billing, only an Administrator can amend an issued invoice.</div>`;
     if (can("note:write")) foot += noteForm("cn", "Credit note") + noteForm("dn", "Debit note");
     if (can("invoice:cancel")) foot += `<form id="invCancelForm" data-id="${inv.id}" novalidate><h3>Cancel the invoice</h3>
         <div class="note">Cancelling keeps the document and its number, marked CANCELLED. It cannot be undone.</div>
@@ -1965,12 +6125,10 @@ function apDetail(id, err) {
   if (err) foot += `<div class="err" role="alert">${esc(err)}</div>`;
   if (a.status !== "pending") {
     foot += `<div class="note">${esc((AP[a.status] || [a.status])[0])}${a.decided_by ? ` by ${esc(a.decided_by)} on ${esc(fmtStamp(a.decided_at))}` : ""}.${a.decision_reason ? ` Reason: ${esc(a.decision_reason)}` : ""}</div>`;
-  } else if (!a.can_decide || (a.request_type === "sales_order" && !can("approval:decide"))) {
-    foot += `<div class="note">Your role can view this request but not decide it.${a.reasons.includes("credit_limit") ? " Only an Administrator can decide an over-credit-limit request." : ""}</div>`;
-  } else if (a.reasons.includes("credit_limit") && !can("approval:credit_limit")) {
-    foot += `<div class="note">Only an Administrator can decide a request that exceeds the credit limit.</div>`;
   } else if (mine) {
     foot += `<div class="note">You raised this request, so a different approver must decide it.</div>`;
+  } else if (!a.can_decide) {
+    foot += `<div class="note">Your role can view this request but not decide it.${a.reasons.includes("credit_limit") ? " Only an Administrator can decide an over-credit-limit request." : ""}</div>`;
   } else {
     foot += `<form id="decideForm" data-id="${a.id}" novalidate><h3>Your decision</h3>
       <label for="a-r">Reason</label><input id="a-r" name="reason" placeholder="Record why you are approving or rejecting" autocomplete="off">
@@ -2460,6 +6618,18 @@ function renderUsers() {
     <td class="rowacts"><button class="btn ghost sm" type="button" data-act="edit-role" data-id="${r.id}">Edit permissions</button></td></tr>`).join("");
   empty($("#rempty"), !state.roles.length, "No roles are visible.", "");
 
+  if ($("#frows")) {
+    $("#frows").innerHTML = state.featureFlags.map(f => `<tr>
+      <td><span class="strong">${esc(f.label)}</span><small>${esc(f.description)}</small></td>
+      <td>${f.permissions.map(p => `<code>${esc(p)}</code>`).join(" ")}</td>
+      <td><span class="chip ${f.enabled ? "ok" : "off"}">${f.enabled ? "Available" : "Switched off"}</span></td>
+      <td class="rowacts">${f.locked ? '<span class="muted">Always on</span>'
+        : `<button class="btn ghost sm" type="button" data-act="toggle-feature" data-key="${esc(f.key)}" data-enabled="${f.enabled}">${f.enabled ? "Switch off" : "Switch on"}</button>`}</td></tr>`).join("");
+    empty($("#fempty"), !state.featureFlags.length,
+      "Only the Administrator role can read or change module switches.", "");
+  }
+  renderAccessRules();
+
   $("#erows").innerHTML = state.employees.map(e => `<tr>
     <td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
     <td>${esc(e.designation || "–")}</td><td>${esc(e.department || "–")}</td>
@@ -2469,6 +6639,22 @@ function renderUsers() {
   empty($("#eempty"), !state.employees.length, "No employees yet.", can("employee:write") ? " Select “New employee” to add the first one." : "");
 }
 
+function renderAccessRules() {
+  const rows = $("#acrows");
+  if (!rows) return;
+  rows.innerHTML = state.permCatalog.map(g => {
+    const parents = g.items.filter(i => !i.parent);
+    const children = g.items.filter(i => i.parent);
+    const key = i => `<code>${esc(i.key)}</code>${i.admin_only ? ' <span class="chip warn">Admin only</span>' : ""}`;
+    const parentCell = parents.map(key).join("<br>") || "–";
+    const childCell = children.map(i => `${key(i)} <span class="muted">needs ${esc(i.parent)}</span>`).join("<br>") || "–";
+    const locked = g.items.filter(i => i.admin_only).map(i => `<code>${esc(i.key)}</code>`).join(" ") || "–";
+    return `<tr><td class="strong">${esc(g.module)}</td><td>${parentCell}</td><td>${childCell}</td><td>${locked}</td></tr>`;
+  }).join("");
+  empty($("#acempty"), !state.permCatalog.length,
+    "The permission catalogue is available to a role holding user:manage.", "");
+}
+
 function showSecret(title, sub, username, password) {
   openDrawer(title, sub, `<div class="note"><b>Username:</b> ${esc(username)}<br><b>Temporary password:</b> <code>${esc(password)}</code></div>
     <p class="sub">It is stored only as a hash and cannot be shown again. A reset issues a new one and ends every open session.</p>
@@ -2476,21 +6662,58 @@ function showSecret(title, sub, username, password) {
 }
 
 function userForm() {
-  const unlinked = state.employees.filter(e => !e.user_id);
+  const active = state.employees.filter(e => !e.user_id && e.status === "active");
   openDrawer("New user", "A temporary password is generated and shown once. The user must change it at first sign-in.", `
     <form id="userForm" novalidate>
-      <label for="nu-name">Username</label><input id="nu-name" name="username" autocomplete="off" placeholder="e.g. priya.sales">
+      <label for="nu-emp">Employee (active, no login)</label>
+      <select id="nu-emp" name="employee_id">
+        <option value="">— Not linked —</option>
+        ${active.map(e => `<option value="${e.id}">${esc(e.code)} – ${esc(e.full_name)}</option>`).join("")}
+      </select>
+      <label for="nu-name">Username</label>
+      <select id="nu-name" name="username" disabled><option value="">Choose an employee first</option></select>
+      <input id="nu-name-manual" name="username_manual" autocomplete="off" placeholder="e.g. priya.sales" class="hide">
       <label for="nu-role">Role</label><select id="nu-role" name="role">${state.roles.map(r => `<option value="${r.id}">${esc(r.display_name)} (${esc(r.name)})</option>`).join("")}</select>
-      <label for="nu-emp">Employee (optional)</label><select id="nu-emp" name="employee_id"><option value="">Not linked</option>${unlinked.map(e => `<option value="${e.id}">${esc(e.code)} – ${esc(e.full_name)}</option>`).join("")}</select>
-      <div class="note">Usernames are matched case-insensitively. A password needs 12+ characters and three of: lowercase, uppercase, digits, symbols.</div>
+      <div class="note">Usernames are matched case-insensitively. A password needs 12+ characters and three of: lowercase, uppercase, digits, symbols. Only active employees without a login are listed; choose “Not linked” to type a username.</div>
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">Create user</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`);
+  const emp = $("#nu-emp"), name = $("#nu-name"), manual = $("#nu-name-manual");
+  const slug = s => (s || "").toLowerCase().replace(/[^a-z0-9._-]+/g, ".").replace(/^[._-]+|[._-]+$/g, "");
+  const taken = new Set(state.users.map(u => u.username.toLowerCase()));
+  const candidates = e => [...new Set([
+    e.email ? slug(e.email.split("@")[0]) : "",
+    slug(e.code),
+    slug(e.full_name)
+  ].filter(u => u.length >= 3 && !taken.has(u)))].slice(0, 4);
+  const sync = () => {
+    const e = active.find(x => x.id === Number(emp.value));
+    const opts = e ? candidates(e) : [];
+    if (!opts.length) {
+      name.disabled = true;
+      name.innerHTML = `<option value="">Type a username below</option>`;
+      manual.classList.remove("hide"); manual.disabled = false;
+      return;
+    }
+    name.disabled = false;
+    name.innerHTML = opts.map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join("");
+    manual.classList.add("hide"); manual.disabled = true; manual.value = "";
+  };
+  emp.addEventListener("change", sync);
+  sync();
 }
 async function saveUser(form) {
-  const f = new FormData(form), err = $(".err", form), btn = $("button[type=submit]", form);
+  const err = $(".err", form), btn = $("button[type=submit]", form);
   err.textContent = ""; btn.disabled = true;
-  const res = await api("/api/users", {method: "POST", body: {username: f.get("username"), role: f.get("role"), employee_id: f.get("employee_id") || null}});
+  const sel = form.elements.username, manual = form.elements.username_manual;
+  const username = (!sel.disabled && sel.value ? sel.value : manual.value).trim();
+  const employee_id = form.elements.employee_id.value || null;
+  if (!username) {
+    btn.disabled = false;
+    err.textContent = "Choose an employee or type a username.";
+    return;
+  }
+  const res = await api("/api/users", {method: "POST", body: {username, role: form.elements.role.value, employee_id}});
   btn.disabled = false;
   if (!res.ok) { err.textContent = detail(res.body); return; }
   toast(res, "User created");
@@ -2537,11 +6760,39 @@ async function toggleUser(id, active) {
   if (res.ok) loadAll();
 }
 
+const PERM_ITEMS = () => state.permCatalog.flatMap(g => g.items);
+const PERM_CHILDREN = () => {
+  const map = {};
+  PERM_ITEMS().forEach(i => { if (i.parent) (map[i.parent] = map[i.parent] || []).push(i.key); });
+  return map;
+};
+
 function roleForm(roleId) {
   const role = roleId ? state.roles.find(r => r.id === Number(roleId)) : null;
-  const matrix = state.permCatalog.map(g => `<div class="permgroup"><b>${esc(g.module)}</b>${g.items.map(i =>
-    `<label class="check"><input type="checkbox" name="perm" value="${esc(i.key)}" ${role && role.permissions.includes(i.key) ? "checked" : ""}> <span>${esc(i.key)}<small>${esc(i.description)}</small></span></label>`).join("")}</div>`).join("");
-  openDrawer(role ? `Edit role: ${role.name}` : "New role", role ? "Built-in roles keep their name; permissions can be adjusted. The last active administrator cannot lose user:manage." : "Custom roles are enforced by the server exactly like the built-in ones.", `
+  const isAdminRole = !!role && (role.name || "").toLowerCase() === "admin";
+  const stored = new Set(role ? role.permissions : []);
+  const children = PERM_CHILDREN();
+  // A child is offered only when its parent is already held. It is never
+  // checked by the parent: the Administrator chooses each child explicitly.
+  const usable = i => !i.parent || stored.has(i.parent);
+  const matrix = state.permCatalog.map(g => {
+    const items = [...g.items].sort((a, b) =>
+      (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || a.key.localeCompare(b.key));
+    return `<div class="permgroup"><b>${esc(g.module)}</b>${items.map(i => {
+      const lockedAdmin = i.admin_only && !isAdminRole;
+      const checked = stored.has(i.key) && usable(i) && !lockedAdmin;
+      const disabled = (i.parent && !stored.has(i.parent)) || lockedAdmin;
+      const note = lockedAdmin ? "Administrator only"
+        : (i.parent ? `Needs ${i.parent}` : `Controls ${(children[i.key] || []).length || "no"} child permission${(children[i.key] || []).length === 1 ? "" : "s"}`);
+      return `<label class="check${i.parent ? " child" : ""}"${lockedAdmin ? ' title="Only the Administrator role can hold this permission"' : ""}>
+        <input type="checkbox" name="perm" value="${esc(i.key)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}
+          data-perm="${esc(i.key)}"${lockedAdmin ? ' data-locked="1"' : ""}${i.parent ? ` data-parent="${esc(i.parent)}"` : ""}
+          ${!i.parent ? `data-controls="${esc((children[i.key] || []).join(","))}"` : ""}>
+        <span>${esc(i.key)}<small>${esc(i.description)} · ${esc(note)}</small></span></label>`;
+    }).join("")}</div>`;
+  }).join("");
+  openDrawer(role ? `Edit role: ${role.name}` : "New role",
+    "Parent checked: its children become selectable. Children are granted only when you tick them. Unchecking a parent removes its children. Administrator-only rights stay with the Administrator.", `
     <form id="roleForm" data-id="${role ? role.id : ""}" novalidate>
       ${role ? "" : `<label for="nr-name">Role name</label><input id="nr-name" name="name" autocomplete="off" placeholder="e.g. accounts">`}
       <label for="nr-label">Display name</label><input id="nr-label" name="display_name" autocomplete="off" value="${role ? esc(role.display_name) : ""}" placeholder="e.g. Accounts">
@@ -2550,6 +6801,30 @@ function roleForm(roleId) {
       <div class="actions"><button class="btn" type="submit">${role ? "Save permissions" : "Create role"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`, true);
 }
+
+function syncPermissionTree(form) {
+  $$('input[name="perm"][data-parent]', form).forEach(child => {
+    if (child.dataset.locked) return;
+    const parent = $('input[name="perm"][data-perm="' + CSS.escape(child.dataset.parent) + '"]', form);
+    const on = !!(parent && parent.checked);
+    if (!on) child.checked = false;
+    child.disabled = !on;
+  });
+}
+async function toggleFeature(key, enabled) {
+  const next = enabled !== "true";
+  const row = state.featureFlags.find(f => f.key === key);
+  if (!next && !confirm(`Switch off “${row ? row.label : key}”? Every role loses access to it until it is switched back on.`)) return;
+  const res = await api(`/api/features/${encodeURIComponent(key)}`, {method: "PATCH",
+    body: {enabled: next}});
+  toast(res, res.ok ? (next ? "Module switched on" : "Module switched off") : "Module not changed");
+  if (!res.ok) return;
+  // The switch changes this session's own effective permissions, so re-enter
+  // with a fresh identity rather than patching the browser's copy.
+  const me = await api("/api/auth/me");
+  if (me.ok) enter(me.body); else loadAll();
+}
+
 async function saveRole(form) {
   const perms = $$('input[name="perm"]:checked', form).map(x => x.value);
   const f = new FormData(form);
@@ -2562,34 +6837,89 @@ async function saveRole(form) {
   if (res.ok) { closeDrawer(); loadAll(); } else $(".err", form).textContent = detail(res.body);
 }
 
-function employeeForm(empId) {
-  const e = empId ? state.employees.find(x => x.id === Number(empId)) : null;
-  openDrawer(e ? `Employee ${e.code}` : "New employee", "Employees are deactivated, never deleted. Link a login from the Users section above.", `
+async function employeeForm(empId) {
+  const rich = can("hr:write");
+  let e = empId ? state.employees.find(x => x.id === Number(empId)) : null;
+  if (empId && can("hr:read")) {
+    // The settings list omits the HR master fields; read the full record so the
+    // same form edits it identically from either entry point.
+    const full = await api(`/api/hr/employees/${empId}`);
+    if (full.ok) e = full.body;
+  }
+  const [b, o, s, prof] = rich
+    ? await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts"),
+        empId ? api(`/api/hr/employees/${empId}/profile`) : Promise.resolve(null)])
+    : [null, null, null, null];
+  const opts = (res, sel, label) => (res && res.ok ? res.body : [])
+    .map(v => `<option value="${v.id}"${sel === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+  const req = prof && prof.ok ? prof.body.attendance_requirement : null;
+  const policy = req
+    ? `<div class="note" id="ne-policy">Attendance policy: ${req.required ? "required" : "not required"} · self check-in ${req.self_service ? "on" : "off"}${req.attendance_mode ? ` · ${req.attendance_mode} mode` : ""} · ${esc(req.source)}.</div>`
+    : `<div class="note" id="ne-policy">Attendance is required by default. The rule that applies (branch, office, designation or employee) is shown here after the employee is saved.</div>`;
+  const hrFields = rich ? `
+      <div class="row2"><div><label for="ne-join">Joining date</label><input id="ne-join" name="joining_date" type="date" value="${e && e.joining_date ? e.joining_date : ""}"></div>
+      <div><label for="ne-type">Employment type</label><input id="ne-type" name="employment_type" autocomplete="off" value="${e && e.employment_type ? esc(e.employment_type) : ""}" placeholder="Full time / Contract"></div></div>
+      <div class="row2"><div><label for="ne-branch">Branch</label><select id="ne-branch" name="branch_id"><option value="">—</option>${opts(b, e ? e.branch_id : null, v => v.name)}</select></div>
+      <div><label for="ne-office">Office / work location</label><select id="ne-office" name="office_id"><option value="">—</option>${(o && o.ok ? o.body : []).map(v => `<option value="${v.id}" data-branch="${v.branch_id == null ? "" : v.branch_id}"${e && e.office_id === v.id ? " selected" : ""}>${esc(v.name)}</option>`).join("")}</select></div></div>
+      ${policy}
+      <div class="row2"><div><label for="ne-shift">Shift</label><select id="ne-shift" name="shift_id"><option value="">—</option>${opts(s, e ? e.shift_id : null, v => v.name)}</select></div>
+      <div><label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${!e || e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e && e.status === "inactive" ? "selected" : ""}>Inactive</option></select></div></div>`
+    : `<label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${!e || e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e && e.status === "inactive" ? "selected" : ""}>Inactive</option></select>`;
+  openDrawer(e ? `Employee ${e.code}` : "New employee",
+    "One employee master for HR and settings. Employees are deactivated, never deleted.", `
     <form id="empForm" data-id="${e ? e.id : ""}" novalidate>
-      <label for="ne-code">Employee code</label><input id="ne-code" name="code" autocomplete="off" value="${e ? esc(e.code) : ""}" ${e ? "disabled" : ""}>
-      <label for="ne-name">Full name</label><input id="ne-name" name="full_name" autocomplete="off" value="${e ? esc(e.full_name) : ""}">
-      <div class="row2"><div><label for="ne-des">Designation</label><input id="ne-des" name="designation" autocomplete="off" value="${e && e.designation ? esc(e.designation) : ""}"></div>
-      <div><label for="ne-dept">Department</label><input id="ne-dept" name="department" autocomplete="off" value="${e && e.department ? esc(e.department) : ""}"></div></div>
+      <div class="row2"><div><label for="ne-code">Employee code</label><input id="ne-code" name="code" autocomplete="off" value="${e ? esc(e.code) : ""}" ${e ? "readonly" : ""}></div>
+      <div><label for="ne-name">Full name</label><input id="ne-name" name="full_name" autocomplete="off" value="${e ? esc(e.full_name) : ""}"></div></div>
+      <div class="row2"><div><label for="ne-dept">Department</label><input id="ne-dept" name="department" autocomplete="off" value="${e && e.department ? esc(e.department) : ""}"></div>
+      <div><label for="ne-des">Designation</label><input id="ne-des" name="designation" autocomplete="off" value="${e && e.designation ? esc(e.designation) : ""}"></div></div>
       <div class="row2"><div><label for="ne-phone">Phone</label><input id="ne-phone" name="phone" autocomplete="off" value="${e && e.phone ? esc(e.phone) : ""}"></div>
       <div><label for="ne-email">Email</label><input id="ne-email" name="email" autocomplete="off" value="${e && e.email ? esc(e.email) : ""}"></div></div>
-      ${e ? `<label for="ne-status">Status</label><select id="ne-status" name="status"><option value="active" ${e.status === "active" ? "selected" : ""}>Active</option><option value="inactive" ${e.status === "inactive" ? "selected" : ""}>Inactive</option></select>` : ""}
+      ${hrFields}
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">${e ? "Save employee" : "Create employee"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
-    </form>`);
+    </form>`, true);
+  if (!rich) return;
+  // An office belongs to one branch, so the pair can never disagree: picking a
+  // branch hides the offices of other branches, picking an office fills its branch.
+  const bSel = $("#ne-branch"), oSel = $("#ne-office");
+  const syncOffices = () => {
+    const want = bSel.value;
+    $$("option[data-branch]", oSel).forEach(op => {
+      op.hidden = !!(want && op.dataset.branch !== want);
+    });
+    const cur = oSel.selectedOptions[0];
+    if (cur && cur.hidden) oSel.value = "";
+  };
+  bSel.addEventListener("change", syncOffices);
+  oSel.addEventListener("change", () => {
+    const br = oSel.selectedOptions[0] ? oSel.selectedOptions[0].dataset.branch : "";
+    if (br) { bSel.value = br; syncOffices(); }
+  });
+  syncOffices();
 }
 async function saveEmployee(form) {
-  const f = new FormData(form), body = {};
-  for (const k of ["full_name", "designation", "department", "phone", "email", "status"]) {
-    const v = f.get(k);
-    if (v !== null && v !== "") body[k] = v;
+  const f = form.elements, err = $(".err", form), id = form.dataset.id || null, rich = can("hr:write");
+  err.textContent = "";
+  const body = {full_name: f.full_name.value.trim(), department: f.department.value || null,
+                designation: f.designation.value || null, phone: f.phone.value || null,
+                email: f.email.value || null, status: f.status.value};
+  if (body.full_name.length < 2) { err.textContent = "Enter the employee's full name."; return; }
+  if (!id) body.code = f.code.value.trim();
+  if (!id && !body.code) { err.textContent = "Enter an employee code."; return; }
+  if (rich) {
+    body.joining_date = f.joining_date.value || null;
+    body.employment_type = f.employment_type.value || null;
+    body.branch_id = f.branch_id.value ? Number(f.branch_id.value) : null;
+    body.office_id = f.office_id.value ? Number(f.office_id.value) : null;
+    body.shift_id = f.shift_id.value ? Number(f.shift_id.value) : null;
   }
-  if (!form.dataset.id) body.code = f.get("code");
-  const id = form.dataset.id;
-  const res = id
-    ? await api(`/api/employees/${id}`, {method: "PATCH", body})
-    : await api("/api/employees", {method: "POST", body});
+  const base = rich ? "/api/hr/employees" : "/api/employees";
+  const res = await api(id ? `${base}/${id}` : base, {method: id ? "PATCH" : "POST", body});
   toast(res, res.ok ? "Employee saved" : "Employee not saved");
-  if (res.ok) { closeDrawer(); loadAll(); } else $(".err", form).textContent = detail(res.body);
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer();
+  await loadAll();
+  if (can("hr:read")) await openHr();
 }
 
 /* ---------- audit trail ---------- */
@@ -2635,6 +6965,474 @@ function renderAudit() {
   }).join("");
   empty($("#audempty"), !state.audit.rows.length, "Nothing matches these filters.", "");
   $("#audNote").textContent = state.audit.total ? `Showing ${state.audit.rows.length} of ${state.audit.total}` : "";
+}
+
+/* ---------- scheduled reports (Administrator only) ----------
+   The server refuses every route here to anyone who is not the seeded
+   Administrator, even if a custom role was granted email:manage. The nav link
+   and this screen follow the same rule so a role is never offered a screen
+   that can only answer 403. Nothing here sends: Preview renders, and Run now /
+   Send test only queue a delivery row for the worker. */
+const srAllowed = () => can("email:manage") && !!state.user
+  && String(state.user.role || "").trim().toLowerCase() === "admin";
+const SR_STATUS = {queued: ["Queued", "off"], sending: ["Sending", "warn"], sent: ["Sent", "ok"],
+                   retry: ["Retry", "warn"], failed: ["Failed", "bad"], skipped: ["Skipped", "off"]};
+const SR_TRIGGER = {scheduled: "Scheduled", manual: "Run now", test: "Test", resend: "Resend"};
+const SR_GROUP = {md: "MD", admin: "Administrators", extra: "Extras"};
+const SR_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const SR_FREQ = {daily: "Every day", weekdays: "Monday to Friday", weekly: "Chosen weekdays",
+                 monthly: "Monthly rule", custom: "Custom cron"};
+const srChip = status => {
+  const [label, tone] = SR_STATUS[status] || [status || "–", "off"];
+  return `<span class="chip ${tone}">${esc(label)}</span>`;
+};
+const humanBytes = n => {
+  const v = Number(n) || 0;
+  if (v >= 1048576) return `${(v / 1048576).toFixed(1)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} KB`;
+  return `${v} B`;
+};
+
+function srTab(tab) {
+  state.sr.tab = ["schedules", "recipients", "log"].includes(tab) ? tab : "schedules";
+  srShowTab();
+  if (state.sr.tab === "log") loadDeliveries();
+}
+function srShowTab() {
+  ["schedules", "recipients", "log"].forEach(t =>
+    $("#sr-" + t).classList.toggle("hide", t !== state.sr.tab));
+  $$("#srTabs [data-sr-tab]").forEach(b =>
+    b.setAttribute("aria-selected", String(b.dataset.srTab === state.sr.tab)));
+}
+
+async function openScheduled() {
+  if (!srAllowed()) return;
+  srShowTab();
+  const [status, people, schedules] = await Promise.all([
+    api("/api/email-reports/status"),
+    api("/api/email-reports/recipients"),
+    api("/api/email-reports/schedules")
+  ]);
+  if (!status.ok) { toast(status, "Scheduled reports not loaded"); return; }
+  state.sr.status = status.body;
+  if (people.ok) state.sr.recipients = people.body || [];
+  if (schedules.ok) state.sr.schedules = schedules.body || [];
+  renderScheduled();
+  renderHead();
+  if (state.sr.tab === "log") await loadDeliveries();
+}
+
+function renderScheduled() {
+  if (!$("#srSchedRows") || !state.sr.status) return;
+  renderSrBanner();
+  renderSrSchedules();
+  renderSrRecipients();
+  renderSrLog();
+  srShowTab();
+}
+
+function renderSrBanner() {
+  const s = state.sr.status, el = $("#srBanner");
+  if (!s || !el) return;
+  const interval = s.worker_interval ? `The worker checks every ${s.worker_interval} s.` : "";
+  const testTo = s.test_recipient || "the first active Administrator";
+  let banner;
+  if (s.mode !== "live") {
+    banner = `<div class="callout"><div><b>Test mode.</b> Nothing is delivered to the real list: every queued
+      message is redirected to ${esc(testTo)} and marked as a test. SMTP
+      ${s.smtp_ready ? "is configured" : "is not configured, so a send cannot start"}.</div></div>`;
+  } else if (!s.send_enabled) {
+    banner = `<div class="callout"><div><b>Live mode selected, sending disabled.</b> A queued report waits
+      until the Administrator enables sending (EMAIL_SEND_ENABLED). Nothing leaves the server now.</div></div>`;
+  } else if (!s.smtp_ready) {
+    banner = `<div class="callout"><div><b>Live sending is on, but SMTP is not configured.</b> A send cannot
+      start until SMTP_HOST and SMTP_FROM are set.</div></div>`;
+  } else {
+    banner = `<div class="note"><span class="chip ok">Live</span> Sending is enabled. A scheduled run goes to
+      its real recipients and is written to the audit log.</div>`;
+  }
+  el.innerHTML = banner + `<div class="note">${esc(interval)} The largest message is ${esc(humanBytes(s.max_bytes))};
+    a larger set of attachments is reduced, never silently truncated.</div>`;
+}
+
+function renderSrSchedules() {
+  const list = state.sr.schedules;
+  $("#srSchedNote").textContent =
+    `${plural(list.length, "schedule")}, ${list.filter(s => s.enabled).length} on.`;
+  $("#srSchedRows").innerHTML = list.map(s => {
+    const people = s.recipients || [];
+    const counts = {to: 0, cc: 0, bcc: 0};
+    people.forEach(p => { counts[p.field] = (counts[p.field] || 0) + 1; });
+    const who = [counts.to ? `${counts.to} To` : "", counts.cc ? `${counts.cc} CC` : "",
+                 counts.bcc ? `${counts.bcc} BCC` : ""].filter(Boolean).join(", ");
+    const groups = (s.groups || []).map(g => SR_GROUP[g] || g);
+    const content = [
+      `<b>${esc(s.pack_label)}</b>`,
+      groups.length ? `Groups: ${esc(groups.join(", "))}` : "",
+      who ? `Named: ${esc(who)}` : "",
+      s.include_attachments ? "PDF + Excel" : "No attachments",
+      s.include_accounts ? "Accounts block" : "",
+      (s.custom_reports || []).length ? `${plural(s.custom_reports.length, "custom report")}` : ""
+    ].filter(Boolean).join("<br>");
+    const warnings = (s.warnings || []).map(w => `<div class="hint">${esc(w)}</div>`).join("");
+    const next = s.enabled ? fmtStamp(s.next_run_at) : "Paused";
+    const last = s.last_run_at
+      ? `${fmtStamp(s.last_run_at)} ${s.last_status ? srChip(s.last_status) : ""}`
+      : "Never run";
+    return `<tr>
+      <td><b>${esc(s.name)}</b><small>${esc(SR_FREQ[s.frequency] || s.frequency)}</small>
+        <small>${esc(s.timezone)}</small></td>
+      <td>${content}</td>
+      <td>${esc(s.description)}</td>
+      <td>${esc(next)}</td>
+      <td>${last}</td>
+      <td><span class="chip ${s.enabled ? "ok" : "off"}">${s.enabled ? "On" : "Paused"}</span>${warnings}</td>
+      <td class="rowacts">
+        <button class="btn ghost sm" type="button" data-act="sr-preview" data-id="${s.id}">Preview</button>
+        <button class="btn ghost sm" type="button" data-act="sr-test" data-id="${s.id}">Send test</button>
+        <button class="btn ghost sm" type="button" data-act="sr-run" data-id="${s.id}">Run now</button>
+        <button class="btn ghost sm" type="button" data-act="sr-edit" data-id="${s.id}">Edit</button>
+        <button class="btn ghost sm" type="button" data-act="sr-toggle" data-id="${s.id}" data-on="${s.enabled ? "1" : "0"}">${s.enabled ? "Pause" : "Resume"}</button>
+        <button class="btn ghost sm" type="button" data-act="sr-duplicate" data-id="${s.id}">Duplicate</button>
+        <button class="btn ghost sm" type="button" data-act="sr-delete" data-id="${s.id}">Delete</button>
+      </td></tr>`;
+  }).join("");
+  empty($("#srSchedEmpty"), !list.length, "No schedules yet.",
+    " A schedule is a pack, a set of recipients and a time. Nothing is sent until one exists, sending is enabled and the Administrator approves the list.");
+}
+
+function renderSrRecipients() {
+  const list = state.sr.recipients;
+  $("#srRecNote").textContent = `${plural(list.length, "recipient")}, ${list.filter(r => r.active).length} active.`;
+  $("#srRecRows").innerHTML = list.map(r => `<tr>
+    <td class="strong">${esc(r.email)}</td>
+    <td>${esc(r.name || "–")}</td>
+    <td><span class="chip ${r.group === "md" ? "ok" : r.group === "admin" ? "warn" : "off"}">${esc(SR_GROUP[r.group] || r.group)}</span></td>
+    <td><span class="chip ${r.active ? "ok" : "off"}">${r.active ? "Active" : "Inactive"}</span></td>
+    <td>${r.in_use ? "Used by a schedule" : "Not used yet"}</td>
+    <td class="rowacts">
+      <button class="btn ghost sm" type="button" data-act="sr-recipient-edit" data-id="${r.id}">Edit</button>
+      <button class="btn ghost sm" type="button" data-act="sr-recipient-delete" data-id="${r.id}"${r.in_use ? " title=\"Remove it from the schedule first\"" : ""}>Remove</button>
+    </td></tr>`).join("");
+  empty($("#srRecEmpty"), !list.length, "No recipients yet.",
+    " MD and Administrator groups are mandatory. An extra recipient can unsubscribe; the Administrator can re-enable or remove any address.");
+}
+
+function renderSrLog() {
+  const list = state.sr.deliveries;
+  const pack = $("#srLogPack"), keep = state.sr.logPack;
+  if (pack && state.sr.status) {
+    pack.innerHTML = `<option value="">All packs</option>` + state.sr.status.packs.map(p =>
+      `<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
+    pack.value = state.sr.status.packs.some(p => p.key === keep) ? keep : "";
+  }
+  $("#srLogRows").innerHTML = list.map(d => {
+    const att = Array.isArray(d.attachments) ? d.attachments : [];
+    const files = att.length
+      ? att.map(a => `<small>${esc(a.filename)} · ${esc(humanBytes(a.bytes))}</small>`).join("")
+      : `<small>None</small>`;
+    const period = d.period_from ? `${fmtDate(d.period_from)} – ${fmtDate(d.period_to)}` : "–";
+    const resend = d.schedule_id != null && !["queued", "sending"].includes(d.status)
+      ? `<button class="btn ghost sm" type="button" data-act="sr-resend" data-id="${d.id}">Resend</button>` : "";
+    return `<tr>
+      <td>${esc(fmtStamp(d.created_at))}<small>${esc(d.mode)}</small></td>
+      <td><b>${esc((reportPackLabel(d.pack)))}</b>${d.subject ? `<small>${esc(d.subject.slice(0, 80))}</small>` : ""}</td>
+      <td>${esc(SR_TRIGGER[d.trigger] || d.trigger)}</td>
+      <td>${esc(period)}</td>
+      <td class="n">${esc(d.recipient_count)}</td>
+      <td>${srChip(d.status)}${d.attempts ? `<small>${plural(d.attempts, "attempt")}</small>` : ""}</td>
+      <td>${files}${d.attachment_bytes ? `<small>${esc(humanBytes(d.attachment_bytes))} total</small>` : ""}</td>
+      <td><small>${esc(d.error || "–")}</small></td>
+      <td class="rowacts">${resend}</td></tr>`;
+  }).join("");
+  empty($("#srLogEmpty"), !list.length, "No deliveries match these filters.",
+    " A delivery row is written when a run is queued, and its status changes as the worker picks it up.");
+  $("#srLogNote").textContent = list.length ? `${list.length} shown, newest first.` : "";
+}
+function reportPackLabel(key) {
+  const meta = state.sr.status && state.sr.status.packs.find(p => p.key === key);
+  return meta ? meta.label : key;
+}
+
+async function loadDeliveries() {
+  if (!srAllowed() || !state.sr.status) return;
+  const q = new URLSearchParams();
+  if (state.sr.logStatus) q.set("status", state.sr.logStatus);
+  if (state.sr.logPack) q.set("pack", state.sr.logPack);
+  q.set("limit", "200");
+  const res = await api("/api/email-reports/deliveries?" + q.toString());
+  if (!res.ok) { toast(res, "Delivery log not loaded"); return; }
+  state.sr.deliveries = res.body || [];
+  renderSrLog();
+}
+
+function scheduleForm(id) {
+  if (!state.sr.status) return;
+  const s = id ? state.sr.schedules.find(x => x.id === Number(id)) : null;
+  if (id && !s) return;
+  const f = s || {name: "", pack_key: "monthly_md", enabled: true, frequency: "monthly",
+                  timezone: "Asia/Kolkata", weekdays: [0], times: ["09:00"],
+                  month_day: 1, month_rule: "first_working_day", custom_cron: "",
+                  holiday_rule: "shift", include_attachments: true, include_accounts: true,
+                  custom_reports: [], groups: [], recipients: []};
+  const packOptions = state.sr.status.packs.map(p =>
+    `<option value="${esc(p.key)}"${p.key === f.pack_key ? " selected" : ""} data-accounts="${p.accounts ? "1" : "0"}">${esc(p.label)}</option>`).join("");
+  const groups = new Set(f.groups || []);
+  const groupBoxes = ["md", "admin", "extra"].map(g =>
+    `<label style="font-weight:400"><input type="checkbox" name="group" value="${g}"${groups.has(g) ? " checked" : ""}> ${SR_GROUP[g]}</label>`).join(" ");
+  const linked = new Map((f.recipients || []).map(p => [p.id, p.field]));
+  const people = state.sr.recipients.length
+    ? state.sr.recipients.map(p => {
+        const on = linked.has(p.id);
+        const field = linked.get(p.id) || "to";
+        return `<tr>
+          <td><input type="checkbox" name="rcpt" value="${p.id}" id="sr-r${p.id}"${on ? " checked" : ""}></td>
+          <td><label for="sr-r${p.id}" style="font-weight:400">${esc(p.email)}${p.name ? ` <small>${esc(p.name)}</small>` : ""}</label>
+            ${p.active ? "" : `<span class="chip off">Inactive</span>`}</td>
+          <td><select data-sr-field="${p.id}" aria-label="To, CC or BCC for ${esc(p.email)}"${on ? "" : " disabled"}>
+            ${["to", "cc", "bcc"].map(x => `<option value="${x}"${x === field ? " selected" : ""}>${x.toUpperCase()}</option>`).join("")}
+          </select></td></tr>`;
+      }).join("")
+    : `<tr><td colspan="3"><small>No recipients yet. Add one on the Recipients tab.</small></td></tr>`;
+  const weekly = new Set((f.weekdays || []).map(Number));
+  const dayBoxes = SR_DAYS.map((name, i) =>
+    `<label style="font-weight:400"><input type="checkbox" name="wd" value="${i}"${weekly.has(i) ? " checked" : ""}> ${name}</label>`).join(" ");
+  const reportKeys = new Set(f.custom_reports || []);
+  const reportBoxes = state.sr.status.report_catalog.map(r =>
+    `<label style="font-weight:400"><input type="checkbox" name="creport" value="${esc(r.key)}"${reportKeys.has(r.key) ? " checked" : ""}> ${esc(r.title)}</label>`).join("<br>");
+  openDrawer(s ? `Edit ${s.name}` : "New schedule",
+    s ? s.description : "A pack, its recipients and when it runs. Every change is audited and takes effect on the next worker pass.",
+    `<form id="srForm" data-id="${s ? s.id : ""}" novalidate>
+      <label for="sr-name">Name</label>
+      <input id="sr-name" name="name" value="${esc(f.name)}" placeholder="Monthly MD report" maxlength="120" autocomplete="off">
+      <div class="row2">
+        <div><label for="sr-pack">Report pack</label>
+          <select id="sr-pack" name="pack_key">${packOptions}</select>
+          <div class="hint" id="srPackHint"></div></div>
+        <div><label for="sr-freq">Frequency</label>
+          <select id="sr-freq" name="frequency">
+            ${Object.entries(SR_FREQ).map(([k, label]) => `<option value="${k}"${k === f.frequency ? " selected" : ""}>${esc(label)}</option>`).join("")}
+          </select></div>
+      </div>
+      <div class="row2">
+        <div><label for="sr-times">Time(s) of day (24-hour)</label>
+          <input id="sr-times" name="times" value="${esc((f.times || []).join(", "))}" placeholder="09:00, 18:00" autocomplete="off">
+          <div class="hint">Comma-separated HH:MM. Several slots are allowed.</div></div>
+        <div><label for="sr-tz">Timezone</label>
+          <input id="sr-tz" name="timezone" value="${esc(f.timezone)}" list="srTzList" autocomplete="off">
+          <datalist id="srTzList">
+            <option value="Asia/Kolkata"></option><option value="Asia/Dubai"></option>
+            <option value="Europe/London"></option><option value="America/New_York"></option>
+            <option value="UTC"></option>
+          </datalist></div>
+      </div>
+      <div id="sr-weekly" class="hide"><label>Weekdays</label>
+        <div class="toolbar" style="padding:0;border:0;background:none;gap:12px">${dayBoxes}</div></div>
+      <div id="sr-monthly" class="hide">
+        <div class="row2">
+          <div><label for="sr-monthrule">Monthly rule</label>
+            <select id="sr-monthrule" name="month_rule">
+              <option value="day"${f.month_rule === "day" ? " selected" : ""}>A chosen day</option>
+              <option value="last_day"${f.month_rule === "last_day" ? " selected" : ""}>Last day of the month</option>
+              <option value="first_working_day"${f.month_rule === "first_working_day" ? " selected" : ""}>First working day</option>
+            </select></div>
+          <div id="sr-monthday"><label for="sr-monthdayin">Day</label>
+            <input id="sr-monthdayin" name="month_day" type="number" min="1" max="31" value="${esc(f.month_day == null ? 1 : f.month_day)}">
+            <div class="hint">29–31 on a shorter month uses that month's last day.</div></div>
+        </div>
+      </div>
+      <div id="sr-cron" class="hide"><label for="sr-cr">Custom cron (minute hour day month weekday)</label>
+        <input id="sr-cr" name="custom_cron" value="${esc(f.custom_cron || "")}" placeholder="0 9 * * 1-5" autocomplete="off"></div>
+      <label for="sr-holiday">If the slot falls on a company holiday</label>
+      <select id="sr-holiday" name="holiday_rule">
+        <option value="shift"${f.holiday_rule === "shift" ? " selected" : ""}>Move to the next working day</option>
+        <option value="skip"${f.holiday_rule === "skip" ? " selected" : ""}>Skip that run</option>
+      </select>
+      <h3>Recipient groups</h3>
+      <div class="toolbar" style="padding:0;border:0;background:none;gap:14px">${groupBoxes}</div>
+      <div class="hint">MD and Administrator groups are mandatory report mail. Extra recipients can unsubscribe.</div>
+      <h3>Named recipients</h3>
+      <div class="tw"><table><tbody>${people}</tbody></table></div>
+      <h3>Content</h3>
+      <div class="toolbar" style="padding:0;border:0;background:none;gap:16px">
+        <label style="font-weight:400"><input type="checkbox" name="include_attachments"${f.include_attachments ? " checked" : ""}> Attach PDF and Excel</label>
+        <label style="font-weight:400" id="srAccountsWrap"><input type="checkbox" name="include_accounts"${f.include_accounts ? " checked" : ""}> Include the Accounts summary</label>
+        <label style="font-weight:400"><input type="checkbox" name="enabled"${f.enabled ? " checked" : ""}> Schedule is on</label>
+      </div>
+      <div id="srCustomReports" class="hide"><label>Custom pack: reports to include</label>${reportBoxes || '<div class="hint">No report is available to this user.</div>'}</div>
+      <div class="note">Figures are built by the same services as the Reports screen and the dashboards, for the pack's own period. A figure with no data is shown as “No data yet”; nothing is estimated.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${s ? "Save schedule" : "Create schedule"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+  srFreqSync();
+  srPackSync();
+}
+
+function srFreqSync() {
+  const form = $("#srForm");
+  if (!form) return;
+  const freq = form.elements.frequency.value;
+  $("#sr-weekly").classList.toggle("hide", freq !== "weekly");
+  $("#sr-monthly").classList.toggle("hide", freq !== "monthly");
+  $("#sr-cron").classList.toggle("hide", freq !== "custom");
+  const rule = form.elements.month_rule.value;
+  $("#sr-monthday").classList.toggle("hide", freq !== "monthly" || rule !== "day");
+}
+function srPackSync() {
+  const form = $("#srForm");
+  if (!form) return;
+  const key = form.elements.pack_key.value;
+  const meta = state.sr.status.packs.find(p => p.key === key) || {};
+  const wrap = $("#srAccountsWrap");
+  if (wrap) wrap.classList.toggle("hide", !meta.accounts);
+  const custom = $("#srCustomReports");
+  if (custom) custom.classList.toggle("hide", key !== "custom");
+  const hint = $("#srPackHint");
+  if (hint) hint.textContent = meta.hint || "";
+}
+
+async function saveSchedule(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const times = String(f.times.value).split(",").map(t => t.trim()).filter(Boolean);
+  const weekdays = $$('input[name="wd"]:checked', form).map(x => Number(x.value));
+  const recipients = $$('input[name="rcpt"]:checked', form).map(x => ({
+    recipient_id: Number(x.value),
+    field: $(`[data-sr-field="${x.value}"]`, form).value
+  }));
+  const groups = $$('input[name="group"]:checked', form).map(x => x.value);
+  const customReports = $$('input[name="creport"]:checked', form).map(x => x.value);
+  const body = {
+    name: f.name.value.trim(),
+    pack_key: f.pack_key.value,
+    enabled: f.enabled.checked,
+    frequency: f.frequency.value,
+    timezone: f.timezone.value.trim() || "Asia/Kolkata",
+    weekdays,
+    times,
+    month_day: f.frequency.value === "monthly" && f.month_rule.value === "day"
+      ? Number(f.month_day.value) : null,
+    month_rule: f.frequency.value === "monthly" ? f.month_rule.value : null,
+    custom_cron: f.frequency.value === "custom" ? f.custom_cron.value.trim() : null,
+    holiday_rule: f.holiday_rule.value,
+    include_attachments: f.include_attachments.checked,
+    include_accounts: f.include_accounts ? f.include_accounts.checked : false,
+    custom_reports: customReports,
+    groups,
+    recipients
+  };
+  if (body.name.length < 2) { err.textContent = "Give the schedule a name."; return; }
+  if (!times.length || times.some(t => !/^\d{1,2}:\d{2}$/.test(t))) {
+    err.textContent = "Enter at least one time as HH:MM, for example 09:00."; return;
+  }
+  if (body.frequency === "weekly" && !weekdays.length) {
+    err.textContent = "A weekly schedule needs at least one weekday."; return;
+  }
+  if (!recipients.length && !groups.length) {
+    err.textContent = "Choose at least one recipient or group."; return;
+  }
+  btn.disabled = true;
+  const id = form.dataset.id;
+  const res = await api(id ? `/api/email-reports/schedules/${id}` : "/api/email-reports/schedules",
+    {method: id ? "PATCH" : "POST", body});
+  if (!res.ok) { err.textContent = detail(res.body); btn.disabled = false; return; }
+  toast(res, "Schedule saved");
+  closeDrawer();
+  await openScheduled();
+}
+
+function recipientForm(id) {
+  const r = id ? state.sr.recipients.find(x => x.id === Number(id)) : null;
+  if (id && !r) return;
+  openDrawer(r ? "Edit recipient" : "Add recipient",
+    "An address is verified only by the first delivered message. MD and Administrator recipients are mandatory.",
+    `<form id="srRecipientForm" data-id="${r ? r.id : ""}" novalidate>
+      <label for="sr-r-email">Email</label>
+      <input id="sr-r-email" name="email" type="email" value="${esc(r ? r.email : "")}" placeholder="name@company.com" autocomplete="off"${r ? " readonly" : ""}>
+      ${r ? '<div class="hint">An address cannot be changed. Remove it and add the new one instead.</div>' : ""}
+      <label for="sr-r-name">Name (optional)</label>
+      <input id="sr-r-name" name="name" value="${esc(r && r.name ? r.name : "")}" autocomplete="off">
+      <label for="sr-r-group">Group</label>
+      <select id="sr-r-group" name="group_key">
+        ${["md", "admin", "extra"].map(g => `<option value="${g}"${r && r.group === g ? " selected" : ""}>${SR_GROUP[g]}</option>`).join("")}
+      </select>
+      ${r ? `<label for="sr-r-active" style="font-weight:400;margin-top:14px"><input id="sr-r-active" type="checkbox" name="active"${r.active ? " checked" : ""}> Active</label>` : ""}
+      <div class="note">The unsubscribe link in every email works only for an extra recipient. Removing an address from this list does not erase the delivery log.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${r ? "Save recipient" : "Add recipient"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveRecipient(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const id = form.dataset.id;
+  if (!id && !f.email.value.trim()) { err.textContent = "Enter an email address."; return; }
+  btn.disabled = true;
+  const body = id
+    ? {name: f.name.value.trim() || null, group_key: f.group_key.value, active: f.active.checked}
+    : {email: f.email.value.trim(), name: f.name.value.trim() || null, group_key: f.group_key.value};
+  const res = await api(id ? `/api/email-reports/recipients/${id}` : "/api/email-reports/recipients",
+    {method: id ? "PATCH" : "POST", body});
+  if (!res.ok) { err.textContent = detail(res.body); btn.disabled = false; return; }
+  toast(res, "Recipient saved");
+  closeDrawer();
+  await openScheduled();
+}
+
+async function srRun(id) {
+  const s = state.sr.schedules.find(x => x.id === Number(id));
+  const live = state.sr.status && state.sr.status.mode === "live" && state.sr.status.send_enabled;
+  if (live && !confirm(`Queue “${s ? s.name : "this schedule"}” now? It will be sent to its real recipients.`)) return;
+  const res = await api(`/api/email-reports/schedules/${id}/run-now`, {method: "POST"});
+  toast(res, res.ok ? "Queued. The worker will send it." : "Not queued");
+  if (res.ok) { state.sr.tab = "log"; await openScheduled(); }
+}
+async function srTest(id) {
+  const res = await api(`/api/email-reports/schedules/${id}/test`, {method: "POST"});
+  toast(res, res.ok ? `Test queued. It goes only to ${(res.body && res.body.redirected_to) || "the Administrator"}.` : "Test not queued");
+  if (res.ok) { state.sr.tab = "log"; await openScheduled(); }
+}
+function srPreview(id) {
+  window.open(`/api/email-reports/schedules/${id}/preview`, "_blank", "noopener");
+}
+async function srToggle(id, enabled) {
+  const res = await api(`/api/email-reports/schedules/${id}/enable`,
+    {method: "POST", body: {enabled: !enabled}});
+  toast(res, res.ok ? (enabled ? "Schedule paused" : "Schedule resumed") : "Not changed");
+  if (res.ok) await openScheduled();
+}
+async function srDuplicate(id) {
+  const res = await api(`/api/email-reports/schedules/${id}/duplicate`, {method: "POST"});
+  toast(res, res.ok ? "Copy created, paused" : "Not copied");
+  if (res.ok) await openScheduled();
+}
+async function srDelete(id) {
+  const s = state.sr.schedules.find(x => x.id === Number(id));
+  if (!confirm(`Delete “${s ? s.name : "this schedule"}”? Past sends stay in the delivery log.`)) return;
+  const res = await api(`/api/email-reports/schedules/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Schedule deleted" : "Not deleted");
+  if (res.ok) await openScheduled();
+}
+async function srResend(id) {
+  const live = state.sr.status && state.sr.status.mode === "live" && state.sr.status.send_enabled;
+  if (live && !confirm("Resend this report now? It will be sent to its real recipients.")) return;
+  const res = await api(`/api/email-reports/deliveries/${id}/resend`, {method: "POST"});
+  toast(res, res.ok ? "Resend queued" : "Not queued");
+  if (res.ok) await loadDeliveries();
+}
+async function srRecipientDelete(id) {
+  const r = state.sr.recipients.find(x => x.id === Number(id));
+  if (r && r.in_use) {
+    alert("This address is used by a schedule. Remove it from that schedule first.");
+    return;
+  }
+  if (!confirm(`Remove ${r ? r.email : "this address"} from the recipient list?`)) return;
+  const res = await api(`/api/email-reports/recipients/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Recipient removed" : "Not removed");
+  if (res.ok) await openScheduled();
 }
 
 /* ---------- tax and discounts (Module Phase 3) ---------- */
@@ -2972,11 +7770,69 @@ async function doQuote(form) {
 
 /* ---------- events ---------- */
 document.addEventListener("click", e => {
+  const modeBtn = e.target.closest("[data-cmp-mode]");
+  if (modeBtn) return setCompareMode(modeBtn.dataset.cmpMode);
+  const accModeBtn = e.target.closest("[data-acc-mode]");
+  if (accModeBtn) return setAccMode(accModeBtn.dataset.accMode);
+  const accStateBtn = e.target.closest("[data-acc-state]");
+  if (accStateBtn) return setAccStateFilter(accStateBtn.dataset.accState);
+  const expStatusBtn = e.target.closest("[data-exp-status]");
+  if (expStatusBtn) return setExpenseStatus(expStatusBtn.dataset.expStatus);
+  const geoTile = e.target.closest("[data-geo-code]");
+  if (geoTile) return selectGeo(geoTile.dataset.geoCode);
+  const geoSortBtn = e.target.closest("[data-geo-sort]");
+  if (geoSortBtn) return setGeoSort(geoSortBtn.dataset.geoSort);
+  const srTabBtn = e.target.closest("[data-sr-tab]");
+  if (srTabBtn) return srTab(srTabBtn.dataset.srTab);
+  const hrRangeBtn = e.target.closest("[data-hrr]");
+  if (hrRangeBtn) return setHrRangePreset(hrRangeBtn.dataset.hrr);
+  const hrpTab = e.target.closest("[data-hrp]");
+  if (hrpTab) return hrProfileDrawer(hrpTab.dataset.hrp);
   const a = e.target.closest("[data-act]");
+  if (a && a.dataset.act === "reset-db") return dbResetOpen();
+  if (a && a.dataset.act === "dbreset-backup") return dbResetBackup();
+  if (a && a.dataset.act === "dbreset-verify") return dbResetVerify();
+  if (a && a.dataset.act === "dbreset-cancel") return dbResetCancel();
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
   if (a && a.dataset.act === "load-tb") return loadTrialBalance();
   if (a && a.dataset.act === "load-ageing") return loadAgeing();
+  if (a && a.dataset.act === "load-acc-report") return loadAccountsReport();
+  if (a && a.dataset.act === "export-acc") return exportAccCsv();
+  if (a && a.dataset.act === "acc-ledger") return openDistributorLedger(a.dataset.id);
+  if (a && a.dataset.act === "exp-refresh") return loadExpenses();
+  if (a && a.dataset.act === "new-expense") return openExpenseForm();
+  if (a && a.dataset.act === "exp-heads") return openExpenseHeads();
+  if (a && a.dataset.act === "exp-settings") return openExpenseSettings();
+  if (a && a.dataset.act === "exp-reverse") return expenseReverseForm(a.dataset.id);
+  if (a && a.dataset.act === "exp-receipt") return expenseReceiptForm(a.dataset.id);
+  if (a && a.dataset.act === "exp-head-toggle") return toggleExpenseHead(a.dataset.id, a.dataset.on === "1");
+  if (a && a.dataset.act === "foc-refresh") return loadFoc();
+  if (a && a.dataset.act === "new-foc") return focNewForm();
+  if (a && a.dataset.act === "foc-approve") return focApprove(a.dataset.id);
+  if (a && a.dataset.act === "foc-reject") return focReasonForm(a.dataset.id, "reject");
+  if (a && a.dataset.act === "foc-reverse") return focReasonForm(a.dataset.id, "reverse");
+  if (a && a.dataset.act === "open-search") return openPalette();
+  if (a && a.dataset.act === "reload-dash") return loadDashboard();
+  if (a && a.dataset.act === "reload-compare") return loadCompare();
+  if (a && a.dataset.act === "cmp-csv") return exportCompareCsv();
+  if (a && a.dataset.act === "reload-geo") return loadGeo();
+  if (a && a.dataset.act === "geo-csv") return exportGeoCsv();
+  if (a && a.dataset.act === "toggle-series") return toggleSeries(a.dataset.series);
+  if (a && a.dataset.act === "dash-ap") return dashOpenApproval(a.dataset.id);
+  if (a && a.dataset.act === "dash-approve") return dashApprove(a.dataset.id);
+  if (a && a.dataset.act === "dash-reject") {
+    dashRejectId = Number(a.dataset.id);
+    renderDashApprovals(state.dashboard && state.dashboard.approvals);
+    const inp = $("#dashRejectForm input");
+    if (inp) inp.focus();
+    return;
+  }
+  if (a && a.dataset.act === "dash-reject-cancel") {
+    dashRejectId = null;
+    return renderDashApprovals(state.dashboard && state.dashboard.approvals);
+  }
+  if (a && a.dataset.act === "expiry-detail") return expiryDetail(a.dataset.id);
   if (a) {
     const act = a.dataset.act;
     if (act === "close") closeDrawer();
@@ -2986,11 +7842,60 @@ document.addEventListener("click", e => {
     else if (act === "save-product") productForm(a.dataset.id);
     else if (act === "new-so-dist") { state.soDistPreset = Number(a.dataset.id); soForm(); }
     else if (act === "hr-employees") hrEmployees();
+    else if (act === "hr-range-apply") applyHrRange();
+    else if (act === "hr-refresh") openHr();
+    else if (act === "hr-filter-apply") applyHrFilter();
+    else if (act === "hr-filter-save") hrFilterSaveForm();
+    else if (act === "hr-filter-cancel") { $("#hrSavedBox").innerHTML = ""; }
+    else if (act === "hr-filter-delete") deleteHrFilter();
+    else if (act === "hr-export") exportHr();
+    else if (act === "hr-profile") hrProfile(a.dataset.id);
+    else if (act === "hr-profile-tab") hrProfileDrawer(a.dataset.tab);
+    else if (act === "hr-doc-new") hrDocForm(a.dataset.id);
+    else if (act === "hr-doc-edit") hrDocForm(state.hr.profile && state.hr.profile.employee.id, a.dataset.id);
+    else if (act === "hr-asset-new") hrAssetForm(a.dataset.id);
+    else if (act === "hr-asset-return") hrAssetReturnForm(a.dataset.id);
+    else if (act === "hr-attention") hrAttention(a.dataset.kind);
+    else if (act === "hr-monthly") hrMonthly();
+    else if (act === "hr-monthly-refresh") loadHrMx();
+    else if (act === "hr-sheet") downloadAttendanceSheet();
+    else if (act === "hr-letters") hrLetters();
+    else if (act === "hr-letter-edit") hrLetterForm(a.dataset.id);
+    else if (act === "hr-card") downloadOutput("/api/hr/outputs/id-card" + (a.dataset.emp ? `?employee_id=${a.dataset.emp}` : ""));
+    else if (act === "hr-statement") downloadOutput("/api/hr/outputs/leave-statement" + (a.dataset.emp ? `?employee_id=${a.dataset.emp}` : ""));
+    else if (act === "hr-letter") downloadOutput(`/api/hr/outputs/letter/${encodeURIComponent(a.dataset.code)}` + (a.dataset.emp ? `?employee_id=${a.dataset.emp}` : ""));
+    else if (act === "hr-calendar") hrCalendar();
+    else if (act === "hr-calendar-refresh") loadHrCal();
+    else if (act === "hr-reports") hrReports();
+    else if (act === "hr-report-refresh") hrReportView(state.hr.repKey);
+    else if (act === "hr-report-view") hrReportView(a.dataset.key);
+    else if (act === "hr-report-file") hrReportFile(a.dataset.key, a.dataset.format);
+    else if (act === "hr-notices") hrNotices();
+    else if (act === "hr-notice-hide") api(`/api/hr/announcements/${a.dataset.id}`, {method: "PATCH", body: {active: false}}).then(r => { toast(r, r.ok ? "Announcement hidden" : "Not changed"); if (r.ok) hrNotices(); });
+    else if (act === "hr-digest") api("/api/hr/notifications/digest", {method: "POST", body: {}}).then(r => { toast(r, r.ok ? `Digest queued for ${r.body.queued}; ${r.body.skipped} already had one` : "Digest not sent"); if (r.ok) refreshHrUnread(); });
+    else if (act === "hr-locks") hrLocks();
+    else if (act === "hr-lock-unlock") hrLocks(Number(a.dataset.id));
+    else if (act === "hr-import") hrImport();
+    else if (act === "hr-import-check") hrImportCheck();
+    else if (act === "hr-import-commit") hrImportCommit();
+    else if (act === "hr-import-undo") hrImportUndo(a.dataset.id);
+    else if (act === "hr-notifications") hrNotifications();
+    else if (act === "hr-notes-readall") api("/api/hr/notifications/read-all", {method: "POST", body: {}}).then(r => { toast(r, r.ok ? `${r.body.marked} notification(s) marked read` : "Not changed"); if (r.ok) hrNotifications(); });
+    else if (act === "hr-note-read") api(`/api/hr/notifications/${a.dataset.id}/read`, {method: "POST", body: {}}).then(r => { if (r.ok) hrNotifications(); else toast(r, "Not changed"); });
+    else if (act === "hr-payslips") hrPayslips();
     else if (act === "hr-shifts") hrShifts();
     else if (act === "hr-new-shift") hrShiftForm();
     else if (act === "hr-edit-shift") hrShiftForm(a.dataset.id);
-    else if (act === "hr-new-emp") hrEmployeeForm();
-    else if (act === "hr-edit-emp") hrEmployeeForm(a.dataset.id);
+    else if (act === "hr-sites") hrSites();
+    else if (act === "hr-new-branch") hrBranchForm();
+    else if (act === "hr-edit-branch") hrBranchForm(a.dataset.id);
+    else if (act === "hr-new-office") hrOfficeForm();
+    else if (act === "hr-edit-office") hrOfficeForm(a.dataset.id);
+    else if (act === "hr-new-rule") hrRuleForm();
+    else if (act === "hr-edit-rule") hrRuleForm(a.dataset.id);
+    else if (act === "hr-rule-delete") hrRuleDelete(a.dataset.id);
+    else if (act === "hr-new-emp") employeeForm();
+    else if (act === "hr-edit-emp") employeeForm(a.dataset.id);
     else if (act === "hr-attendance") hrAttendance();
     else if (act === "hr-checkin") hrCheckIn();
     else if (act === "hr-checkout") api("/api/hr/attendance/check-out", {method: "POST", body: {}}).then(r => { toast(r, r.ok ? "Checked out" : "Check-out not recorded"); if (r.ok) hrAttendance(); });
@@ -3004,6 +7909,7 @@ document.addEventListener("click", e => {
     else if (act === "pay-paid") hrPayrollAction("paid", a.dataset.id);
     else if (act === "pay-open") hrPayrollOpen(a.dataset.id);
     else if (act === "new-warehouse") warehouseForm();
+    else if (act === "edit-capacity") capacityForm(a.dataset.id);
     else if (act === "new-po") poForm();
     else if (act === "open-po") poDetail(a.dataset.id);
     else if (act === "cancel-po") cancelPoForm(a.dataset.id);
@@ -3032,6 +7938,7 @@ document.addEventListener("click", e => {
     else if (act === "toggle-user") toggleUser(a.dataset.id, a.dataset.active);
     else if (act === "new-role") roleForm();
     else if (act === "edit-role") roleForm(a.dataset.id);
+    else if (act === "toggle-feature") toggleFeature(a.dataset.key, a.dataset.enabled);
     else if (act === "new-employee") employeeForm();
     else if (act === "edit-emp") employeeForm(a.dataset.id);
     else if (act === "edit-company") companyForm();
@@ -3045,10 +7952,28 @@ document.addEventListener("click", e => {
       const chosen = $("#printCopy");
       printDocument(a.dataset.kind, Number(a.dataset.id), chosen ? chosen.value : "ORIGINAL");
     }
+    else if (act === "sr-new") scheduleForm();
+    else if (act === "sr-edit") scheduleForm(a.dataset.id);
+    else if (act === "sr-preview") srPreview(a.dataset.id);
+    else if (act === "sr-test") srTest(a.dataset.id);
+    else if (act === "sr-run") srRun(a.dataset.id);
+    else if (act === "sr-toggle") srToggle(a.dataset.id, a.dataset.on === "1");
+    else if (act === "sr-duplicate") srDuplicate(a.dataset.id);
+    else if (act === "sr-delete") srDelete(a.dataset.id);
+    else if (act === "sr-resend") srResend(a.dataset.id);
+    else if (act === "sr-recipient-new") recipientForm();
+    else if (act === "sr-recipient-edit") recipientForm(a.dataset.id);
+    else if (act === "sr-recipient-delete") srRecipientDelete(a.dataset.id);
+    else if (act === "sr-refresh-log") loadDeliveries();
+    else if (act === "email-reload") loadEmailSettings(true);
     return;
   }
   const tab = e.target.closest("[data-tab]");
   if (tab) { location.hash = "#/inventory/" + tab.dataset.tab; return; }
+  const dp = e.target.closest("[data-dash-preset]");
+  if (dp) { setDashPreset(dp.dataset.dashPreset); return; }
+  const expb = e.target.closest("[data-eb]");
+  if (expb) { setExpiryBucket(expb.dataset.eb); return; }
   const pf = e.target.closest("[data-pf]");
   if (pf) { state.poFilter = pf.dataset.pf; $$("[data-pf]").forEach(b => b.setAttribute("aria-pressed", String(b === pf))); renderPOs(); return; }
   const inf = e.target.closest("[data-if]");
@@ -3091,6 +8016,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "changePwForm") changePassword(f);
   else if (f.id === "prodForm") saveProduct(f);
   else if (f.id === "whForm") saveWarehouse(f);
+  else if (f.id === "capForm") saveCapacity(f);
   else if (f.id === "poForm") savePO(f);
   else if (f.id === "rcvForm") postReceipt(f);
   else if (f.id === "poCancel") cancelPo(f);
@@ -3101,6 +8027,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "cancelForm") cancelSO(f);
   else if (f.id === "dispForm") postDispatch(f);
   else if (f.id === "decideForm") decide(f, (e.submitter && e.submitter.value) || "approve");
+  else if (f.id === "dashRejectForm") sendDashReject(f);
   else if (f.id === "distForm") saveDist(f);
   else if (f.id === "moveForm") saveInvoiceMovement(f);
   else if (f.id === "amendReqForm") requestInvoiceAmendment(f);
@@ -3110,6 +8037,13 @@ document.addEventListener("submit", e => {
   else if (f.id === "limitForm") saveLimit(f);
   else if (f.id === "verifyForm") submitVerification(f);
   else if (f.id === "entryForm") saveEntry(f);
+  else if (f.id === "expForm") saveExpense(f);
+  else if (f.id === "expReceiptForm") saveExpenseReceipt(f);
+  else if (f.id === "expReverseForm") saveExpenseReverse(f);
+  else if (f.id === "expHeadForm") saveExpenseHead(f);
+  else if (f.id === "expSettingsForm") saveExpenseSettings(f);
+  else if (f.id === "focForm") saveFocNote(f);
+  else if (f.id === "focReasonForm") saveFocReason(f);
   else if (f.id === "leadForm") saveLead(f);
   else if (f.id === "actForm") saveActivity(f);
   else if (f.id === "lstatusForm") saveLeadStatus(f);
@@ -3127,12 +8061,28 @@ document.addEventListener("submit", e => {
   else if (f.id === "slabForm") saveSlab(f);
   else if (f.id === "slabPatchForm") saveSlabPatch(f);
   else if (f.id === "quoteForm") doQuote(f);
-  else if (f.id === "hrEmpForm") saveHrEmployee(f);
   else if (f.id === "hrShiftForm") saveHrShift(f);
+  else if (f.id === "hrBranchForm") saveHrBranch(f);
+  else if (f.id === "hrOfficeForm") saveHrOffice(f);
+  else if (f.id === "hrRuleForm") saveHrRule(f);
   else if (f.id === "hrManualForm") saveManualAttendance(f);
   else if (f.id === "hrLeaveForm") saveHrLeave(f);
   else if (f.id === "hrOdForm") saveHrOd(f);
   else if (f.id === "hrPeriodForm") saveHrPeriod(f);
+  else if (f.id === "hrDocForm") saveHrDoc(f);
+  else if (f.id === "hrAssetForm") saveHrAsset(f);
+  else if (f.id === "hrAssetReturnForm") saveHrAssetReturn(f);
+  else if (f.id === "hrNoticeForm") saveHrNotice(f);
+  else if (f.id === "hrLockForm") saveHrLock(f);
+  else if (f.id === "hrUnlockForm") saveHrUnlock(f);
+  else if (f.id === "hrSavedForm") saveHrFilter(f);
+  else if (f.id === "hrLetForm") saveHrLetterTemplate(f);
+  else if (f.id === "srForm") saveSchedule(f);
+  else if (f.id === "srRecipientForm") saveRecipient(f);
+  else if (f.id === "emailSettingsForm") saveEmailSettings(f);
+  else if (f.id === "emailTestForm") sendEmailTest(f);
+  else if (f.id === "dbResetForm1") dbResetBegin(f);
+  else if (f.id === "dbResetForm4") dbResetExecute(f);
 });
 document.addEventListener("input", e => {
   if (e.target.closest("#poForm")) syncPoLines();
@@ -3142,10 +8092,59 @@ document.addEventListener("input", e => {
   if (e.target.id === "cuq") renderCustomers();
   if (e.target.id === "pq") renderProducts();
   if (e.target.id === "rpq") { state.rpSearch = e.target.value; drawRpTabs(); }
+  if (e.target.id === "hrq") renderHrDirectory();
+  if (e.target.id === "expq") {
+    clearTimeout(state.exp.timer);
+    state.exp.q = e.target.value.trim();
+    state.exp.timer = setTimeout(loadExpenses, 300);
+  }
 });
 document.addEventListener("change", e => {
   if (e.target.closest("#poForm")) syncPoLines();
+  if (e.target.closest("#roleForm") && e.target.name === "perm") {
+    syncPermissionTree(e.target.closest("form"));
+  }
   if (e.target.id === "rpCategory") { state.rpCategory = e.target.value; drawRpTabs(); }
+  if (e.target.id === "em-type") applyEmailType(true);
+  if (e.target.id === "dashFrom" || e.target.id === "dashTo") {
+    applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
+  }
+  if (e.target.id === "cmpMonth") setCompareMonth(e.target.value);
+  if (e.target.id === "geoFrom" || e.target.id === "geoTo") {
+    applyGeoDates($("#geoFrom").value, $("#geoTo").value);
+  }
+  if (e.target.id === "hrStatus" || e.target.id === "hrDept") renderHrDirectory();
+  if (e.target.id === "expHead") setExpenseHead(e.target.value);
+});
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    state.palette.open ? closePalette() : openPalette();
+    return;
+  }
+  if (!state.palette.open) return;
+  if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closePalette(); return; }
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const n = state.palette.items.length;
+    if (!n) return;
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    const base = state.palette.i < 0 ? (step > 0 ? -1 : n) : state.palette.i;
+    paletteSetIndex(base + step);
+    return;
+  }
+  if (e.key === "Enter") {
+    const item = state.palette.items[state.palette.i];
+    if (item) { e.preventDefault(); paletteGo(item); }
+    return;
+  }
+  if (e.key === "Tab") {
+    const f = $$("#palette button, #palette input").filter(x => x.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); e.stopImmediatePropagation(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); e.stopImmediatePropagation(); first.focus(); }
+  }
 });
 document.addEventListener("keydown", e => {
   if (!drawerOpen()) return;
@@ -3158,20 +8157,58 @@ document.addEventListener("keydown", e => {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 });
-$("#scrim").addEventListener("click", closeDrawer);
-$("#dclose").addEventListener("click", closeDrawer);
+/* One missing marker must not stop the rest of the page from booting: bind only
+   when the element is there, so a stale markup/cache pair degrades to one dead
+   control instead of a blank screen. */
+const bind = (sel, event, fn) => { const el = typeof sel === "string" ? $(sel) : sel; if (el) el.addEventListener(event, fn); return el; };
+bind("#scrim", "click", closeDrawer);
+bind("#dclose", "click", closeDrawer);
 const signOut = async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); };
-$("#out").addEventListener("click", signOut);
-$("#mcOut").addEventListener("click", signOut);
-["pq", "sq", "lq", "oq"].forEach(id => $("#" + id).addEventListener("input", () => ({pq: renderProducts, sq: renderStock, lq: renderLedger, oq: renderPOs})[id]()));
-$("#supq").addEventListener("input", renderSuppliers);
-$("#soq").addEventListener("input", renderSales);
-$("#biq").addEventListener("input", renderBilling);
-$("#ldq").addEventListener("input", renderLeads);
-$("#rateq").addEventListener("input", renderTax);
+bind("#out", "click", signOut);
+bind("#mcOut", "click", signOut);
+bind("#themeToggle", "click", toggleTheme);
+bind("#dashTheme", "click", toggleTheme);
+bind("#paletteQ", "input", e => {
+  clearTimeout(state.palette.timer);
+  const term = e.target.value.trim();
+  state.palette.timer = setTimeout(() => paletteSearch(term), 180);
+});
+bind("#paletteResults", "click", e => {
+  const item = e.target.closest(".palette-item");
+  if (item) paletteGo(item);
+});
+bind("#palette", "click", e => { if (e.target.id === "palette") closePalette(); });
+const chartEl = $("#salesChart");
+if (chartEl) {
+  chartEl.addEventListener("pointermove", e => {
+    const hit = e.target.closest("[data-i]");
+    if (hit) chartTip(Number(hit.dataset.i));
+  });
+  chartEl.addEventListener("pointerleave", hideChartTip);
+  chartEl.addEventListener("blur", hideChartTip);
+  chartEl.addEventListener("keydown", e => {
+    const c = state.dashboard && state.dashboard.sales_vs_purchases;
+    if (!c || !c.series || !c.series.length) return;
+    const n = c.series.length;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      const i = state.chart.index < 0
+        ? (e.key === "ArrowRight" ? 0 : n - 1)
+        : Math.max(0, Math.min(n - 1, state.chart.index + (e.key === "ArrowRight" ? 1 : -1)));
+      chartTip(i);
+    } else if (e.key === "Escape") {
+      hideChartTip();
+    }
+  });
+}
+["pq", "sq", "lq", "oq"].forEach(id => bind("#" + id, "input", () => ({pq: renderProducts, sq: renderStock, lq: renderLedger, oq: renderPOs})[id]));
+bind("#supq", "input", renderSuppliers);
+bind("#soq", "input", renderSales);
+bind("#biq", "input", renderBilling);
+bind("#ldq", "input", renderLeads);
+bind("#rateq", "input", renderTax);
 document.addEventListener("change", e => {
-  if (e.target.id === "rpFrom" || e.target.id === "rpTo") { state.rp.from = $("#rpFrom").value; state.rp.to = $("#rpTo").value; markPreset(""); loadReport(); }
-  if (["rpEmployee", "rpDepartment", "rpBranch"].includes(e.target.id)) {
+  if (e.target.id === "rpFrom" || e.target.id === "rpTo") { state.rp.from = $("#rpFrom").value; state.rp.to = $("#rpTo").value; markPreset(""); loadReport(); }  if (["rpEmployee", "rpDepartment", "rpBranch"].includes(e.target.id)) {
     const key = {rpEmployee: "employee_id", rpDepartment: "department", rpBranch: "branch_id"}[e.target.id];
     state.rp.filters[key] = e.target.value;
     state.rpPage = 1;
@@ -3183,19 +8220,90 @@ document.addEventListener("change", e => {                       // activity for
   if (e.target.name === "kind" && f.elements.date) f.elements.date.value = e.target.value === "note" ? "" : (f.elements.date.value || isoDay(3));
   if (e.target.name === "clear" && f.elements.date) f.elements.date.disabled = e.target.checked;
 });
-$("#swh").addEventListener("change", renderStock);
-$("#sin").addEventListener("change", renderStock);
-$("#ltype").addEventListener("change", renderLedger);
-["audAction", "audActor", "audFrom", "audTo"].forEach(id => $("#" + id).addEventListener("change", loadAudit));
-// The distributor filter is rebuilt with the header on every render, so it is
-// handled by delegation. Without this the choice did nothing until the screen
-// was reloaded, which is why the All/Active/Blocked filter looked broken.
+bind("#swh", "change", renderStock);
+bind("#sin", "change", renderStock);
+bind("#ltype", "change", renderLedger);
+["audAction", "audActor", "audFrom", "audTo"].forEach(id => bind("#" + id, "change", loadAudit));
+// The party master's status filter sits in the page toolbar, so it survives a
+// re-render; only the chosen value has to be kept in state.
 document.addEventListener("change", e => {
-  if (e.target.id !== "dists-filter") return;
+  if (e.target.id !== "cuFilter") return;
   state.distFilter = e.target.value;
-  renderDists();   // the header's own copy of the select keeps the chosen value
+  renderCustomers();
 });
-window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); route(); } });
+// The receipt drawer's warehouse choice shows the capacity it is going into.
+document.addEventListener("change", e => {
+  if (e.target.id !== "r-wh") return;
+  const note = $("#rWhNote");
+  if (note) note.textContent = warehouseCapacityNote(e.target.value);
+});
+// Scheduled reports: frequency and pack change which fields apply, a named
+// recipient's To/CC/BCC follows its checkbox, and the log filters reload it.
+// HR month views reload the matrix or calendar; the picker is rebuilt each time.
+document.addEventListener("change", e => {
+  if (e.target.id === "hrMxMonth" || e.target.id === "hrMxDept") {
+    if (e.target.id === "hrMxMonth") state.hr.mxMonth = e.target.value;
+    else state.hr.mxDept = e.target.value;
+    loadHrMx();
+  }
+  if (e.target.id === "hrCalMonth" || e.target.id === "hrCalDept") {
+    if (e.target.id === "hrCalMonth") state.hr.calMonth = e.target.value;
+    else state.hr.calDept = e.target.value;
+    loadHrCal();
+  }
+  if (e.target.id === "hrMxBranch" || e.target.id === "hrMxOffice") {
+    if (e.target.id === "hrMxOffice") {
+      state.hr.mxOffice = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.mxOffice);
+      if (o && o.branch_id) state.hr.mxBranch = String(o.branch_id);
+    } else {
+      state.hr.mxBranch = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.mxOffice);
+      if (o && String(o.branch_id) !== state.hr.mxBranch) state.hr.mxOffice = "";
+    }
+    hrMonthly();
+  }
+  if (e.target.id === "hrRepBranch" || e.target.id === "hrRepOffice") {
+    if (e.target.id === "hrRepOffice") {
+      state.hr.repOffice = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.repOffice);
+      if (o && o.branch_id) state.hr.repBranch = String(o.branch_id);
+    } else {
+      state.hr.repBranch = e.target.value;
+      const o = (state.hr.offices || []).find(x => String(x.id) === state.hr.repOffice);
+      if (o && String(o.branch_id) !== state.hr.repBranch) state.hr.repOffice = "";
+    }
+    hrReports();
+  }
+  if (e.target.id === "hrBranchFilter") setHrSite("branch", e.target.value);
+  if (e.target.id === "hrOfficeFilter") setHrSite("office", e.target.value);
+});
+document.addEventListener("change", e => {
+  if (e.target.id === "sr-freq" || e.target.id === "sr-monthrule") srFreqSync();
+  if (e.target.id === "sr-pack") srPackSync();
+  if (e.target.name === "rcpt" && e.target.closest("#srForm")) {
+    const sel = $(`[data-sr-field="${e.target.value}"]`, $("#srForm"));
+    if (sel) sel.disabled = !e.target.checked;
+  }
+  if (e.target.id === "srLogStatus") { state.sr.logStatus = e.target.value; loadDeliveries(); }
+  if (e.target.id === "srLogPack") { state.sr.logPack = e.target.value; loadDeliveries(); }
+});
+// Accounts performance: the window reloads the report and the comparison; the
+// region narrows only the flows the server can attribute to a buyer state.
+document.addEventListener("change", e => {
+  if (e.target.id === "accFrom") return setAccWindow(e.target.value, null);
+  if (e.target.id === "accTo") return setAccWindow(null, e.target.value);
+  if (e.target.id === "accState") return setAccStateFilter(e.target.value);
+  if (e.target.id === "accMonth") return setAccMonth(e.target.value);
+});
+window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); closePalette(); route(); } });
+
+let startTheme = "light";
+try {
+  startTheme = localStorage.getItem("hb.theme")
+    || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+} catch (e) { /* storage blocked */ }
+applyTheme(startTheme === "dark" ? "dark" : "light");
 
 boot();
 })();

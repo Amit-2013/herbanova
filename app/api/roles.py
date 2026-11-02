@@ -16,11 +16,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..core.permissions import PERMISSIONS
+from ..core.permissions import (ADMIN_ONLY_PERMISSIONS, PERMISSIONS,
+                                effective_permissions, parent_of)
 from ..core.rbac import require
 from ..models.core import User
 from ..models.users import Role
-from ..services.accounts import guard_last_admin, validate_permissions
+from ..services.accounts import (dropped_permissions, guard_last_admin,
+                                 validate_permissions)
 from ..services.audit import audit
 
 router = APIRouter(prefix="/api/roles", tags=["roles"])
@@ -32,6 +34,7 @@ class RoleOut(BaseModel):
     display_name: str
     is_system: bool
     permissions: list[str]
+    effective_permissions: list[str]
     user_count: int
 
 
@@ -58,8 +61,10 @@ def _counts(db: Session) -> dict[int, int]:
 
 
 def _out(r: Role, counts: dict[int, int]) -> RoleOut:
+    stored = set(r.permissions or [])
     return RoleOut(id=r.id, name=r.name, display_name=r.display_name,
-                   is_system=r.is_system, permissions=sorted(r.permissions or []),
+                   is_system=r.is_system, permissions=sorted(stored),
+                   effective_permissions=sorted(effective_permissions(stored)),
                    user_count=counts.get(r.id, 0))
 
 
@@ -71,10 +76,18 @@ def list_roles(db: Session = Depends(get_db), _=Depends(require("user:manage")))
 
 @router.get("/permissions")
 def permission_catalog(_=Depends(require("user:manage"))):
-    """The permission matrix source: every key, grouped by module."""
+    """The permission tree: every key, grouped by module, with its parent.
+
+    The browser uses `parent` to disable a child until its parent is checked and
+    `admin_only` to lock a key to the Administrator role. The server enforces
+    both regardless of what the browser sends.
+    """
     grouped: dict[str, list[dict]] = defaultdict(list)
     for key, (desc, module) in sorted(PERMISSIONS.items()):
-        grouped[module].append({"key": key, "description": desc})
+        grouped[module].append({
+            "key": key, "description": desc, "module": module,
+            "parent": parent_of(key), "admin_only": key in ADMIN_ONLY_PERMISSIONS,
+        })
     return [{"module": m, "items": items} for m, items in grouped.items()]
 
 
@@ -83,7 +96,7 @@ def create_role(body: CreateRoleIn, db: Session = Depends(get_db),
                 actor=Depends(require("user:manage"))):
     if len(body.name) < 3:
         raise HTTPException(422, "Role name must be at least 3 characters")
-    perms = validate_permissions(body.permissions)
+    perms = validate_permissions(body.permissions, role_name=body.name)
     role = Role(name=body.name, display_name=(body.display_name or body.name).strip(),
                 is_system=False, permissions=perms)
     db.add(role)
@@ -93,7 +106,8 @@ def create_role(body: CreateRoleIn, db: Session = Depends(get_db),
         db.rollback()
         raise HTTPException(409, "A role with that name already exists")
     audit(db, actor.id, "role.create", f"role:{role.id}",
-          {"name": role.name, "permissions": perms})
+          {"name": role.name, "permissions": perms,
+           "dropped_children": dropped_permissions(body.permissions)})
     db.commit()
     return _out(role, {})
 
@@ -111,7 +125,14 @@ def update_role(role_id: int, body: UpdateRoleIn, db: Session = Depends(get_db),
         changes["display_name"] = role.display_name
 
     if body.permissions is not None:
-        perms = validate_permissions(body.permissions)
+        perms = validate_permissions(body.permissions, role_name=role.name)
+        if (role.name or "").strip().lower() == "admin":
+            missing = sorted(ADMIN_ONLY_PERMISSIONS - set(perms))
+            if missing:
+                # Only the Administrator can hold these keys, so clearing one
+                # from the Administrator would leave it unassignable everywhere.
+                raise HTTPException(422, "The Administrator role must keep: "
+                                         + ", ".join(missing))
         old = sorted(role.permissions or [])
         if perms != old:
             if "user:manage" in old and "user:manage" not in perms:
@@ -122,6 +143,9 @@ def update_role(role_id: int, body: UpdateRoleIn, db: Session = Depends(get_db),
             role.permissions = perms
             changes["permissions"] = {"added": sorted(set(perms) - set(old)),
                                       "removed": sorted(set(old) - set(perms))}
+            dropped = dropped_permissions(body.permissions)
+            if dropped:
+                changes["dropped_children"] = dropped
 
     if changes:
         audit(db, actor.id, "role.update", f"role:{role.id}",

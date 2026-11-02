@@ -1,155 +1,96 @@
-"""Database wipe endpoint (admin only, gated by the admin secondary password).
+"""Guarded database reset (Administrator only).
 
-This is not a substitute for a verified backup. The documented recovery tool is
-the backup/restore test: ``python backup_restore_test.py``. Before any wipe, the
-administration owner should have a verified restore captured in audit evidence.
+The four steps are separate endpoints and each one validates the previous step
+on the server: a token signed for that exact stage, a run journal that records
+where the run actually is, and — for the final step — a separate reset key.
+Skipping a step is not a UI mistake, it is a rejected request.
 
-The wipe is deliberately limited to a local/test installation with
-``DEMO_MODE=true``. It clears business data but preserves users, roles and
-employees so the administrator can still sign in afterwards.
+The old ``POST /api/db/reset`` endpoint wiped business data with a single
+secondary password and no backup. It is gone; the path now answers 410 and
+points at this flow, so an old caller cannot destroy a database by accident.
 """
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import inspect, text
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 
-from app.core.config import settings
-from app.core.db import get_db
-from app.core.rbac import require
-from app.core.security import verify_secondary_password
-from app.models.core import User
-from app.services.audit import audit
+from ..core.rbac import require_admin
+from ..services import db_reset
 
-router = APIRouter()
+router = APIRouter(prefix="/api/db-reset", tags=["database reset"])
+legacy_router = APIRouter(tags=["database reset"])
 
 
-class ResetRequest(BaseModel):
-    secondary_password: str
+class BeginRequest(BaseModel):
+    mode: str = "business"
+    password: str = Field(min_length=1)
+    phrase: str = Field(min_length=1)
 
 
-class ResetResponse(BaseModel):
-    cleared_at: str
-    db_reset_count: int
+class StepRequest(BaseModel):
+    run_id: str
+    token: str
 
 
-# Tables whose rows are wiped by the reset. Users, roles and employees are
-# deliberately absent so the application still has accounts to sign in with.
-# This must track the business tables in the current schema; the endpoint
-# intersects it with the tables that actually exist, so an older database does
-# not fail because a newer table is missing.
-_RESET_TABLES = frozenset({
-    "approval_requests",
-    "audit_log",
-    "batches",
-    "company_profile",
-    "credit_note_lines",
-    "credit_notes",
-    "debit_note_lines",
-    "debit_notes",
-    "discount_slabs",
-    "distributors",
-    "document_sequences",
-    "goods_receipt_lines",
-    "goods_receipts",
-    "invoice_lines",
-    "invoices",
-    "lead_activities",
-    "leads",
-    "print_logs",
-    "products",
-    "purchase_order_lines",
-    "purchase_orders",
-    "sales_order_lines",
-    "sales_orders",
-    "stock_movements",
-    "suppliers",
-    "tax_rates",
-    "warehouses",
-})
+class ExecuteRequest(StepRequest):
+    reset_key: str = Field(min_length=1)
 
 
-def _is_demo(db: Session) -> bool:
-    """Only allow the wipe on the local/test demo installation."""
-    if not settings.demo_mode:
-        return False
-    if settings.app_env not in {"local", "test"}:
-        return False
-    existing = {t for t in inspect(db.bind).get_table_names(schema="public")
-                if t in _RESET_TABLES}
-    if not existing:
-        raise HTTPException(
-            status_code=409,
-            detail="No business data tables found; run the demo seed before reset.",
-        )
-    return True
+class CancelRequest(BaseModel):
+    run_id: str
 
 
-def _clear_business_data(db: Session) -> list[tuple[str, int]]:
-    """Truncate every business table, returning the row counts from before."""
-    existing = set(inspect(db.bind).get_table_names(schema="public"))
-    tables = sorted(_RESET_TABLES & existing)
-    if not tables:
-        raise HTTPException(
-            status_code=409,
-            detail="No business data tables found; run the demo seed before reset.",
-        )
+@router.get("/status", summary="Whether the guarded reset is available")
+def status(actor=Depends(require_admin("db:reset"))):
+    state = db_reset.lock_state(actor.id)
+    return {
+        "enabled": db_reset.settings.db_reset_enabled,
+        "database": db_reset.database_name(),
+        "phrase": f"RESET {db_reset.database_name()}",
+        "prerequisites": db_reset.prerequisites(),
+        "locked": state["locked"],
+        "locked_until": state["locked_until"],
+        "failures": state["failures"],
+        "max_attempts": db_reset.settings.db_reset_max_attempts,
+        "maintenance": db_reset.current_maintenance(),
+        "modes": [
+            {"key": "business", "label": "Business data only",
+             "detail": "Clears documents, stock, payments and HR transactions. Keeps users, "
+                       "employees, roles, settings and master data."},
+            {"key": "full", "label": "Full reset",
+             "detail": "Drops the schema, replays the migrations and recreates the base "
+                       "Administrator. Everyone signs in again."},
+        ],
+        "recent": db_reset.audit_tail(10),
+    }
 
-    counted = [
-        (table, int(db.execute(text(f'SELECT count(*) FROM "{table}"')).scalar() or 0))
-        for table in tables
-    ]
-    # One statement keeps the wipe transactional. CASCADE covers any table that
-    # references a listed table but is not itself listed; users, roles and
-    # employees are not referenced by any of these tables, so they survive.
-    db.execute(text("TRUNCATE TABLE " + ", ".join(f'"{t}"' for t in tables)
-                    + " RESTART IDENTITY CASCADE"))
-    return counted
+
+@router.post("/begin", summary="Step 1: login password and confirmation phrase")
+def begin(req: BeginRequest, actor=Depends(require_admin("db:reset"))):
+    return db_reset.begin(actor, req.mode, req.password, req.phrase)
 
 
-@router.post("/api/db/reset", response_model=ResetResponse, summary="Wipe all business data")
-def reset_db(req: ResetRequest, db: Session = Depends(get_db),
-             actor=Depends(require("db:reset"))):
-    admin = db.get(User, actor.id)
-    if admin is None or not admin.is_active:
-        raise HTTPException(status_code=403, detail="The acting administrator account is not active.")
+@router.post("/backup", summary="Step 2: two encrypted backups on separate devices")
+def backup(req: StepRequest, actor=Depends(require_admin("db:reset"))):
+    return db_reset.create_backups(actor, req.run_id, req.token)
 
-    if not _is_demo(db):
-        raise HTTPException(
-            status_code=403,
-            detail="Database reset is only available when DEMO_MODE=true and "
-                   "APP_ENV is local or test.",
-        )
 
-    # Ask for the admin's secondary password, not the daily login password. This
-    # is a separate secret the owner sets with /api/admin/secondary-password and
-    # rotates independently.
-    if not admin.reset_password_secondary_hash:
-        raise HTTPException(
-            status_code=403,
-            detail="This administrator has no secondary password set. "
-            "Set one with POST /api/admin/secondary-password before reset.",
-        )
+@router.post("/verify", summary="Step 3: checksum, restore test and row counts")
+def verify(req: StepRequest, actor=Depends(require_admin("db:reset"))):
+    return db_reset.verify_backups(actor, req.run_id, req.token)
 
-    if not verify_secondary_password(admin.reset_password_secondary_hash,
-                                     req.secondary_password):
-        audit(db, actor.id, "db.reset_failed", f"admin {admin.username}",
-              {"attempted": True})
-        db.commit()
-        raise HTTPException(
-            status_code=403,
-            detail="Secondary password is incorrect for this administrator.",
-        )
 
-    cleared = _clear_business_data(db)
-    now = datetime.now(timezone.utc)
-    admin.db_reset_count = (admin.db_reset_count or 0) + 1
-    admin.db_reset_at = now
-    audit(db, actor.id, "db.reset", f"admin {admin.username}", {
-        "tables_cleared": len(cleared),
-        "rows_cleared": sum(count for _, count in cleared),
-        "reset_count": admin.db_reset_count,
-    })
-    db.commit()
-    return ResetResponse(cleared_at=now.isoformat(), db_reset_count=admin.db_reset_count)
+@router.post("/execute", summary="Step 4: separate reset key, then reset")
+def execute(req: ExecuteRequest, actor=Depends(require_admin("db:reset"))):
+    return db_reset.execute(actor, req.run_id, req.token, req.reset_key)
+
+
+@router.post("/cancel", summary="Abandon a run and resume writes")
+def cancel(req: CancelRequest, actor=Depends(require_admin("db:reset"))):
+    return db_reset.cancel(actor, req.run_id)
+
+
+@legacy_router.post("/api/db/reset", include_in_schema=False)
+def legacy_reset():
+    raise HTTPException(
+        410, "The single-step wipe has been removed. Use Reset Database in Settings & "
+             "Administration: it takes two encrypted backups, verifies them and asks for a "
+             "separate reset key.")

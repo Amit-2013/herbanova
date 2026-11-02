@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..models.core import (Batch, CreditNote, CreditNoteLine, DebitNote, DebitNoteLine,
                            Invoice, InvoiceLine, StockMovement, Warehouse)
+from ..services import costing
 from ..services.inventory import post_movement
 from ..services.numbering import next_document_number
 from ..services.tax import money
@@ -234,8 +235,14 @@ def _post_returns(db: Session, *, note: CreditNote, invoice: Invoice, prepared,
     batch, so returned stock carries the same expiry the goods had when they
     were originally dispatched.
     """
+    # A return re-enters the weighted average, so it takes the same product lock
+    # a dispatch does before it reads the invoice cost and writes the movement.
+    costing.lock_products(db, [inv.product_id for inv, _q, _a in prepared])
     for inv_line, qty, _amounts in prepared:
         batches = _return_batches(db, invoice, inv_line.product_id)
+        # A returned unit reduces cost of goods at the cost the invoice issued it.
+        return_cost, return_source = costing.invoice_product_cost(
+            db, invoice.id, inv_line.product_id)
         left = qty
         for batch, issued in batches:
             if left <= 0:
@@ -250,7 +257,9 @@ def _post_returns(db: Session, *, note: CreditNote, invoice: Invoice, prepared,
                 continue
             try:
                 post_movement(db, batch_id=batch.id, qty_delta=take, movement_type="return",
-                              ref_type="credit_note", ref_id=str(note.id), actor_id=issued_by)
+                              ref_type="credit_note", ref_id=str(note.id),
+                              actor_id=issued_by, unit_cost=return_cost,
+                              cost_source=return_source, invoice_id=invoice.id)
             except Exception as exc:                  # HTTPException from the ledger guard
                 raise NoteError(
                     f"{inv_line.sku}: the goods could not be returned to batch "

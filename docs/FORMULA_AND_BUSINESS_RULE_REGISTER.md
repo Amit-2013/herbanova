@@ -24,11 +24,11 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 
 ### F-01 — Money quantisation (paisa)
 - **Formula:** `money(x) = Decimal(x or 0).quantize(0.01, ROUND_HALF_UP)`
-- **Source:** `app/services/tax.py:35-36`; the same quantiser is re-declared in `app/services/ledger.py:37`, `app/services/payroll.py:28`, and `app/services/reports.py:195-201`.
+- **Source:** `app/services/tax.py:35-36`; the same quantiser is re-declared in `app/services/ledger.py:37-41`, `app/services/payroll.py:28`, and `app/services/reports.py:195-201`.
 - **Conditions:** applied to unit prices, line values, tax heads, totals, outstanding balances and payroll amounts.
 - **Rounding:** half-up to two decimal places.
 - **Tests:** indirect across every issued invoice assertion in `tests/test_report_reconciliation.py`.
-- **Status:** VERIFIED (code).
+- **Status:** VERIFIED (code). Fixed 2026-11-01: `ledger.money` was using the Decimal default (half-even) and now explicitly uses `ROUND_HALF_UP`, matching the documented rule and the tax/payroll helpers.
 
 ### F-02 — GST rate resolution by HSN and date
 - **Formula:** select the `TaxRate` where `hsn = requested HSN`, `effective_from <= on`, and `effective_to IS NULL OR effective_to >= on`; order by `effective_from` descending and take the first. No match returns `None`.
@@ -72,10 +72,10 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 
 ### F-07 — Discount percent implied by price below MRP (sales order)
 - **Formula:** `discount_pct = ((mrp − price) ÷ mrp × 100).quantize(0.1, ROUND_HALF_UP)`; zero when MRP is zero.
-- **Source:** `app/services/order_tax.py:42-46`; a second implementation for validation is at `app/api/sales_orders.py:33-36`.
+- **Source:** `app/services/order_tax.py:42-46` — one implementation, imported by `app/api/sales_orders.py:21` (approval check and order output) and `app/services/invoice.py:19` (invoice discount snapshot).
 - **Conditions:** price above MRP is refused by order validation; equality yields 0 percent.
 - **Tests:** discount approval reasons are exercised in `tests/test_approvals.py`.
-- **Status:** VERIFIED (code); two separate implementations are a drift risk noted for consolidation.
+- **Status:** VERIFIED (code). Consolidated 2026-11-01: the second implementation in `app/api/sales_orders.py` was removed so the approval check, tax preview and invoice snapshot cannot drift.
 
 ### F-08 — Discount slab applicability
 - **Formula:** a slab applies when it is active, `effective_from <= on`, `effective_to IS NULL OR effective_to >= on`, its scope matches (`product` by product id, `group` by distributor group, `all`), and the quantity and/or value bands contain the line (a missing bound is open-ended).
@@ -172,8 +172,8 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 - **Status:** VERIFIED.
 
 ### F-23 — Approval decision authority
-- **Formula:** a `credit_limit` request can only be decided by a literal administrator; ordinary sales-order decisions need `approval:decide` or administrator; the requester and the order creator cannot decide; a request can be decided once.
-- **Source:** `app/api/approvals.py:163-201`.
+- **Formula:** a `credit_limit` request can only be decided by a literal administrator; ordinary sales-order decisions need `approval:decide` or administrator; the requester and the order creator cannot decide; a request can be decided once. The same rules compute the queue's `can_decide` flag (HR types additionally need their per-type permission — `hr:leave_approve`, `hr:attendance_manage` or `hr:payroll_approve`), so the screen offers a decision only where the server would accept it.
+- **Source:** `app/api/approvals.py:192-253`.
 - **Tests:** `tests/test_approvals.py:30-76`.
 - **Status:** VERIFIED.
 
@@ -447,6 +447,30 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 - **Formula:** nobody may decide their own request; each HR request type checks its own permission (`hr:leave_approve`, `hr:attendance_manage`, `hr:payroll_approve`); the payroll preparer cannot approve.
 - **Source:** `app/services/hr_approvals.py:22-160`.
 - **Tests:** `tests/test_hr.py:11-47`.
+- **Status:** VERIFIED.
+
+### F-76 — Attendance requirement resolution
+- **Formula:** consider only active rules whose `effective_from <= day <= effective_to` (open ends allowed) where every non-null target matches the employee. Score = employee 1000, office 100, designation 10, branch 1. Choose the highest score, then the lowest `priority`, then the highest `id`. If nothing matches, the requirement is `required: true, self_service: true`, source `"Company default"`. A rule with only an office target reports `"Office default (<name>)"`.
+- **Source:** `app/services/hr.py:resolve_attendance_requirement`, `rule_label`.
+- **Tests:** `tests/test_hr_sites.py::test_rule_validation_precedence_and_effective_dates`.
+- **Status:** VERIFIED.
+
+### F-77 — Attendance gating
+- **Rule:** before a self check-in/out, correction request, manual entry or bulk row, the resolved requirement is applied. `required = false` refuses every attendance write with **409** naming the source; `self_service = false` refuses the employee's own punch. A rule's `shift_id` replaces the employee's shift for that day; its `attendance_mode` replaces the office mode while the rule is in force. An office's own mode is never rewritten.
+- **Source:** `app/services/hr.py:require_attendance`, `require_self_service`, `requirement_shift`; `app/api/hr.py` attendance endpoints.
+- **Tests:** `tests/test_hr_sites.py::test_exempt_employee_is_blocked_from_manual_bulk_and_correction`, `::test_self_service_check_in_obeys_the_rule`.
+- **Status:** VERIFIED.
+
+### F-78 — Exempt day in the monthly register and payroll
+- **Rule:** a day the policy does not require is returned as `status: null, not_required: true`, counted in `not_required_days`, and drawn as `–` with the legend “not required”. It is **not** a gap and **not** an absence. Payroll payable days for an exempt employee = `working_days − recorded unpaid days` (paid leave and OD are not deducted); the period note states attendance is not required.
+- **Source:** `app/services/hr.py:monthly_attendance`; `app/services/payroll.py` exempt branch.
+- **Tests:** `tests/test_hr_sites.py::test_monthly_register_marks_exempt_days_as_not_required`, `::test_payroll_does_not_invent_absence_for_exempt_employees`.
+- **Status:** VERIFIED.
+
+### F-79 — Office belongs to one branch
+- **Rule:** an employee may name a branch, an office, or both. When both are named and the office’s branch differs, the request is refused with **422**; when only the office is named, the branch is inferred from it. A branch or office with active staff cannot be deactivated, and an office cannot be moved to another branch, until those employees are reassigned (409).
+- **Source:** `app/api/hr.py:_normalise_employee_location`, `update_branch`, `update_office`.
+- **Tests:** `tests/test_hr_sites.py::test_sites_crud_and_employee_assignment`.
 - **Status:** VERIFIED.
 
 ---

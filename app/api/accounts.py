@@ -27,6 +27,7 @@ from ..core.rbac import require
 from ..models.accounts import MODES, PAYMENT, RECEIPT, Payment
 from ..models.core import Distributor, Invoice, PurchaseOrder
 from ..models.suppliers import Supplier
+from ..services import accounting
 from ..services import ledger as svc
 from ..services.audit import audit
 
@@ -250,3 +251,43 @@ def gst_register(date_from: date | None = Query(default=None),
 def trial_balance(as_of: date | None = Query(default=None),
                   db: Session = Depends(get_db), _=Depends(require("accounts:read"))):
     return svc.trial_balance(db, as_of)
+
+
+# ------------------------------------------------- accounts dashboard (D-39)
+def _window(from_date: date | None, to_date: date | None) -> tuple[date, date]:
+    today = date.today()
+    end = to_date or today
+    start = from_date or end.replace(day=1)
+    if end > today:
+        raise HTTPException(422, "to_date cannot be in the future")
+    if start > end:
+        raise HTTPException(422, "from_date cannot be after to_date")
+    return start, end
+
+
+@router.get("/report")
+def account_report(from_date: date | None = None, to_date: date | None = None,
+                   state: str | None = Query(default=None, min_length=2, max_length=2),
+                   db: Session = Depends(get_db),
+                   _=Depends(require("accounts:reports"))):
+    """The Accounts dashboard for one window, with the monthly trend and regions.
+
+    The full statements stay on `accounts:read`; this report is the narrower
+    right the Administrator grants to the MD or an Accounts head (D-39).
+    """
+    if state is not None and not state.isdigit():
+        raise HTTPException(422, "state must be a two-digit GST state code")
+    start, end = _window(from_date, to_date)
+    return accounting.report(db, start, end, state=state)
+
+
+@router.get("/report/compare")
+def account_compare(mode: str = "full_month", month: str | None = None,
+                    db: Session = Depends(get_db),
+                    _=Depends(require("accounts:reports"))):
+    """Month-on-month and year-on-year Accounts figures, full month or month to date."""
+    if mode not in ("full_month", "mtd"):
+        raise HTTPException(422, "mode must be full_month or mtd")
+    from ..api.dashboard import _parse_month
+
+    return accounting.compare(db, mode, _parse_month(month, date.today()), date.today())

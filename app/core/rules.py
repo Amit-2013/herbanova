@@ -24,6 +24,7 @@ PO_RATE_REMARKS: dict[str, str] = {
 APPROVAL_TYPES: dict[str, str] = {
     "sales_order": "Sales order",
     "invoice_post_billing": "Post-billing edit",
+    "expense": "Expense",
     "hr_leave": "Leave application",
     "hr_od": "On-duty request",
     "hr_attendance_correction": "Attendance correction",

@@ -1,0 +1,255 @@
+# Dashboard v2 — decisions and assumptions
+
+**Date:** 1 November 2026
+**Branch:** `feature/dashboard-v2`
+**Rule applied throughout:** when the data does not exist, show "No data yet" with the gap code; never invent a figure; never change an existing permission; every schema change gets a migration and a rollback.
+
+This file records every decision taken without the owner present, so each one can be reviewed or reversed.
+
+---
+
+## D-01. Work happens on a new branch with one commit per step
+
+**Decision.** All v2 work is committed to `feature/dashboard-v2`, one commit per requested step, with the verified pre-v2 work as the first (baseline) commit.
+**Why.** The owner asked for a branch and per-step commits. A separate baseline keeps the v2 history readable and gives a clean rollback point (`master` is untouched).
+**How to reverse.** `git checkout master` and delete the branch; no data or schema on `master` changed.
+
+## D-02. The date filter defaults to the current month, not 30 days
+
+**Decision.** `from_date`/`to_date` default to the first day of the current month and today. `range=7|30|90` stays accepted for older callers and is translated into the same window ending today.
+**Why.** The requirement says the default is the current month. Keeping `range` avoids breaking the two existing dashboard tests and any saved bookmark.
+**Consequence.** A request with only `range` returns `from`/`to` for that window; a request with dates ignores `range`.
+
+## D-03. Date validation is server-side and strict
+
+**Decision.** Reject `from_date > to_date` and any `to_date` after today with HTTP 422. `from_date` may be any past date.
+**Why.** The requirement says no future dates. Validating on the server keeps the truth out of the browser's hands; the UI mirrors the message.
+**Exception.** Forecast and projection figures inside the MoM/YoY page are labelled as estimates and are computed from data up to today, never by querying a future date.
+
+## D-04. "As of today" cards do not move with the range
+
+**Decision.** Stock, expiry, batches, warehouse capacity and open purchase orders remain current snapshots and carry the subtitle "As of {date}". Sales, purchases, orders, returns, receipts, top products, ageing-by-period, leads and activity follow the selected dates.
+**Why.** A stock snapshot cannot be reconstructed for an arbitrary historical day without daily snapshots; the movement ledger does allow it for units on hand, which is why only the stock-history trend uses the range. Labelling prevents a reader from assuming the range applies everywhere.
+
+## D-05. Ageing stays "as of the end of the selected range"
+
+**Decision.** Receivables ageing is computed on the selected `to_date`, not on today, and the card says "As of {to_date}". When no date is chosen it is today, which is the previous behaviour.
+**Why.** The ageing report already accepts an as-of date; using it makes the card reconcile with the report for the same date.
+
+## D-06. Approvals are decided inline, using the existing endpoint
+
+**Decision.** Each row on the Overview gets Approve and Reject buttons. Approve sends the existing `POST /api/approvals/{id}/decide` with a default reason "Approved from the dashboard"; Reject swaps the buttons for an inline reason field and requires at least 3 characters. The card, the KPI tile and the sidebar badge refresh from one `loadAll()` reload after a decision, and the server retires the cached dashboard payload on every successful decision so a stale count cannot come back for 45 seconds.
+**Why.** Reusing the endpoint keeps every rule (segregation of duties, admin-only credit limits, audit log) in one place. The reason field is required by the API (`min_length=3`), so the UI supplies a truthful, visible default rather than inventing one on the server. The inline form keeps the decision in context instead of opening a drawer.
+**Consequence.** A user who cannot decide sees no buttons and the rule in words; a requester sees "You raised this request".
+
+## D-07. "Who may decide" is described, not guessed
+
+**Decision.** The API returns `deciders` as a list of role words derived from the same rule `can_decide` uses: "Administrator" for credit-limit and post-billing; "Administrator or an approver with approval:decide" for sales orders; the specific HR permission for HR types. Pending request types with no handler say "No decision handler yet". It also returns `age_days`, counted in whole days in `Asia/Kolkata` (the report timezone) and never negative, because a request cannot be raised in the future.
+**Why.** Naming the rule in words is honest; naming individual people would be wrong (any holder of the permission may decide) and could go stale. Age in UTC would show yesterday's request as "today" after 05:30 IST; the business day is what a user reads.
+
+## D-08. Purchases remain valued at order cost
+
+**Decision.** The purchases line continues to value received goods at `purchase_order_lines.unit_cost`, labelled in the card and the metric register.
+**Why.** There is no purchase invoice or landed-cost capture. Using the order cost is the only sourced number; zero-cost lines count as zero because the alternative would be to guess a cost.
+**Revision (v2).** The card draws sales as a solid green line with the area under it filled and purchases as a dashed amber line. Both legend entries are pills that show or hide their series; the last visible series cannot be hidden, so the card never becomes blank. Sales totals reconcile with the Sales Invoice Register and purchases with the Goods Receipt Register over the same dates; tests check both independently.
+**Consequence.** Sales (tax-inclusive) and purchases (cost, exclusive of tax) are different bases; the card legend says so.
+
+## D-09. Warehouse capacity is stored in units with one optional unit word
+
+**Decision.** Add `warehouses.capacity_units` (integer ≥ 0, nullable) and `warehouses.capacity_note` (short free text such as "pallets"). A NULL capacity means "not configured" and the UI says so; it never means zero.
+**Why.** Stock on hand is measured in units, so capacity in units is the only comparison that needs no conversion. A note field lets the owner say "120 pallets" without a second unit system that the system cannot convert.
+**Migration.** `0009_warehouse_capacity` adds both columns (nullable, no default); its `downgrade()` drops them. No existing row is rewritten.
+
+## D-10. Capacity warnings are warnings, not blocks, by default
+
+**Decision.** A goods receipt that would take a warehouse above its configured capacity returns HTTP 409 "capacity exceeded" unless the caller sends `allow_over_capacity=true`. That flag is only honoured for an Administrator, and the override is written to the audit log with the warehouse, the quantity and the new total.
+**Why.** Blocking stock receipt outright could stop the business; a silent warning could let a warehouse overflow. An explicit administrator override is the middle ground and is fully logged.
+**Dispatch.** Dispatch is not capped by capacity: it can only reduce stock. It shows the source warehouse's remaining stock and capacity in the dispatch result so the operator sees the position.
+**Purchase orders.** Raise-time checking is not possible because a purchase order carries no warehouse; the warehouse is chosen when goods arrive. Capacity is therefore checked at the goods receipt, which is the first moment the destination is known.
+**Revision (v2).** The receipt form shows the chosen warehouse's used, free and capacity figures before submission and names the block in the 409 message. The override checkbox is revealed only after the server refuses the receipt, and the server still enforces that only an Administrator may use it; the override is audited as `warehouse.capacity_override` with the before and after totals. A role that is not an Administrator gets a 403 even if it sends the flag.
+**Transfers.** There is no transfer endpoint, so no transfer check exists (GAP-V09, recorded, not built).
+
+## D-11. The utilisation report is additive and read-only
+
+**Decision.** Add `warehouse_utilisation` to the report catalog, permission `stock:read`, using the same query as the dashboard.
+**Why.** The requirement asks for reconciliation; using one function for both guarantees it. No new permission is introduced.
+
+## D-12. The MoM/YoY page uses one endpoint and two explicit modes
+
+**Decision.** `GET /api/dashboard/compare?mode=full_month|mtd&month=YYYY-MM`. `full_month` compares the whole calendar month with the whole previous month and the same month last year. `mtd` compares day 1 to `min(today, month end)` with the same day number in the previous month (capped at that month's last day) and in the same month last year (capped the same way).
+**Why.** Two explicit modes are clearer than inferring "month to date" from a range, and they make the comparison dates explainable on screen.
+**Zero base.** When the comparison value is zero or missing, the change is `null` and the UI says "No data yet" or "New" (for a positive current value against zero), never infinity or NaN.
+**Future months.** A month that has not started may be selected; every figure is zero and the cards say "No data yet". The current month is labelled "Current month (incomplete)".
+
+**Built in v2.**
+- **Windows.** The response carries `ranges.current`, `ranges.previous`, `ranges.last_year` (each with an ISO start and end plus a human label), `ranges.mode`, `ranges.state` (`future`, `current` or `past`), `ranges.elapsed_days` and `ranges.days_in_month`. `elapsed_days` counts real days, so a current full month still covers the whole calendar in the figures but divides the run rate only by the days that have happened. MTD comparison windows stop at the same day number, capped at that month's last day (29 February is therefore compared correctly).
+- **Cards.** `cards` has sales, purchases, orders, gross margin, receipts, returns, new leads and new customers. Each carries the current value, the previous month and same-month-last-year values, the change (absolute and percentage) and `available`. The comparison is `null` when the base is zero, never infinity or NaN. A card the caller may not read is **omitted from the payload**, not returned as null, so the browser cannot display a figure the API would hide. Gross margin (`GAP-D04`) and new customers (`GAP-V16`) are returned with `available: false` and their gap code.
+- **Trend.** Twelve selected months plus the same twelve months of the prior year, a 3-month moving average over the selected series, best and worst month (only months with a positive figure), month-on-month and year-on-year growth, and a seasonality index (current month over the same month a year earlier) that is `null` when the prior figure is zero. Months before the first data simply read zero; nothing is extrapolated.
+- **Projection.** The selected month's figures divided by `elapsed_days` and multiplied by `days_in_month`, returned with `is_estimate`, `complete`, `state`, `elapsed_days`, `days_in_month`, a `label` and an explanatory `note`. A past month is `complete`; a future month is "Not started"; a current month is "Run-rate estimate (not a forecast)" and the UI badges it "Estimate". A run rate is arithmetic, not a forecast: it assumes the rest of the month behaves like the days already recorded.
+- **Breakdowns.** Top five products and top five distributors by **taxable value before GST** in the selected window, from issued invoice lines. Rows are sorted by value and the count shown is the number of rows returned, not an estimate.
+- **Queries and indexes.** One query per metric per window; the four date columns grouped or filtered on (`sales_orders.created_at`, `credit_notes.note_date`, `goods_receipts.received_at`, `leads.created_at`) are indexed by migration `0010_comparison_indexes`, whose `downgrade()` drops exactly those four indexes. No row is rewritten and no existing index is removed.
+- **Caching.** As D-17: the existing 45-second in-process cache, keyed additionally by mode and month.
+- **Export.** CSV as D-16, from the rendered data, with the explicit window dates in the header.
+
+## D-13. Gross margin and new customers are shown as gaps
+
+**Decision.** The comparison card for gross margin returns `available: false` with `gap: GAP-D04` because neither stock nor invoice lines carry a cost. New customers returns `available: false` with `gap: GAP-V16` because distributors have no creation timestamp.
+**Why.** Computing margin as revenue would be wrong; counting all customers as "new" would be wrong. Both are shown as "No data yet" and listed for review.
+
+## D-14. Geography uses the invoice's frozen buyer state
+
+**Decision.** The state is `invoices.buyer_state_code` from the issued invoice snapshot (falling back to the distributor's current state only when a row predates the snapshot — none exist today). District and city are not available and are not offered. Invoices without any state code are grouped under "Location not recorded" so the total reconciles.
+**Why.** The invoice snapshot is immutable and is the document of record for place of supply. The distributor master can change; the invoice cannot.
+**Map.** The page draws a local, hand-built state tile grid (an inline SVG built in the browser from a fixed state layout) shaded by the selected metric, with a ranked list as the accessible equivalent on phones. No external map service, no network request. A true geographic outline is not drawn because a hand-drawn India outline risks being inaccurate; the tile grid is labelled "State tile map".
+**Territory.** The free-text `distributors.territory` is not used as a geography key (GAP-V12); the page says so.
+**Role scope.** Geography is gated by `sales:read` (and return figures additionally by `accounts:read` where they come from notes). There is no territory-scoped user model, so "a regional user sees only their territory" cannot be enforced and is recorded as a gap rather than faked.
+
+**Built in v2.** `GET /api/dashboard/geo?from_date=&to_date=` validates the window with the same rules as the dashboard (422 when from > to, a future date, or an unparseable date) and defaults to the current month. It returns the window and label, a `basis` block (invoices with a snapshot, invoices falling back to the distributor master, the "Location not recorded" count), totals, per-state rows, top and bottom five, the fixed 37-code map list, returns, GST split and the notes shown on the page. Grouping uses `coalesce(invoices.buyer_state_code, distributors.state_code)`, so a pre-snapshot row still lands in a state and the sum of rows always equals the window total; rows with neither code are kept as "Location not recorded" rather than dropped. Tax fields are returned only with `tax:read`; returns only with `accounts:read`; without either, the payload says which permission is missing and the page renders a gap box instead of zeros. "Top" and "bottom" rank only states with a positive sale, so a row of zeros is never presented as a "lowest performer". The page sorts in the browser (server order is sales desc) and exports the rendered table to CSV with the window dates and the same permission-dependent columns. The map is 37 fixed tiles from `app/core/india_states.py`, shaded by sales share; tiles with no sale stay neutral. District/city/pincode remain unavailable (GAP-V11), so the level chips say "No data yet" and the page does not guess. Responses use the existing 45-second cache (D-17), keyed by user, permissions and window.
+
+## D-15. Returns by region are reported at state level only
+
+**Decision.** Return value and count come from issued credit notes grouped by the invoice's buyer state. Return reason is shown as the free text recorded on the note; no categories are invented (GAP-V10).
+**Why.** Credit note lines carry the product and quantity, but reasons are prose. Grouping prose would require an unstated dictionary.
+
+## D-16. Export is CSV for the new tables
+
+**Decision.** The MoM/YoY comparison table and the geography table export to CSV through the browser from the data already rendered, naming the exact compared dates in the file header. PDF export of these two tables is not added in v2.
+**Why.** The existing export service builds PDFs from the report catalog; these are dashboard tables, not catalog reports, and adding a second PDF layout would duplicate the document pipeline. CSV is a complete, honest export; the gap is recorded.
+
+## D-17. Caching follows the existing rule
+
+**Decision.** The 45-second in-process cache is keyed by user, permissions, date range, mode and month, and is disabled outside production and for `_test` databases (the existing rule). No new cache layer.
+**Why.** Keeps behaviour consistent with the current dashboard and prevents tests reading another test's payload.
+
+## D-18. No existing permission is changed
+
+**Decision.** New endpoints reuse `approval:read`, `sales:read`, `stock:read`, `accounts:read`. The capacity editor reuses `stock:write`; the capacity override additionally requires the Administrator role. No role's permission set is edited, and `BASELINE_ROLE_PERMS` is untouched.
+**Why.** The owner forbade changing existing permissions. Reusing an existing read permission for a new read endpoint is additive and keeps the permission matrix stable.
+
+## D-19. Invoice print signature block
+
+**Decision.** Centre the company line (`For {seller}`) and "Authorised signatory" on the same horizontal axis, above and below the signature line, in both the invoice and the credit/debit note layout.
+**Why.** They are one signature block; right-aligning the company name while centring the designation makes the two lines look misaligned on paper. The fix is layout-only and changes no document content.
+
+## D-20. Demo data is not added in v2
+
+**Decision.** No new demo rows are seeded on this branch. The existing marked demo seed and its rollback remain the only synthetic records.
+**Why.** The owner's data-safety rules; v2 changes are verified against the existing demo set and the isolated test database.
+
+## D-21. Email is off by default and test mode is the only mode until the owner approves
+
+**Decision.** `EMAIL_MODE` defaults to `test` and `EMAIL_SEND_ENABLED` defaults to `false`. A send happens only when `EMAIL_SEND_ENABLED=true` **and** SMTP settings are present; in `test` mode every message is redirected to one Administrator address (`EMAIL_TEST_RECIPIENT`, else the email of an active Administrator's employee record). If no test address exists the delivery is recorded as failed with "Test mode: no Administrator email configured" — it is never sent to a real recipient. The subject is prefixed `[TEST]` in test mode and the footer says who the real recipients would have been.
+**Why.** The owner's instruction: do not send a real email until SMTP settings and the recipient list are approved. Two independent switches make an accidental live send impossible; a missing recipient fails closed.
+**How to reverse.** Set `EMAIL_MODE=live` and `EMAIL_SEND_ENABLED=true` after approving the settings, then add recipients. No code change is needed.
+
+## D-22. Scheduling is a separate DB-backed worker, not an in-process timer
+
+**Decision.** Add `python -m app.email_worker` (loop) and `--once` (single tick). It claims due schedules with `SELECT … FOR UPDATE SKIP LOCKED`, writes one delivery row per slot keyed uniquely by `schedule_id + slot UTC`, and runs generation outside the claim transaction. A process restart or a second worker cannot send the same slot twice because the insert loses the unique-key race.
+**Why.** The app has no scheduler; an in-process timer would run once per web worker and duplicate sends. A database is already the shared, durable store.
+**Consequence.** The worker must be started by the owner (documented in `docs/EMAIL_REPORTS.md`). If it is not running, nothing is generated and the screen shows the next run as overdue.
+
+## D-23. Packs are built from the same services as the screens and reports
+
+**Decision.** A pack calls `reports.build`, the dashboard's period helpers, `ledger.ageing_rows`, `ledger.trial_balance` and the new accounts service. It does not copy a query. Charts are drawn from the same rows shown in the table beneath them. Missing values become `available: false` with a gap code and render as "No data yet".
+**Why.** The requirement is that email figures match the Reports and dashboards for the same dates. One source is the only way to guarantee it; `tests/test_email_reports.py` pins it.
+**Consequence.** Packs now carry gross profit, expenses and net profit from `profit_loss.statement()`. A figure that cannot be proved is still `available: false` with its gap code; gross profit is labelled partial and net profit is withheld until cost, expenses and payroll are complete (D-42).
+
+## D-24. Attachments are capped, named and never carry a password
+
+**Decision.** Up to five attachments: the pack PDF and the detail XLSX files built from the report catalog. Total budget 9.5 MB (below the 10 MB requirement, leaving room for headers). Files are named `HERBANOVA_<Pack>_<YYYY-MM>.pdf` / `<Report>_<YYYY-MM>.xlsx`. When the budget is exceeded, detail files are dropped first, the email says which and links to Reports; no archive, no password, no split email in v2.
+**Why.** Mail providers reject large messages unpredictably; a password-protected archive is both a security anti-pattern and unreadable on a phone. A secure expiring link needs a tokenised public dashboard that does not exist (GAP-E05), so it is recorded, not faked.
+
+## D-25. Recipients are a managed list with groups; MD has no login
+
+**Decision.** `email_recipients` stores address, name, group (`md`, `admin`, `extra`) and an unsubscribe token. A schedule selects recipients per field (To/CC/BCC) plus optional group membership computed at send time (so a new Administrator is included without editing every schedule). The MD group exists only for email; there is no MD login role, and one is not invented. Only `extra` recipients may unsubscribe; MD and Administrator mail is mandatory and removed only by an Administrator.
+**Why.** A role cannot be attached to a person who never signs in. Groups keep the list maintainable without silently mailing a stale address.
+
+## D-26. Calendar rules, timezone and working days
+
+**Decision.** Default timezone `Asia/Kolkata`. Frequencies: daily, weekdays, weekly (chosen days), monthly (a chosen day, the last day, or the first working day), and a five-field cron subset. Multiple `HH:MM` slots per schedule. A working day is Monday–Friday and not in `hr_holidays`. When a slot falls on a holiday the schedule's `holiday_rule` applies: `skip`, or `shift` to the next working day at the same times. Monthly day 29–31 falls on the last day of a short month. Timezone conversion uses `zoneinfo`, so a DST zone would be handled; India has none.
+**Why.** The requirement names month-end, leap years, holidays and time zones. Defining a working day is necessary because the system's holiday table does not mark weekends.
+
+## D-27. Accounts visibility uses one additive permission; existing permissions are unchanged
+
+**Decision.** Add `accounts:reports` to the catalogue and grant it to the Administrator in migration `0011`. No existing key is removed or re-scoped (`accounts:read` stays as it is for the existing Accounts screens). The Accounts dashboard, Accounts API, Accounts email block and Accounts pack require `accounts:reports`; the Administrator can grant it to an Accounts head through the existing roles screen.
+**Why.** The owner asked that Accounts data be limited to Administrator, MD and roles the Administrator allows. Sales currently holds `accounts:read`, so reusing it would expose the new reporting to every sales user. The MD has no login, so MD access is the email.
+**Consequence.** `BASELINE_ROLE_PERMS["admin"]` grows by one key; the parity test explicitly allows additive growth and fails if an existing role loses anything.
+
+## D-28. Accounts reports state only what the books can prove
+
+**Decision.** The Accounts page, email block and pack show: revenue (taxable and gross), output GST split, receipts, returns, outstanding and ageing, overdue-60, payables outstanding, cash/bank **net movement**, credit exposure, trial balance and post-billing audit activity. Since the accounting/expenses work they also show COGS, gross profit, expenses by head, payroll gross and net profit where those inputs are complete (D-42). They still show a gap for balance sheet, input GST/net GST, TDS, due-this-week, vouchers, bank reconciliation and year-end close.
+**Why.** There is no purchase tax, no due date and no year-end close, so deriving any of those would invent a number. The trial balance is labelled "derived from documents, no opening balances".
+**Period locks.** Accounting months can be locked (scope `accounting` in `hr_period_locks`). A locked month refuses purchase-cost corrections and expense creation or reversal with HTTP 423. Invoice changes, credit notes, receipts, payments and a year-end close are not covered (GAP-A03). The page states exactly which actions the lock covers.
+**Cash.** The trial balance carries net cash/bank debits, not a closing balance, because opening balances are not captured (GAP-A10). The card says "net movement recorded".
+
+## D-29. Delivery log is kept indefinitely
+
+**Decision.** `email_deliveries` rows are never deleted by the application, so the log always covers at least the required twelve months. An Administrator can resend a failed or sent delivery; a resend creates a new row with trigger `resend` and its own run key, leaving the original intact.
+**Why.** Deleting a delivery record destroys the evidence that a message was or was not sent. Storage for text rows is negligible.
+
+## D-30. Every change and every send is audited
+
+**Decision.** Schedule create/edit/pause/duplicate/delete, recipient changes, manual runs, test sends and worker sends write an `audit_logs` row (`email.*`) with the actor (the schedule owner for a system send, recorded as such) and a record reference. Routine sends do **not** post to Telegram; a final delivery failure posts one Telegram alert and writes the error to the delivery log.
+**Why.** The owner asked for an audit of all sends and changes. Telegram on every send would train people to ignore the channel; failures are the signal that matters.
+
+## D-31. Accounts cards follow the existing comparison rules
+
+**Decision.** The Accounts dashboard reuses `_compare_windows` (full month or month-to-date) and states the exact window on every card. Snapshot values (outstanding, payables, cash movement) are "as at the window end"; flows (revenue, receipts, returns) follow the window. A comparison against zero is `null` and reads "No prior figure", never infinity.
+**Why.** Consistency with the MoM/YoY page (D-12) and the same refusal to fabricate a percentage.
+
+## D-32. The worker sends the slot it owes, not a backlog
+
+**Decision.** When the worker wakes, `enqueue_due` creates one delivery for the schedule's due slot and then advances `next_run_at` to the first slot strictly after now, skipping any slots missed while the worker was down. The delivery's pack window is computed from the slot's own local date, so a late send still reports the period that slot owns.
+**Why.** A worker stopped for a week should not send seven daily summaries. Sending the owed slot preserves the record and the report period; the log shows the delay. The catch-up rule is deterministic and testable, unlike "send whatever is due".
+
+## D-33. Retries cover transient failures only
+
+**Decision.** A delivery gets the first try plus three retries, 5, 15 and 45 minutes later. Errors the worker classifies as permanent — missing SMTP configuration, sending disabled, no active recipients, an invalid address, an unknown pack, a deleted schedule — fail on the first attempt. Any other error (connection refused, timeout, SMTP exception) is retried. The fourth failure is final and posts one Telegram alert; the delivery row keeps the error either way.
+**Why.** Retrying a configuration error delays the guarantee that already proves it cannot succeed, and buries the real cause under three waits. SMTP being down is exactly the case the owner asked to retry.
+
+## D-34. Duplicate protection and crash recovery are in the database
+
+**Decision.** `email_deliveries.run_key` is unique (`schedule:<id>:<slot in UTC>`), so two workers racing for the same slot cannot both insert it. A worker claims work with `SELECT ... FOR UPDATE SKIP LOCKED`, and the claim is released back to `retry` after 30 minutes if the process died mid-send. There is no in-process timer and no lock file.
+**Why.** The owner asked for a lock and a unique run key that survive a restart and two workers. A unique index and a row lock are the only two guarantees that hold across processes and restarts.
+
+## D-35. Comparison windows in an email are measured from the pack's real window
+
+**Decision.** `report_packs.build` computes the previous period as the equally long window immediately before the pack's window, and last year as the same window shifted back one year, rather than re-deriving both from the window's end date. For a full month this is the previous month; for a month-to-date window it is the equally long previous-month window.
+**Why.** Re-deriving from the end date shifted a weekly pack by a day and could quietly compare different lengths. The email states the rule in plain words under the comparison table.
+
+## D-36. Charts are local PNGs with a mandatory table fallback
+
+**Decision.** Charts are drawn with Pillow (no chart service, no JavaScript, no remote image) and attached in the message as CID images with alt text. The same figures always follow as an HTML table, and a chart that fails to draw is dropped without failing the email. Table-only charts also make the plain-text part complete.
+**Why.** Outlook and Gmail block images by default for unknown senders; a chart-only figure would be invisible. A drawing bug must not stop a report the owner is waiting for.
+
+## D-37. One tabbed Administrator screen, gated twice
+
+**Decision.** Schedules, Recipients and the Delivery log are three tabs of one view (`#/scheduled`). The nav link and the route are shown only when the signed-in user is the seeded Administrator *and* holds `email:manage`; the API repeats the same test with `require_admin("email:manage")`. A custom role granted the key still sees nothing and is refused. A schedule cannot be saved without a group or a named recipient, so an enabled schedule always has somewhere to go. A recipient that a schedule names cannot be removed from the list until it is detached, because deleting it would silently change what that schedule sends. Deleting a schedule keeps its deliveries in the log.
+**Why.** The owner restricted the scheduler screen to the Administrator. Hiding the link is convenience; the second check is the guarantee. Refusing an empty schedule, and refusing to detach a recipient by deletion, prevents a configuration change from quietly stopping or redirecting mail.
+
+## D-38. Every email block is a table row
+
+**Decision.** The Accounts summary and Attached reports blocks are emitted as `<tr><td>` rows of the message table. No `<div>`, `<hr>` or heading is placed directly inside a `<table>`.
+**Why.** A browser hoists non-row content out of a table to keep the table valid. The preview showed the Accounts heading and period line above the green header, and some mail clients apply the same repair. A structural test now parses every rendered email and fails if a table contains anything but rows, so the message order cannot regress.
+
+## D-39. Accounts data needs `accounts:reports`, checked on the server
+
+**Decision.** The new Accounts dashboard (`GET /api/accounts/report`), its comparison (`GET /api/accounts/report/compare`) and the Accounts block inside the scheduled email are gated by the additive `accounts:reports` key, held by the Administrator by default and grantable to the MD role or an Accounts head. The existing statements stay on `accounts:read`; no existing permission was removed or widened. A role with only `accounts:read` keeps the statements but is refused the dashboard (403). A role with only `accounts:reports` can open the Accounts screen for the performance section while the statements are hidden, because `renderAccounts` hides them client-side and every statement endpoint still enforces `accounts:read`.
+**Why.** The owner asked that Accounts figures be visible only to the Administrator, the MD and roles the Administrator allows, and that the check happen on the server. A new narrower key makes "allowed" an explicit, auditable grant rather than widening `accounts:read` (which the sales desk already holds) or relying on a role name. There is no separate seeded MD login; the MD is the `md` email recipient group, and an MD user is a role the Administrator grants `accounts:reports` to.
+
+## D-40. One window for the Overview tiles and the Accounts screen
+
+**Decision.** The Overview Accounts section is computed with `accounting.window()` for the dashboard's selected dates, the same call the Accounts screen and the email Accounts block use. The state filter narrows only revenue, returns, output GST and distributor receipts; receivables, payables, cash/bank and the trial balance stay company-wide and the response says so in `region.not_applied_to` and in a note. Outstanding by state is grouped by the distributor's current state because an invoice stores only the buyer state used for tax.
+**Why.** The owner asked that every figure match the dashboards and Reports for the same dates. Reusing one function removes a second implementation that could drift. A filter that silently changed a balance while leaving another unfiltered would be a false comparison, so the boundary is stated on screen and in the payload rather than implied.
+
+## D-41. One email body per schedule; the Administrator is the audience gate
+
+**Decision.** An email is rendered once and sent to its To/CC/BCC list; the accounts block is included by the schedule's `include_accounts` flag, not per recipient. Schedules and their recipients are manageable only by the seeded Administrator, the screen warns when an Accounts pack or accounts block would reach the `extra` group, and the Accounts Report pack exists as a separate schedule for the Accounts head. In the application itself, every Accounts endpoint still enforces `accounts:reports` on the server.
+**Why.** SMTP delivers one body per message, so a genuinely per-recipient email would mean sending several messages with overlapping content, which the owner did not ask for and which multiplies the risk of sending Accounts figures to the wrong person. Making the Administrator choose the audience, with a visible warning and a dedicated Accounts schedule, keeps the decision with the person who is allowed to make it. The server-side check remains the guarantee for the screens and API; the email channel depends on the approved recipient list, which is exactly what the owner asked to review before go-live.
+**How to reverse.** If per-recipient content is needed later, split the send by group (`md`, `admin`, `extra`) with separate renders; the delivery model already stores one row per send.
+
+## D-42. Profit and loss is built only from captured cost, approved expenses and whole payroll months
+
+**Decision.** Revenue and returns (and debit notes) use taxable value, so GST never changes profit. COGS comes from `costing.invoice_cogs()`: the captured issue cost less the cost of stock actually returned; a price-only credit note reduces revenue only. Expenses are approved, non-reversed entries dated in the window, grouped by head; non-creditable GST is added to cost and creditable GST is excluded. Payroll is the gross of approved, processed or paid periods by calendar month, and a month counts only when the whole month is inside the window (never prorated). The system payroll head refuses manual entries, so salary cannot be counted twice. Gross profit is always shown and labelled "partial, X of Y invoices costed" when any invoice is not costed. Net profit is shown only when every invoice is costed, expenses cover the window from `expense_settings.tracked_from` and payroll is complete; otherwise GAP-P01/P02/P03 is raised with a fix link. The `profit_and_loss` report needs `accounts:reports`, exports CSV/XLSX/PDF with nine reconciliation checks and the notes (PO cost without freight or discounts; payroll gross without employer contributions; costing method; tracked_from).
+**Why.** The owner specified the hand calculation (revenue 1,000, returns 100, COGS 400, expenses 150, payroll 200, net profit 150) and required GST to be present but proved not to change profit. Reusing the costing, expense and payroll sources is the only way the screen, report, email and export can agree; a second query would drift. Gaps are raised only when the input is genuinely missing, and a partial figure is labelled rather than rounded up to a complete one.
+**How to reverse.** If cost, expenses or payroll should be estimated rather than withheld, that is a business decision and needs its own source of truth; the current code refuses to estimate and says why.

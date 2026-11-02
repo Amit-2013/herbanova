@@ -73,8 +73,10 @@ def test_permission_denial_is_403(client):
 
 def test_permission_does_not_confer_the_administrator_role(client):
     # A custom role can hold the same permission key as the Administrator...
+    # sales:read is the parent both billing keys need under the parent/child rule.
     _, token, _ = _make_user(role_name="billing_clerk",
-                             permissions=["invoice:cancel", "invoice:edit_post_billing"])
+                             permissions=["sales:read", "invoice:cancel",
+                                          "invoice:edit_post_billing"])
     client.cookies.set("session", token)
     # ...and passes a plain permission gate (the route answers 405, its own rule).
     assert client.delete("/api/invoices/1").status_code == 405

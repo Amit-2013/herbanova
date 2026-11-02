@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..models.core import Distributor, Invoice, InvoiceLine, Product, SalesOrder
 from ..models.tax import CompanyProfile
 from ..services.numbering import next_document_number
-from ..services.order_tax import _discount_pct
+from ..services.order_tax import discount_pct
 from ..services.tax import line_tax, money, place_of_supply, resolve_rate
 from ..services.words import amount_in_words
 
@@ -100,7 +100,7 @@ def create_invoice_for_order(db: Session, order: SalesOrder, issued_by: int) -> 
             notes.append(f"product {ln.product_id} is missing from the master")
             continue
         hsn = (p.hsn or "").strip()
-        applied_disc = _discount_pct(p.mrp, ln.unit_price)
+        applied_disc = discount_pct(p.mrp, ln.unit_price)
         gross = money(ln.qty * ln.unit_price)
         discount_amt = money(gross * applied_disc / 100)
         taxable = money(gross - discount_amt)
