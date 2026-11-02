@@ -28,6 +28,10 @@ from ..core.pagination import page_params, paginate
 from ..core.rbac import is_admin, require, role_permissions
 from ..core.rules import APPROVAL_TYPES, REPORT_TZ
 from ..models.core import ApprovalRequest, Distributor, Invoice, SalesOrder, User
+from ..models.expenses import APPROVED as EXPENSE_APPROVED
+from ..models.expenses import PENDING as EXPENSE_PENDING
+from ..models.expenses import REJECTED as EXPENSE_REJECTED
+from ..models.expenses import Expense
 from ..services.audit import audit
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
@@ -104,6 +108,9 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
     invoice_ids = [a.record_id for a in rows if a.record_type == "invoice_post_billing"]
     invoices = {i.id: i for i in db.scalars(select(Invoice).where(
         Invoice.id.in_(invoice_ids))).all()} if invoice_ids else {}
+    expense_ids = [a.record_id for a in rows if a.record_type == "expense"]
+    expenses = {e.id: e for e in db.scalars(select(Expense).where(
+        Expense.id.in_(expense_ids))).all()} if expense_ids else {}
     uids = {a.requested_by for a in rows} | {a.decided_by for a in rows if a.decided_by}
     users = {u.id: u.username for u in db.scalars(select(User).where(User.id.in_(uids))).all()}
     admin = is_admin(db, user)
@@ -124,6 +131,8 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
             return ["Administrator", "Approver with approval:decide"]
         if a.record_type == "invoice_post_billing":
             return ["Administrator"]
+        if a.record_type == "expense":
+            return ["Administrator", "Approver with approval:decide"]
         need = HR_DECIDE_PERMISSION.get(a.record_type)
         return [f"Role with {need}"] if need else ["No decision handler yet"]
 
@@ -141,6 +150,8 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
             return admin or "approval:decide" in perms
         if a.record_type == "invoice_post_billing":
             return admin
+        if a.record_type == "expense":
+            return admin or "approval:decide" in perms
         need = HR_DECIDE_PERMISSION.get(a.record_type)
         if not (need and (admin or need in perms)):
             return False
@@ -156,15 +167,19 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
     for a in rows:
         so = orders.get(a.record_id) if a.record_type == "sales_order" else None
         inv = invoices.get(a.record_id) if a.record_type == "invoice_post_billing" else None
+        exp = expenses.get(a.record_id) if a.record_type == "expense" else None
         dist = dists.get(so.distributor_id) if so else None
         detail = a.detail or {}
         document_number = a.document_number or (so.so_number if so else
-                                                inv.invoice_number if inv else None)
+                                                inv.invoice_number if inv else
+                                                exp.number if exp else None)
         subject = a.subject or (str(detail.get("subject") or "") or None)
         if subject is None and so:
             subject = f"{dist.name if dist else 'Distributor'} · ₹ {so.total}"
         if subject is None and inv:
             subject = f"Invoice {inv.invoice_number} · ₹ {inv.grand_total}"
+        if subject is None and exp:
+            subject = f"{exp.head.name if exp.head else 'Expense'} · ₹ {exp.total}"
         reasons = a.reasons or []
         out.append(ApprovalOut(
             id=a.id, request_type=a.record_type,
@@ -174,7 +189,8 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
             so_number=so.so_number if so else None, document_number=document_number,
             subject=subject, requested_dates=a.requested_dates,
             distributor=dist.code if dist else None,
-            order_total=so.total if so else (inv.grand_total if inv else None),
+            order_total=so.total if so else (inv.grand_total if inv else
+                                             (exp.total if exp else None)),
             reasons=reasons, status=a.status,
             requested_by=users.get(a.requested_by, "?"), requested_at=a.requested_at,
             decided_by=users.get(a.decided_by) if a.decided_by else None,
@@ -244,6 +260,8 @@ def decide(approval_id: int, body: DecisionIn, db: Session = Depends(get_db),
         out = decide_hr_request(db, approval_id, body, user)
     elif first.record_type == "invoice_post_billing":
         out = _decide_post_billing(db, approval_id, body, user)
+    elif first.record_type == "expense":
+        out = _decide_expense(db, approval_id, body, user)
     else:
         raise HTTPException(409, "This request type cannot be decided here")
     # The dashboard counts pending requests, so a decision retires its cached
@@ -311,6 +329,39 @@ def _decide_post_billing(db: Session, approval_id: int, body: DecisionIn, user):
     audit(db, user.id, "invoice.amend_decision", f"invoice:{inv.id}",
           {"number": inv.invoice_number, "decision": body.decision,
            "reason": ar.decision_reason, "changes": changes})
+    db.commit()
+    return _build(db, [ar], user)[0]
+
+
+def _decide_expense(db: Session, approval_id: int, body: DecisionIn, user):
+    """Approve or reject a pending expense. The requester can never decide it."""
+    ar = db.scalars(select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+                    .with_for_update().execution_options(populate_existing=True)).one()
+    if ar.status != "pending":
+        raise HTTPException(409, f"Request is already {ar.status}")
+    if "approval:decide" not in role_permissions(db, user) and not is_admin(db, user):
+        raise HTTPException(403, "Your role cannot decide expense approvals")
+    if ar.requested_by == user.id:
+        raise HTTPException(403, "Segregation of duties: you cannot decide an expense "
+                                 "you raised")
+    expense = db.get(Expense, ar.record_id, with_for_update=True)
+    if expense is None:
+        raise HTTPException(404, "Expense not found")
+    if expense.status != EXPENSE_PENDING:
+        raise HTTPException(409, f"Expense is {expense.status}; nothing to decide")
+    approved = body.decision == "approve"
+    expense.status = EXPENSE_APPROVED if approved else EXPENSE_REJECTED
+    if approved:
+        expense.approved_by = user.id
+        expense.approved_at = datetime.now(timezone.utc)
+    ar.status = "approved" if approved else "rejected"
+    ar.decided_by, ar.decided_at = user.id, datetime.now(timezone.utc)
+    ar.decision_reason = body.reason.strip()
+    ar.pending_approver_role = None
+    audit(db, user.id, "expense.approval", f"expense:{expense.id}",
+          {"decision": body.decision, "reason": ar.decision_reason,
+           "number": expense.number, "amount": str(expense.amount),
+           "gst_amount": str(expense.gst_amount)})
     db.commit()
     return _build(db, [ar], user)[0]
 

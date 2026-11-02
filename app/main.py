@@ -10,7 +10,7 @@ from .core.config import settings
 from .core.features import FEATURE_BY_KEY, feature_for_path, is_public_exception
 from .core.limiter import limiter
 from .api import (accounts, admin, approvals, audit, auth, credit_notes, dashboard, debit_notes, db_reset, distributors, email_reports, email_settings,
-                  employees, features, hr, inventory, invoices, leads, modules, printing, products, purchase_orders,
+                  employees, expenses, features, hr, inventory, invoices, leads, modules, printing, products, purchase_orders,
                   reports, roles, sales_orders, suppliers, tax, users)
 
 app = FastAPI(title="HERBANOVA Business Control System")
@@ -96,6 +96,7 @@ app.include_router(audit.router)
 app.include_router(modules.router)
 app.include_router(dashboard.router)
 app.include_router(accounts.router)
+app.include_router(expenses.router)
 app.include_router(products.router)
 app.include_router(suppliers.router)
 app.include_router(purchase_orders.router)

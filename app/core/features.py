@@ -79,10 +79,11 @@ FEATURES: tuple[Feature, ...] = (
         api_prefixes=("/api/leads",)),
     Feature(
         "accounts", "Accounting and finance",
-        "Outstanding, party ledgers, GST registers and the accounts dashboard.",
+        "Outstanding, party ledgers, GST registers, expenses and the accounts dashboard.",
         views=("accounts",),
-        permissions=("accounts:read", "accounts:write", "accounts:reports"),
-        api_prefixes=("/api/accounts",)),
+        permissions=("accounts:read", "accounts:write", "accounts:reports",
+                     "expense:read", "expense:write"),
+        api_prefixes=("/api/accounts", "/api/expenses")),
     Feature(
         "tax", "Tax and discounts",
         "Company tax profile, GST rate master and discount slabs.",
