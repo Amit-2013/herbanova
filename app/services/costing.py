@@ -30,7 +30,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models.core import (Batch, Invoice, Product, PurchaseOrder,
+from ..models.core import (Batch, Invoice, InvoiceLine, Product, PurchaseOrder,
                            PurchaseOrderLine, StockMovement)
 from ..models.costs import CostCorrection
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine
@@ -401,6 +401,130 @@ def backfill_plan(db: Session, product_ids: list[int] | None = None) -> dict:
             "movements": sum(r["movements"] for r in rows),
             "would_set_cost": sum(r["would_set_cost"] for r in rows),
             "affected_invoices": sum(len(r["affected_invoices"]) for r in rows)}
+
+
+def _issue_quantities(movements: list[StockMovement],
+                      batches: dict[int, Batch]) -> dict[int, Decimal]:
+    quantities: dict[int, Decimal] = {}
+    for m in movements:
+        batch = batches.get(m.batch_id)
+        if batch is None:
+            continue
+        quantities[batch.product_id] = quantities.get(batch.product_id, ZERO) \
+            + (-Decimal(m.qty_delta))
+    return quantities
+
+
+def attribution_plan(db: Session) -> dict:
+    """Which legacy issue rows can be linked to their invoice, without writing.
+
+    A candidate is a sales order that has exactly one issued invoice and issue
+    rows with no `invoice_id`. It is proposed only when no issue row of that
+    order is attributed at all, the products on both sides are the same set, and
+    the issued quantity equals the invoiced quantity for every product. Every
+    other order is reported with the reason, or as already attributed.
+
+    Dry-run only: this function never writes.
+    """
+    invoices = db.execute(
+        select(Invoice.id, Invoice.invoice_number, Invoice.sales_order_id)
+        .where(Invoice.status == "issued").order_by(Invoice.id)).all()
+    by_order: dict[int, list[tuple[int, str]]] = {}
+    for invoice_id, number, so_id in invoices:
+        by_order.setdefault(so_id, []).append((invoice_id, number))
+
+    candidates, ambiguous = [], []
+    attributed, without_issues = [], []
+    for so_id in sorted(by_order):
+        issued = by_order[so_id]
+        invoice_ids = [i for i, _ in issued]
+        invoice_numbers = [n for _, n in issued]
+        issues = list(db.scalars(select(StockMovement).where(
+            StockMovement.movement_type == "issue",
+            StockMovement.qty_delta < 0,
+            StockMovement.ref_type == "so",
+            StockMovement.ref_id == str(so_id))).all())
+        if not issues:
+            without_issues.append({
+                "sales_order_id": so_id, "invoice_ids": invoice_ids,
+                "invoice_numbers": invoice_numbers,
+                "reason": "no issue movement references this sales order",
+            })
+            continue
+        unlinked = [m for m in issues if m.invoice_id is None]
+        linked = [m for m in issues if m.invoice_id is not None]
+        if not unlinked:
+            attributed.append({
+                "sales_order_id": so_id, "invoice_ids": invoice_ids,
+                "invoice_numbers": invoice_numbers, "movements": len(linked),
+            })
+            continue
+        if len(issued) != 1:
+            ambiguous.append({
+                "sales_order_id": so_id, "invoice_ids": invoice_ids,
+                "invoice_numbers": invoice_numbers,
+                "movement_ids": sorted(m.id for m in unlinked),
+                "reason": f"sales order has {len(issued)} issued invoices, so its "
+                          "issue rows cannot be assigned to one of them",
+            })
+            continue
+        invoice_id, number = issued[0]
+        if linked:
+            ambiguous.append({
+                "sales_order_id": so_id, "invoice_ids": invoice_ids,
+                "invoice_numbers": invoice_numbers,
+                "movement_ids": sorted(m.id for m in unlinked),
+                "reason": f"{len(linked)} issue movements are already attributed "
+                          f"and {len(unlinked)} are not",
+            })
+            continue
+
+        batch_ids = sorted({m.batch_id for m in unlinked})
+        batches = {b.id: b for b in db.scalars(
+            select(Batch).where(Batch.id.in_(batch_ids))).all()}
+        issued_qty = _issue_quantities(unlinked, batches)
+        invoiced_qty: dict[int, Decimal] = {}
+        for line in db.scalars(select(InvoiceLine).where(
+                InvoiceLine.invoice_id == invoice_id)).all():
+            invoiced_qty[line.product_id] = invoiced_qty.get(line.product_id, ZERO) \
+                + Decimal(line.qty)
+
+        entry = {
+            "sales_order_id": so_id, "invoice_id": invoice_id,
+            "invoice_number": number,
+            "movement_ids": sorted(m.id for m in unlinked),
+            "movements": len(unlinked),
+        }
+        missing = sorted(set(invoiced_qty) - set(issued_qty))
+        extra = sorted(set(issued_qty) - set(invoiced_qty))
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"no issue for product ids {missing}")
+            if extra:
+                parts.append(f"issue for product ids {extra} not on the invoice")
+            ambiguous.append({**entry, "reason": "; ".join(parts)})
+            continue
+        mismatched = [pid for pid in sorted(invoiced_qty)
+                      if issued_qty[pid] != invoiced_qty[pid]]
+        if mismatched:
+            detail = ", ".join(
+                f"product {pid}: issued {issued_qty[pid]:f} but invoiced "
+                f"{invoiced_qty[pid]:f}" for pid in mismatched)
+            ambiguous.append({**entry, "reason": f"quantities differ ({detail})"})
+            continue
+        entry["products"] = {str(pid): f"{issued_qty[pid]:f}"
+                             for pid in sorted(issued_qty)}
+        candidates.append(entry)
+
+    return {
+        "invoices_checked": len(invoices),
+        "candidates": candidates,
+        "candidates_movements": sum(c["movements"] for c in candidates),
+        "ambiguous": ambiguous,
+        "already_attributed": attributed,
+        "without_issue_movements": without_issues,
+    }
 
 
 def correct_po_cost(db: Session, *, po_line_id: int, new_unit_cost: Decimal,
