@@ -13,31 +13,87 @@
 
 <!-- Sign in -->
 <section id="login">
-  <div class="brand">
-    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
-    <div>
-      <h1>One controlled record of products, stock and orders.</h1>
-      <ul class="assure">
-        <li>Every change is checked by the server before it is saved.</li>
-        <li>Each entry is tied to a person and written to an audit trail.</li>
-        <li>Duplicate receipts and negative stock are refused.</li>
-      </ul>
+  <div class="signin-shell">
+    <header class="signin-head">
+      <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+      <span class="signin-head-sub">Business Control System</span>
+    </header>
+
+    <div class="signin-grid">
+      <div class="signin-left">
+        <section class="promo" id="promo" aria-roledescription="carousel" aria-label="Promotions">
+          <div class="promo-track" id="promoTrack"><p class="signin-empty">No data yet</p></div>
+          <div class="promo-controls hide" id="promoControls">
+            <button type="button" class="promo-arrow" id="promoPrev" aria-label="Previous banner">&#8249;</button>
+            <div class="promo-dots" id="promoDots" role="tablist" aria-label="Choose a banner"></div>
+            <button type="button" class="promo-arrow" id="promoNext" aria-label="Next banner">&#8250;</button>
+          </div>
+        </section>
+
+        <section class="signin-panel" aria-labelledby="noticeTitle">
+          <header class="signin-panel-h">
+            <h2 id="noticeTitle">Notices</h2>
+            <span class="signin-panel-sub" id="noticeCount"></span>
+          </header>
+          <div class="notice-list" id="noticeList"><p class="signin-empty">No data yet</p></div>
+        </section>
+      </div>
+
+      <div class="signin-right">
+        <form class="formbox" id="loginForm" novalidate>
+          <h2>Sign in</h2>
+          <p class="sub">Use the account issued to you.</p>
+          <label for="u">User ID</label>
+          <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false">
+          <label for="p">Password</label>
+          <input id="p" name="password" type="password" autocomplete="current-password">
+          <div class="login-actions">
+            <label class="check" for="saveId"><input type="checkbox" id="saveId"> Save ID</label>
+            <button class="link-btn" id="forgotBtn" type="button">Forgot Password?</button>
+          </div>
+          <button class="btn block" id="loginBtn" type="submit">Login</button>
+          <div class="err" id="lerr" role="alert"></div>
+        </form>
+
+        <section class="signin-panel" aria-labelledby="helpTitle">
+          <header class="signin-panel-h">
+            <h2 id="helpTitle">Help line</h2>
+            <span class="signin-panel-sub">Contact the right team</span>
+          </header>
+          <div class="contact-grid" id="contactList"><p class="signin-empty">No data yet</p></div>
+        </section>
+      </div>
     </div>
-    <small>Internal system. Demonstration data is fictional.</small>
-  </div>
-  <div class="formside">
-    <form class="formbox" id="loginForm" novalidate>
-      <h2>Sign in</h2>
-      <p class="sub">Use the account issued to you.</p>
-      <label for="u">Username</label>
-      <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false">
-      <label for="p">Password</label>
-      <input id="p" name="password" type="password" autocomplete="current-password">
-      <button class="btn block" id="loginBtn" type="submit">Sign in</button>
-      <div class="err" id="lerr" role="alert"></div>
-    </form>
+
+    <footer class="signin-footer">
+      <span id="copyright"></span>
+      <nav aria-label="Legal">
+        <button class="link-btn hide" type="button" data-legal="privacy">Privacy Policy</button>
+        <span class="signin-footer-sep hide" data-legal-sep>·</span>
+        <button class="link-btn hide" type="button" data-legal="terms">Terms &amp; Conditions</button>
+      </nav>
+    </footer>
   </div>
 </section>
+
+<dialog id="legalDialog" class="login-dialog" aria-labelledby="legalTitle">
+  <div class="login-dialog-h">
+    <h2 id="legalTitle"></h2>
+    <button class="x" id="legalClose" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div class="login-dialog-b" id="legalBody" tabindex="0"></div>
+</dialog>
+
+<dialog id="forgotDialog" class="login-dialog" aria-labelledby="forgotTitle">
+  <div class="login-dialog-h">
+    <h2 id="forgotTitle">Forgot password</h2>
+    <button class="x" id="forgotClose" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div class="login-dialog-b">
+    <p class="forgot-note">Password resets are handled by your Administrator. This page does not send email or reset a password.</p>
+    <div id="forgotContacts"></div>
+  </div>
+</dialog>
 
 <!-- Forced password change -->
 <section id="mustChange" class="hide" aria-labelledby="mcTitle">
@@ -168,17 +224,42 @@
         </div>
       </div>
       <div class="dash-filters" role="group" aria-label="Dashboard period">
-        <div class="dash-dates">
-          <label for="dashFrom">From <input id="dashFrom" type="date" aria-label="From date"></label>
-          <label for="dashTo">To <input id="dashTo" type="date" aria-label="To date"></label>
-        </div>
-        <div class="seg compact" role="group" aria-label="Date presets">
-          <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
-          <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
-          <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
-          <button type="button" data-dash-preset="month" aria-pressed="true">This month</button>
-          <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
-          <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
+        <div class="dash-range" id="dashRangeWrap">
+          <button type="button" class="dash-range-btn" id="dashRangeBtn" aria-haspopup="dialog"
+                  aria-expanded="false" aria-controls="dashRangePop">
+            <svg class="dash-range-cal" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/>
+            </svg>
+            <span id="dashRangeLabel"></span>
+            <svg class="dash-range-caret" viewBox="0 0 10 6" width="9" height="6" aria-hidden="true">
+              <path d="M1 1l4 4 4-4"/>
+            </svg>
+          </button>
+          <div class="dash-range-pop hide" id="dashRangePop" role="dialog" aria-label="Choose a date range">
+            <div class="drp-presets" role="group" aria-label="Date presets">
+              <button type="button" data-dash-preset="1d" aria-pressed="false">1D</button>
+              <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
+              <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
+              <button type="button" data-dash-preset="month" aria-pressed="true">Month to date</button>
+              <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
+              <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
+              <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
+            </div>
+            <div class="drp-cal">
+              <div class="drp-cal-top">
+                <span class="drp-hint" id="dashCalHint">Choose the start date</span>
+                <div class="drp-nav">
+                  <button type="button" id="dashCalPrev" aria-label="Show the previous months">‹</button>
+                  <button type="button" id="dashCalNext" aria-label="Show the next months">›</button>
+                </div>
+              </div>
+              <div class="drp-months" id="dashCalMonths"></div>
+            </div>
+            <div class="drp-foot">
+              <span class="drp-preview" id="dashRangePreview"></span>
+              <button class="btn ghost sm" type="button" id="dashRangeCancel">Cancel</button>
+            </div>
+          </div>
         </div>
         <button class="btn ghost sm hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
       </div>
@@ -1352,6 +1433,10 @@
       <div class="panel" id="emailPanel">
         <div class="panel-h"><h2>Email and SMTP</h2><span class="muted" id="emStatus">Administrator only.</span></div>
         <div id="emBody"><p class="muted">Loading email settings…</p></div>
+      </div>
+      <div class="panel hide" id="signinAdminPanel">
+        <div class="panel-h"><h2>Sign-in page</h2><span class="muted" id="signinAdminState">Administrator only.</span></div>
+        <div id="signinAdminBody"><p class="muted">Loading sign-in content…</p></div>
       </div>
       <div class="panel flush">
         <div class="panel-h"><h2>Employees</h2><span class="muted">The same master used by HR.</span></div>

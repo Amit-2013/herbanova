@@ -12,6 +12,8 @@
 
 **Gap-closure update (3 November 2026, two-factor):** migration `0029_totp` adds seven nullable-or-defaulted columns to `users` (documented under [`users`](#users)) and bumps `token_version` for the Administrator roles so pre-release sessions end. It also leaves sessions revoked on downgrade by design. **Status: applied to the disposable test database and to the development database** on 3 November 2026 after the owner's explicit `apply 0029_totp` and a verified backup; `alembic current` reads `0029_totp (head)` on both. The development table and row counts below are unchanged (84 tables, 6 users); the `users` table now has 24 columns.
 
+**Gap-closure update (4 November 2026, sign-in page content):** migration `0030_sign_in_content` adds four tables — `sign_in_banners` (9 columns), `sign_in_notices` (8), `sign_in_contacts` (8) and `legal_documents` (6) — with 31 columns in total, and seeds the two legal rows (`privacy`, `terms`) unpublished with a null body. **Status: applied to the disposable test database only.** The development database remains at `0029_totp` and production has not been migrated; the application code is additive, so a database without the tables serves the sign-in page's “No data yet” fallback rather than invented content. The downgrade drops the four tables; a banner image already on disk is not deleted by a schema rollback. The tables are documented in “Sign-in page content” below.
+
 **Usage columns are a text-search guide, not proof of use.** `be/ui/rep` counts word-boundary occurrences of the column name in backend code (`app/api`, `app/services`, `app/core`), the browser app (`static/js/app.js`, `static/index.html`) and report builders. Generic names (`id`, `status`, `created_at`) are counted wherever the word appears, so treat the numbers as a pointer for follow-up, not a semantic claim.
 
 **Row counts** are the development dataset on the audit date; they are not a production volume and not a performance benchmark.
@@ -87,6 +89,13 @@
 - [`company_profile`](#company_profile) — Single-row company identity, GST details and print settings used on invoices and reports.
 - [`discount_slabs`](#discount_slabs) — Quantity-based discount bands used by order pricing.
 - [`tax_rates`](#tax_rates) — HSN-to-GST-rate master with effective-from dates, CGST/SGST/IGST/cess rates.
+
+**Sign-in page content**
+
+- [`legal_documents`](#legal_documents) — Privacy Policy and Terms & Conditions, addressed by key; unpublished until an Administrator writes and publishes the text.
+- [`sign_in_banners`](#sign_in_banners) — Promotion banners on the sign-in page: image file name, title, optional link, sort order and active flag.
+- [`sign_in_contacts`](#sign_in_contacts) — Help-line boxes (Sales, Service, Customer Support) shown under the sign-in form and in the Forgot Password panel.
+- [`sign_in_notices`](#sign_in_notices) — Dated notices shown on the sign-in page; the page lists the five most recent active rows.
 
 **Users and roles**
 
@@ -1999,6 +2008,101 @@ Added by `0027_ledger_and_bank_rec` (3 November 2026). The dev row counts below 
 **Check constraints:** `ck_bank_line_amount`; `ck_bank_line_one_match`
 
 **Foreign keys:** (statement_id) → `bank_statements`(id); (matched_payment_id) → `payments`(id); (matched_voucher_line_id) → `voucher_lines`(id); (matched_by) → `users`(id)
+
+**Referenced by:** nothing
+
+---
+
+## Sign-in page content
+
+Added by migration `0030_sign_in_content`, which is on the disposable test database only. The development database has these tables only after the migration is approved and applied, so the row counts below are 0 there. The `be/ui/rep` usage counts have not been regenerated for these new tables.
+
+### legal_documents
+
+**Purpose:** Privacy Policy and Terms & Conditions, addressed by key; unpublished until an Administrator writes and publishes the text.
+
+**ORM:** `LegalDocument` · **Rows (dev):** 0 (not migrated) · **Columns:** 6
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `key` | varchar(20) | no | — | PK | `privacy` or `terms` | — |
+| 2 | `title` | varchar(120) | no | — | — | footer link text | — |
+| 3 | `body` | text | yes | — | — | null until an Administrator writes it | — |
+| 4 | `published` | boolean | no | false | — | readable only when true **and** the body is non-empty | — |
+| 5 | `updated_by` | integer | yes | — | FK→users.id | last Administrator to save | — |
+| 6 | `updated_at` | timestamptz | no | now() | — |  | — |
+
+**Foreign keys:** (updated_by) → `users`(id)
+
+**Referenced by:** nothing
+
+### sign_in_banners
+
+**Purpose:** Promotion banners on the sign-in page: image file name, title, optional link, sort order and active flag.
+
+**ORM:** `SignInBanner` · **Rows (dev):** 0 (not migrated) · **Columns:** 9
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval(...) | PK |  | — |
+| 2 | `title` | varchar(120) | no | — | — | caption and image alt text | — |
+| 3 | `image_path` | varchar(120) | no | — | — | file name only under `var/signin_banners`, never a path | — |
+| 4 | `link_url` | varchar(500) | yes | — | — | absolute `http(s)` or a site-relative `/…`; anything else is refused | — |
+| 5 | `sort_order` | integer | no | 0 | IX | rotation order | — |
+| 6 | `active` | boolean | no | true | IX | only active rows are public | — |
+| 7 | `created_by` | integer | yes | — | FK→users.id |  | — |
+| 8 | `created_at` | timestamptz | no | now() | — |  | — |
+| 9 | `updated_at` | timestamptz | no | now() | — |  | — |
+
+**Indexes:** `ix_sign_in_banners_sort_order`; `ix_sign_in_banners_active`
+
+**Foreign keys:** (created_by) → `users`(id)
+
+**Referenced by:** nothing
+
+### sign_in_contacts
+
+**Purpose:** Help-line boxes (Sales, Service, Customer Support) shown under the sign-in form and in the Forgot Password panel.
+
+**ORM:** `SignInContact` · **Rows (dev):** 0 (not migrated) · **Columns:** 8
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval(...) | PK |  | — |
+| 2 | `label` | varchar(60) | no | — | — | box heading | — |
+| 3 | `detail` | varchar(160) | yes | — | — | e.g. opening hours | — |
+| 4 | `phone` | varchar(40) | yes | — | — | rendered as a `tel:` link | — |
+| 5 | `email` | varchar(160) | yes | — | — | validated address; rendered as a `mailto:` link | — |
+| 6 | `sort_order` | integer | no | 0 | IX |  | — |
+| 7 | `active` | boolean | no | true | IX | only active rows are public | — |
+| 8 | `updated_at` | timestamptz | no | now() | — |  | — |
+
+A row must carry the label and at least one of detail, phone or email; the API refuses an empty box.
+
+**Indexes:** `ix_sign_in_contacts_sort_order`; `ix_sign_in_contacts_active`
+
+**Referenced by:** nothing
+
+### sign_in_notices
+
+**Purpose:** Dated notices shown on the sign-in page; the page lists the five most recent active rows.
+
+**ORM:** `SignInNotice` · **Rows (dev):** 0 (not migrated) · **Columns:** 8
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval(...) | PK |  | — |
+| 2 | `title` | varchar(160) | no | — | — |  | — |
+| 3 | `body` | text | yes | — | — | shown under the title when present | — |
+| 4 | `notice_date` | date | no | — | IX | drives the display order | — |
+| 5 | `active` | boolean | no | true | IX | only active rows are public | — |
+| 6 | `created_by` | integer | yes | — | FK→users.id |  | — |
+| 7 | `created_at` | timestamptz | no | now() | — |  | — |
+| 8 | `updated_at` | timestamptz | no | now() | — |  | — |
+
+**Indexes:** `ix_sign_in_notices_notice_date`; `ix_sign_in_notices_active`
+
+**Foreign keys:** (created_by) → `users`(id)
 
 **Referenced by:** nothing
 

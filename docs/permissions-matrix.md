@@ -2,7 +2,7 @@
 
 **Project:** Herbanova Business Control
 **Stage:** 3 — audit registers, refreshed after the Phase 3 verification
-**Date:** 31 October 2026; role grants and guard counts refreshed 1 November 2026
+**Date:** 31 October 2026; role grants and guard counts refreshed 1 November 2026; sign-in content routes added 4 November 2026
 **Sources:** `app/core/permissions.py` (`PERMISSIONS`, `BASELINE_ROLE_PERMS`), the live `roles` table (read-only query), `app/core/rbac.py`, and every `require(...)` / `require_admin(...)` / `is_admin(...)` call site under `app/api/`.
 **Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand. The 1 November refresh adds `accounts:reports` and `email:manage` to the matrices and recounts the literal guards after the HR and Accounts reporting work. The 2 November refresh adds `expense:read`/`expense:write` (46 keys, 12 groups) after the expense backend; the expense rows are still Administrator-only and the UI is Stage 3. The Stage 2 cost work adds no key: the audited PO cost correction is a second `accounts:write` route (`POST /api/accounts/costs/correction`). The 2 November FOC refresh adds `foc:read`/`foc:write`/`foc:approve` (49 keys, still 12 groups); migration 0023 grants them to the Administrator, inventory and viewer roles. `foc:approve` is Administrator-only. The 3 November ledger refresh adds no key: vouchers, opening balances, ledger heads and bank reconciliation reuse `accounts:read` and `accounts:write`, and their literal guard counts are recounted below.
 
@@ -227,6 +227,8 @@ Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1
 
 The catalogue has **49** keys. `accounts:reports`, `email:manage`, the two expense keys and `foc:approve` are Administrator-only in the live data; no non-Administrator baseline role carries them.
 
+**Sign-in page content.** The 13 routes under `/api/admin/sign-in/*` (banner list, upload, replace, patch, delete and image; notice create/patch/delete; contact create/patch/delete; legal patch) do not appear in the `require("user:manage")` count because they take `Depends(admin_only)`, where `admin_only = require_admin("user:manage")` (`app/api/signin.py:43`). They are Administrator-only on the same rule as the users and roles routes: the permission alone is not enough, the role must be `admin`. The three `/api/public/sign-in*` reads are unauthenticated by design, rate-limited and return active rows only.
+
 ## Verification status
 
 | Claim | Status | Evidence |
@@ -242,6 +244,7 @@ The catalogue has **49** keys. `accounts:reports`, `email:manage`, the two expen
 | Parent-child rules, admin-only locking and API enforcement | **VERIFIED** | `tests/test_permission_tree.py` (11 tests); browser check in `docs/VERIFICATION_REPORT.md` §5 |
 | Administrator second factor: RFC 6238 vectors, replay, non-admin unaffected, no session before enrollment, recovery code single use, session without the `otp` claim refused, five-code lock | **VERIFIED** | `tests/test_totp.py` (8 tests); enrollment walked in a browser, code-entry step not re-exercised; migration `0029_totp` on the test database only — `docs/VERIFICATION_REPORT.md` §25.5 |
 | Central module switches and the API gate | **VERIFIED** | `tests/test_feature_switches.py` (10 tests); `docs/VERIFICATION_REPORT.md` §5 |
+| Sign-in content: Administrator-only writes, public reads | **VERIFIED** | `tests/test_signin.py::test_only_the_administrator_manages_sign_in_content`; a `viewer` login received `403` on `GET`, `POST` and `PATCH` under `/api/admin/sign-in/*` while the public reads answered `200` (`docs/VERIFICATION_REPORT.md` §27.2) |
 | Live role matrix for HR, payroll, accounts reporting and the audit/user surfaces | **VERIFIED** | `docs/VERIFICATION_REPORT.md` §5: admin/admin2 `200`, HR manager `200` on HR and `403` on payroll/bank/audit/users, business roles `403` on HR |
 | Every individual guarded route is exercised | **PARTIAL** | Decision paths are covered by `tests/test_approvals.py`, `tests/test_hr.py` and the Phase 3 live GET sweep (75 routes); the gate-type tests are not repeated for every endpoint |
 

@@ -87,7 +87,7 @@ after ten minutes, so verifying a backup and pressing reset tomorrow does not wo
 
 ### 4.1 Every table is classified
 
-The database has 84 tables in schema `public` at migration `0028_advances`. Each one is in exactly one list:
+The database has 88 tables in schema `public` at migration `0030_sign_in_content`. Each one is in exactly one list:
 **CLEAR** (emptied by a business reset), **KEEP** (must survive it) or **SCHEMA**
 (Alembic bookkeeping, never touched). The lists live in
 `app/services/db_reset.py` (`BUSINESS_TABLES`, `KEPT_TABLES`, `SCHEMA_TABLES`).
@@ -131,7 +131,7 @@ decision.
 | `stock_movements` | stock ledger |
 | `vouchers`, `voucher_lines` | manual journal vouchers and their lines |
 
-**Business reset — KEEP (37 tables)**
+**Business reset — KEEP (41 tables)**
 
 | Table | What survives |
 |---|---|
@@ -148,6 +148,7 @@ decision.
 | `expense_heads`, `expense_settings` | expense head master and the tracked-from / approval-threshold settings |
 | `financial_year_closes` | closed financial years, with who closed or reopened them and why; kept so a reset cannot silently reopen a closed year |
 | `ledger_accounts` | the chart of accounts (seeded with the document roles and extended by hand); kept so booked vouchers never point at a head a reset deleted |
+| `sign_in_banners`, `sign_in_notices`, `sign_in_contacts`, `legal_documents` | the Administrator-written sign-in page content and the two legal documents; kept so a data reset never empties the public page or republishes invented text |
 | `hr_branches`, `hr_departments`, `hr_work_locations`, `hr_shifts`, `hr_holidays`, `hr_leave_types` | HR location and calendar masters |
 | `hr_salary_components`, `hr_salary_structures`, `hr_salary_structure_lines` | salary configuration |
 | `hr_attendance_rules`, `hr_approval_workflows`, `hr_letter_templates`, `hr_saved_filters`, `hr_period_locks` | HR policy and configuration |

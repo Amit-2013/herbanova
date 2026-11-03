@@ -1,39 +1,36 @@
 # Chapter 3 — Overview dashboard
 
-**Audience:** every signed-in user. **Permissions:** `require_login`; each panel additionally needs its own read permission. **UI route:** `#/dash`. **Chapter status:** written and verified against source on 31 October 2026; §1 refreshed for the From/To period strip and the **MoM & YoY dashboard** action on 3 November 2026. **Evidence:** `app/api/dashboard.py`; `tests/test_dashboard.py`, `tests/test_dashboard_phase2.py`, `tests/test_dashboard_phase3.py`, `tests/test_catalog_orders.py`.
+**Audience:** every signed-in user. **Permissions:** `require_login`; each panel additionally needs its own read permission. **UI route:** `#/dash`. **Chapter status:** written and verified against source on 31 October 2026; §1 refreshed for the From/To period strip and the **MoM & YoY dashboard** action on 3 November 2026; §1 rewritten on 4 November 2026 for the range trigger and two-month calendar. **Evidence:** `app/api/dashboard.py`; `tests/test_dashboard.py`, `tests/test_dashboard_phase2.py`, `tests/test_dashboard_phase3.py`, `tests/test_catalog_orders.py`.
 
 The Overview is the landing screen. It never invents a figure: a panel the server cannot compute shows **No data yet**, names the missing input and points at the screen that fixes it. A panel your role may not read is **absent and not zero** — the server returns `null` for it and never sends the number.
 
 ## 1. Period selector
 
-The page head shows a greeting and today's date, with the **MoM & YoY dashboard** button on the right. Under it sits the period strip: the **From** and **To** date fields, then six presets in one row.
+The page head shows a greeting and today's date, with the **MoM & YoY dashboard** button on the right. Under it sits the period control: one trigger button that shows the window, **Oct 5, 2026 - Nov 3, 2026 ⌄**, and a caret. Selecting it opens a popover with the presets and a two-month calendar.
 
 | Preset | Window |
 |---|---|
+| **1D** | Today only |
 | **7D** / **30D** / **90D** | The last 7, 30 or 90 days, ending today |
-| **This month** | The first day of the current month to today |
+| **Month to date** | The first day of the current month to today |
 | **Last month** | The whole previous calendar month |
 | **This FY** | 1 April of the current financial year to today |
 
-**This month** is the default. A preset fills both dates; typing or picking a date applies it when the field changes. The window is remembered in this browser and reused next time, so the Overview opens where you left it.
+**Month to date** is the default. Presets are offered in the order **1D, 7D, 30D, Month to date, Last month, 90D, This FY**. Selecting a preset closes the popover and applies it immediately.
 
-The line under the strip states exactly what was counted: **Selected period 1 November 2026 to 3 November 2026 (3 days) · snapshot cards are as at 3 November 2026 · updated 14:05**. Snapshot tiles (units, batches, approvals, leads, active products) are measured **today** whatever window is chosen, and the line says so; only the period figures follow the dates.
+**Choosing your own range.** The calendar shows two months side by side (one on a phone, with the arrows to move months). Select the start day, then the end day; the days between are shaded, and a hint under the arrows says **Choose the start date** or **Choose the end date**. Hovering the pointer after the first click previews the range. If you select the later day first, the two are swapped so the range is always start-to-end. Days after today are disabled, and the next arrow stops at the current month. **Cancel**, a second click on the trigger, a click outside the popover or **Escape** closes it without changing the window; **Escape** returns focus to the trigger.
+
+The trigger always states the window the figures came from, and the window is remembered in this browser across reloads and sign-ins. A remembered preset is highlighted only while it still matches today's dates; once the day moves on the dates stay and the highlight is dropped, so the browser never claims "7D" for yesterday's window.
+
+The line under the control states exactly what was counted: **Selected period 1 November 2026 to 3 November 2026 (3 days) · snapshot cards are as at 3 November 2026 · updated 14:05**. Snapshot tiles (units, batches, approvals, leads, active products) are measured **today** whatever window is chosen, and the line says so; only the period figures follow the dates.
 
 The window drives the sales-and-purchases chart and its previous-period comparison, receivables ageing (**measured as at the To date**, so it agrees with the Receivables Ageing report for that date), top products, sales by category, the Accounts block and the period-based insight cards.
 
-**Checks on the dates.** The browser refuses a window it can see is impossible and puts the reason under the strip in red, without sending a request:
+**Checks on the dates.** The calendar prevents the two mistakes the server also refuses — a future day cannot be chosen and the range cannot end before it starts. The browser still validates whatever it applies and, if an impossible stored window ever reaches it, writes the reason under the control in red instead of sending a request: **Choose both dates, or pick a preset.**, **The From date cannot be after the To date.** or **The To date cannot be in the future.** The server repeats the last two checks and answers **422** (`to_date cannot be in the future`, `from_date cannot be after to_date`); it never replaces an invalid window with a default. A caller using the older `range` parameter instead is limited to **7, 30 or 90**, and any other value is **422**.
 
-| Situation | Message |
-|---|---|
-| One date empty | **Choose both dates, or pick a preset.** |
-| From after To | **The From date cannot be after the To date.** |
-| To in the future | **The To date cannot be in the future.** |
+An Administrator holding `db:reset` also sees **Reset database** at the end of the filter row; the guarded reset, its modes and its recovery procedure are in [`../DB_RESET.md`](../DB_RESET.md).
 
-The server repeats the last two checks and answers **422** (`to_date cannot be in the future`, `from_date cannot be after to_date`); it never replaces an invalid window with a default. A caller using the older `range` parameter instead is limited to **7, 30 or 90**, and any other value is **422**.
-
-An Administrator holding `db:reset` also sees **Reset database** at the end of the strip; the guarded reset, its modes and its recovery procedure are in [`../DB_RESET.md`](../DB_RESET.md).
-
-**VERIFIED (code):** the strip is `#dashFrom`/`#dashTo` and `[data-dash-preset]` in `static/index.html:170-184`; the presets are computed in `dashWindow()` (`static/js/app.js:67-83`), defaulted to the current month at `app.js:84`, restored from `localStorage` at `app.js:85-93` and validated in `applyDashDates()` (`app.js:1502-1525`). The server-side window and its 422s are `_period()` in `app/api/dashboard.py:1650-1666`. The "Selected period …" line is rendered at `app.js:753-757`, and ageing is measured at the To date at `dashboard.py:1701-1703`.
+**VERIFIED:** the trigger and popover are `#dashRangeBtn` / `#dashRangePop` in `static/index.html:226-258`; the presets are computed in `dashWindow()` (`static/js/app.js:67-83`), defaulted and restored from `localStorage` at `app.js:84-97`. The trigger label is `renderDashRange()` (`app.js:1749`), the two-month calendar is `drawDashCalendar()` / `paintDashCalendar()` (`app.js:1760-1806`), selection and swap are `pickDashDay()` (`app.js:1827-1845`), and open/close/focus behaviour is `openDashRange()` / `closeDashRange()` / `bindDashRange()` (`app.js:1807-1879`). The server-side window and its 422s are `_period()` in `app/api/dashboard.py:1650-1666`. The "Selected period …" line is rendered at `app.js:753-757`, and ageing is measured at the To date at `dashboard.py:1701-1703`. In the browser at 1440, 768 and 390 px, light and dark on 4 November 2026, the trigger and popover layout, the 30D / 90D / This FY presets, a custom 5–20 October range, the server request it produced and its storage in the browser were exercised; the swap, future-day disabling and Escape/outside-click rules were read in the code but not separately driven (`docs/VERIFICATION_REPORT.md` §27.3).
 
 ## 2. KPI tiles
 

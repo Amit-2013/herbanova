@@ -7,7 +7,7 @@ record moves through it, and what is still open — so the owner can decide what
 to keep, what to switch off and what to build next.
 
 **Sources:** `static/index.html` (navigation and panels), `static/js/app.js`
-(routes and permissions), `app/main.py` (37 router inclusions, 327 operations),
+(routes and permissions), `app/main.py` (37 router inclusions, 343 operations on 4 November 2026),
 `app/services/reports.py` (27 reports), `app/services/report_packs.py`
 (7 e-mail packs), `app/core/permissions.py` (49 keys), the live database at
 migration `0029_totp` on the development and test databases (84 tables; `0029_totp` adds columns only), and
