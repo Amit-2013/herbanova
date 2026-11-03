@@ -496,14 +496,13 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .dash-range-pop{position:absolute;top:calc(100% + 6px);left:0;z-index:30;
   width:min(620px,calc(100vw - 48px));padding:14px;background:var(--surface);
   border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow-2)}
-.drp-presets{display:flex;flex-wrap:wrap;gap:6px;padding-bottom:12px;margin-bottom:12px;
-  border-bottom:1px solid var(--line)}
-.drp-presets button{font:inherit;font-size:12px;font-weight:600;color:var(--ink-2);
-  background:var(--wash);border:1px solid var(--line);border-radius:999px;padding:5px 11px;
-  min-height:28px;cursor:pointer}
-.drp-presets button:hover{border-color:var(--moss);color:var(--moss)}
-.drp-presets button[aria-pressed="true"]{background:var(--moss);border-color:var(--moss);color:#fff}
-.drp-presets button:focus-visible{outline:2px solid var(--moss);outline-offset:1px}
+.dash-presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:4px}
+.dash-presets button{font:inherit;font-size:12px;font-weight:600;color:var(--ink-2);
+  background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;
+  min-height:30px;white-space:nowrap;cursor:pointer}
+.dash-presets button:hover{border-color:var(--moss);color:var(--moss)}
+.dash-presets button[aria-pressed="true"]{background:var(--moss);border-color:var(--moss);color:#fff}
+.dash-presets button:focus-visible{outline:2px solid var(--moss);outline-offset:1px}
 .drp-cal-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
 .drp-hint{font-size:12px;color:var(--mute)}
 .drp-nav{display:flex;gap:4px}
@@ -529,7 +528,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .drp-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;
   margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
 .drp-preview{font-size:12px;color:var(--mute)}
-html[data-theme="dark"] .drp-presets button[aria-pressed="true"],
+html[data-theme="dark"] .dash-presets button[aria-pressed="true"],
 html[data-theme="dark"] .drp-day.edge{color:#0f1713}
 html[data-theme="dark"] .drp-day.in-range{background:#21422f;color:#b7e6cd}
 html[data-theme="dark"] .dash-range-btn[aria-expanded="true"]{box-shadow:0 0 0 2px rgba(76,195,138,.25)}
@@ -872,6 +871,8 @@ html[data-theme="dark"] .panel-h h2,html[data-theme="dark"] .attention-head h2{c
   .dash-range-btn{width:100%}
   #dashRangeLabel{flex:1 1 auto;text-align:left}
   .dash-range-pop{width:calc(100vw - 32px);padding:12px}
+  .dash-presets{width:100%;margin-left:0}
+  .dash-presets button{flex:1 1 auto;text-align:center}
   .dash-filters .seg{display:flex;flex-wrap:wrap;width:100%}
   .dash-filters .seg button{flex:1 1 auto}
   .dash-tools{gap:6px}

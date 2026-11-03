@@ -6,7 +6,7 @@ The Overview is the landing screen. It never invents a figure: a panel the serve
 
 ## 1. Period selector
 
-The page head shows a greeting and today's date, with the **MoM & YoY dashboard** button on the right. Under it sits the period control: one trigger button that shows the window, **Oct 5, 2026 - Nov 3, 2026 ⌄**, and a caret. Selecting it opens a popover with the presets and a two-month calendar.
+The page head shows a greeting and today's date, with the **MoM & YoY dashboard** button on the right. Under it sits the period control: one trigger button that shows the window, **Oct 5, 2026 - Nov 3, 2026 ⌄**, with a caret, and the preset buttons standing beside it in the same filter bar. Selecting the trigger opens a popover with a two-month calendar for a custom range.
 
 | Preset | Window |
 |---|---|
@@ -16,7 +16,7 @@ The page head shows a greeting and today's date, with the **MoM & YoY dashboard*
 | **Last month** | The whole previous calendar month |
 | **This FY** | 1 April of the current financial year to today |
 
-**Month to date** is the default. Presets are offered in the order **1D, 7D, 30D, Month to date, Last month, 90D, This FY**. Selecting a preset closes the popover and applies it immediately.
+**Month to date** is the default. The presets sit in the filter bar to the right of the date trigger, in the order **1D, 7D, 30D, Month to date, Last month, 90D, This FY**. Selecting one applies it at once, without opening the calendar. On a narrow screen the preset row wraps under the trigger.
 
 **Choosing your own range.** The calendar shows two months side by side (one on a phone, with the arrows to move months). Select the start day, then the end day; the days between are shaded, and a hint under the arrows says **Choose the start date** or **Choose the end date**. Hovering the pointer after the first click previews the range. If you select the later day first, the two are swapped so the range is always start-to-end. Days after today are disabled, and the next arrow stops at the current month. **Cancel**, a second click on the trigger, a click outside the popover or **Escape** closes it without changing the window; **Escape** returns focus to the trigger.
 
@@ -30,7 +30,7 @@ The window drives the sales-and-purchases chart and its previous-period comparis
 
 An Administrator holding `db:reset` also sees **Reset database** at the end of the filter row; the guarded reset, its modes and its recovery procedure are in [`../DB_RESET.md`](../DB_RESET.md).
 
-**VERIFIED:** the trigger and popover are `#dashRangeBtn` / `#dashRangePop` in `static/index.html:226-258`; the presets are computed in `dashWindow()` (`static/js/app.js:67-83`), defaulted and restored from `localStorage` at `app.js:84-97`. The trigger label is `renderDashRange()` (`app.js:1749`), the two-month calendar is `drawDashCalendar()` / `paintDashCalendar()` (`app.js:1760-1806`), selection and swap are `pickDashDay()` (`app.js:1827-1845`), and open/close/focus behaviour is `openDashRange()` / `closeDashRange()` / `bindDashRange()` (`app.js:1807-1879`). The server-side window and its 422s are `_period()` in `app/api/dashboard.py:1650-1666`. The "Selected period …" line is rendered at `app.js:753-757`, and ageing is measured at the To date at `dashboard.py:1701-1703`. In the browser at 1440, 768 and 390 px, light and dark on 4 November 2026, the trigger and popover layout, the 30D / 90D / This FY presets, a custom 5–20 October range, the server request it produced and its storage in the browser were exercised; the swap, future-day disabling and Escape/outside-click rules were read in the code but not separately driven (`docs/VERIFICATION_REPORT.md` §27.3).
+**VERIFIED:** the trigger, popover and preset row are `#dashRangeBtn` / `#dashRangePop` / `.dash-presets` in `static/index.html:227-263`; the presets are computed in `dashWindow()` (`static/js/app.js:67-83`), defaulted and restored from `localStorage` at `app.js:84-97`. The trigger label is `renderDashRange()` (`app.js:1749`), the two-month calendar is `drawDashCalendar()` / `paintDashCalendar()` (`app.js:1760-1806`), selection and swap are `pickDashDay()` (`app.js:1827-1845`), and open/close/focus behaviour is `openDashRange()` / `closeDashRange()` / `bindDashRange()` (`app.js:1807-1879`). The server-side window and its 422s are `_period()` in `app/api/dashboard.py:1650-1666`. The "Selected period …" line is rendered at `app.js:753-757`, and ageing is measured at the To date at `dashboard.py:1701-1703`. In the browser at 1440, 768 and 390 px, light and dark on 4 November 2026, the trigger and popover layout, the 30D / 90D / This FY presets, a custom 5–20 October range, the server request it produced and its storage in the browser were exercised; the swap, future-day disabling and Escape/outside-click rules were read in the code but not separately driven (`docs/VERIFICATION_REPORT.md` §27.3).
 
 ## 2. KPI tiles
 

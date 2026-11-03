@@ -236,15 +236,6 @@
             </svg>
           </button>
           <div class="dash-range-pop hide" id="dashRangePop" role="dialog" aria-label="Choose a date range">
-            <div class="drp-presets" role="group" aria-label="Date presets">
-              <button type="button" data-dash-preset="1d" aria-pressed="false">1D</button>
-              <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
-              <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
-              <button type="button" data-dash-preset="month" aria-pressed="true">Month to date</button>
-              <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
-              <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
-              <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
-            </div>
             <div class="drp-cal">
               <div class="drp-cal-top">
                 <span class="drp-hint" id="dashCalHint">Choose the start date</span>
@@ -260,6 +251,15 @@
               <button class="btn ghost sm" type="button" id="dashRangeCancel">Cancel</button>
             </div>
           </div>
+        </div>
+        <div class="dash-presets" role="group" aria-label="Date presets">
+          <button type="button" data-dash-preset="1d" aria-pressed="false">1D</button>
+          <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
+          <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
+          <button type="button" data-dash-preset="month" aria-pressed="true">Month to date</button>
+          <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
+          <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
+          <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
         </div>
         <button class="btn ghost sm hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
       </div>
