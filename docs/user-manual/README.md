@@ -13,7 +13,7 @@ This folder is the operating manual for the application at `/ui`. It is written 
 |---|---|
 | [`README.md`](README.md) | This index: scope, reading paths, chapter plan, end-to-end journeys, known gaps |
 | [`00-quick-start.md`](00-quick-start.md) | Chapter 1, written in full: signing in, temporary passwords, sessions, lockout, Administrator two-step verification (Google Authenticator, recovery codes and their messages), navigation, detail drawers and their responsive widths, error messages, and the two commands that start the API and front-end servers |
-| [`03-overview-dashboard.md`](03-overview-dashboard.md) | Chapter 3, written in full: period selector, KPI tiles, needs attention (including low stock), chart, ageing, expiry, warehouses, top products and category sales, insight cards and their measurement rules |
+| [`03-overview-dashboard.md`](03-overview-dashboard.md) | Chapter 3, written in full: From/To period strip with 7D, 30D, 90D, This month, Last month and This FY presets, KPI tiles, needs attention (including low stock), chart, ageing, expiry, warehouses, top products and category sales, insight cards and their measurement rules |
 | [`07-products.md`](07-products.md) | Chapter 7, written in full: product master, HSN, category, brand, reorder level, GST lookup and the free-text category limitation |
 | [`08-inventory.md`](08-inventory.md) | Chapter 8, written in full: stock on hand, the low chip, ledger, warehouses and capacity, receipts/dispatch/FEFO |
 | [`11-sales-orders.md`](11-sales-orders.md) | Chapter 11, written in full: draft, promise date, submit, approval stamp, dispatch, cancellation and the pipeline figures |
@@ -48,6 +48,7 @@ Cross-references:
 - HR roles and confidentiality: [`../HR_ROLES.md`](../HR_ROLES.md)
 - Executed verification evidence: [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md)
 - Administrator two-step verification, including the operator procedure for a lost phone: [`../ADMIN_2FA.md`](../ADMIN_2FA.md)
+- Interface rules — type scale, palette with measured contrast, spacing, components, states, motion and breakpoints: [`../DESIGN_SYSTEM.md`](../DESIGN_SYSTEM.md)
 - Starting the API and front-end servers as two processes: [`../RUNNING_SERVERS.md`](../RUNNING_SERVERS.md)
 - Scheduled e-mail reports and the delivery log: [`../EMAIL_REPORTS.md`](../EMAIL_REPORTS.md)
 

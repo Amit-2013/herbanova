@@ -1,7 +1,7 @@
 # 1. Getting Started
 
 **Audience:** everyone with a login.
-**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification) and §1.11 (starting the servers) added 3 November 2026.
+**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification, screen layout refreshed), §1.11 (starting the servers) and §1.12 (the application shell) added 3 November 2026.
 **What you need:** the application address from your administrator, a username, and your password.
 
 ## 1.1 Opening the application
@@ -70,7 +70,7 @@ If you leave a shared machine, sign out. Closing the tab does not clear the cook
 
 ## 1.5 What you will see
 
-The sidebar has 19 entries. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
+The sidebar has 21 entries, grouped under **Sales and customers**, **Stock and supply**, **Finance and insight**, and **People and admin**. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
 
 | Sidebar entry | Usually requires | What it is for |
 |---|---|---|
@@ -82,9 +82,11 @@ The sidebar has 19 entries. Most are filtered by your permissions when you sign 
 | Purchases | `stock:read`; `stock:write` to create | Purchase orders and goods receipts |
 | Products | `product:read`; `product:write` to edit | Product master and tax fields |
 | Inventory | `stock:read` | Warehouses, batches, stock and movement ledger |
+| Free samples | `foc:read`; `foc:write` to record, `foc:approve` to decide | Free-of-cost samples: issue, register and their cost treatment |
 | Suppliers | `supplier:read` | Supplier master and bank-change requests |
 | Approvals | `approval:read` | Credit-limit, sales-order, post-billing and HR requests |
 | Accounting & Finance | `accounts:read`; `accounts:write` to act | Outstanding, party ledgers, GST register, trial balance, ledger heads, openings, vouchers, day book, balance sheet, bank reconciliation |
+| Expenses | `expense:read`; `expense:write` to add | Expenses, their approval and reversal |
 | Reports | Per-report permission; `report:export` to download | The single reports page |
 | Geography | `sales:read` | Sales, returns and GST by buyer state |
 | HR Management | `hr:read` or `hr:attendance_self` | Employees, attendance, leave, OD, payroll |
@@ -92,7 +94,7 @@ The sidebar has 19 entries. Most are filtered by your permissions when you sign 
 | Settings & Administration | `user:manage`, `tax:read`, `audit:read` or `hr:read` | Company profile, tax, logins/employees, email and audit |
 | Scheduled reports | `email:manage` | Report packs, recipients and the delivery log |
 
-**VERIFIED (code):** menu visibility at `static/js/app.js:86-110`; reports permissions at `app/api/reports.py:83-85`; the full permission-to-role table is in [`../permissions-matrix.md`](../permissions-matrix.md).
+**VERIFIED (code):** menu visibility at `static/js/app.js:220-246`; reports permissions at `app/api/reports.py:83-85`; the full permission-to-role table is in [`../permissions-matrix.md`](../permissions-matrix.md).
 
 An **employee** without `hr:read` sees the HR home page with their own attendance only; the directory, leave/OD registers and payroll buttons are hidden and refused by the server (`static/js/app.js:602-610`).
 
@@ -183,6 +185,8 @@ Module switches are Administrator-only even if a custom role holds `user:manage`
 
 Until a code is confirmed, the password step opens no session, so no data can be read. Finishing enrollment ends any earlier session for the account.
 
+**What the screen looks like.** Both steps use a single centred card on a soft paper background, with the brand at the top, the setup key or code field in the middle and the action button below. A refused code appears as a red band inside the card. The recovery-code list uses two columns on a desktop and one on a phone, and the card follows the light or dark theme chosen for the application.
+
 **Every later sign-in.**
 
 1. Username and password, then **Sign in**.
@@ -220,5 +224,38 @@ python scripts/run_frontend.py    # browser entry, default http://127.0.0.1:3000
 - If the backend is stopped, the front-end answers **502** and says the API is not reachable instead of showing a broken page.
 
 Commands, options, the proxied paths, cookie and `APP_ENV` behaviour, and the evidence are in [`../RUNNING_SERVERS.md`](../RUNNING_SERVERS.md) (decision D-44).
+
+## 1.12 The application shell
+
+After sign-in every screen shares the same frame.
+
+| Part | Where it is | What it does |
+|---|---|---|
+| **Application bar** | A dark forest strip across the top, 44 px high | Brand on the left (select it to return to Overview), **Search pages and records** in the middle, **Dark theme** / **Light theme** on the right |
+| **Search** | The search button, or **Ctrl K** / **⌘ K** from anywhere | Opens the command palette: type at least two characters to find pages, products, orders, invoices and parties your role may read. **Esc** closes it |
+| **Module rail** | The left column on a desktop or tablet | Modules grouped by area — Sales and customers, Stock and supply, Finance and insight, People and admin. The current screen has a lighter fill and a thin amber line; the number in an amber pill is a count of items waiting there |
+| **Page area** | Right of the rail | One title, a short factual subtitle and, where the screen has one, the primary action on the right of the title |
+| **Status bar** | A thin strip at the bottom | A factual statement about the figures and the name of the environment the server reports |
+
+**On a phone or a narrow tablet** the rail becomes a band under the bar: your
+username, role and **Sign out** sit on the right, and the module list runs
+horizontally below them (swipe it sideways to reach later modules). The status
+bar keeps only the environment name.
+
+**Light and dark.** The theme control changes the whole application and is
+remembered in the browser. It does not change any figure, permission or saved
+record. The sign-in and two-step screens follow the theme chosen for that
+browser.
+
+**Where figures come from.** No screen invents a number. A panel the server
+cannot compute says **No data yet**, names the missing input and links to the
+screen that supplies it; a section your role may not read is absent, never zero.
+
+**VERIFIED:** the shell was reviewed in the running application on 3 November
+2026 at 1440, 1024, 768 and 390 px in both themes, with the drawer and palette
+open, using only read requests. A sweep of 23 routes at four widths found no
+sideways page scrolling. Evidence and what was not tested (physical devices,
+screen readers, other browsers) are in [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md)
+§26; the token and component rules are in [`../DESIGN_SYSTEM.md`](../DESIGN_SYSTEM.md).
 
 **Next chapter (planned):** 2. Finding your way — navigation, roles and permissions in detail.

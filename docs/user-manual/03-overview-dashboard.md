@@ -1,12 +1,39 @@
 # Chapter 3 — Overview dashboard
 
-**Audience:** every signed-in user. **Permissions:** `require_login`; each panel additionally needs its own read permission. **UI route:** `#/dash`. **Evidence:** `app/api/dashboard.py`; `tests/test_dashboard.py`, `tests/test_dashboard_phase2.py`, `tests/test_dashboard_phase3.py`, `tests/test_catalog_orders.py`.
+**Audience:** every signed-in user. **Permissions:** `require_login`; each panel additionally needs its own read permission. **UI route:** `#/dash`. **Chapter status:** written and verified against source on 31 October 2026; §1 refreshed for the From/To period strip and the **MoM & YoY dashboard** action on 3 November 2026. **Evidence:** `app/api/dashboard.py`; `tests/test_dashboard.py`, `tests/test_dashboard_phase2.py`, `tests/test_dashboard_phase3.py`, `tests/test_catalog_orders.py`.
 
 The Overview is the landing screen. It never invents a figure: a panel the server cannot compute shows **No data yet**, names the missing input and points at the screen that fixes it. A panel your role may not read is **absent and not zero** — the server returns `null` for it and never sends the number.
 
 ## 1. Period selector
 
-The buttons **7D**, **30D**, and **90D** set the window used by the chart, ageing, top products and category sales. The heading states the exact dates. Any other value is refused by the server with **422**; it is not silently replaced with 30 days.
+The page head shows a greeting and today's date, with the **MoM & YoY dashboard** button on the right. Under it sits the period strip: the **From** and **To** date fields, then six presets in one row.
+
+| Preset | Window |
+|---|---|
+| **7D** / **30D** / **90D** | The last 7, 30 or 90 days, ending today |
+| **This month** | The first day of the current month to today |
+| **Last month** | The whole previous calendar month |
+| **This FY** | 1 April of the current financial year to today |
+
+**This month** is the default. A preset fills both dates; typing or picking a date applies it when the field changes. The window is remembered in this browser and reused next time, so the Overview opens where you left it.
+
+The line under the strip states exactly what was counted: **Selected period 1 November 2026 to 3 November 2026 (3 days) · snapshot cards are as at 3 November 2026 · updated 14:05**. Snapshot tiles (units, batches, approvals, leads, active products) are measured **today** whatever window is chosen, and the line says so; only the period figures follow the dates.
+
+The window drives the sales-and-purchases chart and its previous-period comparison, receivables ageing (**measured as at the To date**, so it agrees with the Receivables Ageing report for that date), top products, sales by category, the Accounts block and the period-based insight cards.
+
+**Checks on the dates.** The browser refuses a window it can see is impossible and puts the reason under the strip in red, without sending a request:
+
+| Situation | Message |
+|---|---|
+| One date empty | **Choose both dates, or pick a preset.** |
+| From after To | **The From date cannot be after the To date.** |
+| To in the future | **The To date cannot be in the future.** |
+
+The server repeats the last two checks and answers **422** (`to_date cannot be in the future`, `from_date cannot be after to_date`); it never replaces an invalid window with a default. A caller using the older `range` parameter instead is limited to **7, 30 or 90**, and any other value is **422**.
+
+An Administrator holding `db:reset` also sees **Reset database** at the end of the strip; the guarded reset, its modes and its recovery procedure are in [`../DB_RESET.md`](../DB_RESET.md).
+
+**VERIFIED (code):** the strip is `#dashFrom`/`#dashTo` and `[data-dash-preset]` in `static/index.html:170-184`; the presets are computed in `dashWindow()` (`static/js/app.js:67-83`), defaulted to the current month at `app.js:84`, restored from `localStorage` at `app.js:85-93` and validated in `applyDashDates()` (`app.js:1502-1525`). The server-side window and its 422s are `_period()` in `app/api/dashboard.py:1650-1666`. The "Selected period …" line is rendered at `app.js:753-757`, and ageing is measured at the To date at `dashboard.py:1701-1703`.
 
 ## 2. KPI tiles
 

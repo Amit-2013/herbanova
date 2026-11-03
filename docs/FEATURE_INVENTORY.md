@@ -141,7 +141,7 @@ hand-typed number.
 | F-50 | Reconciliation checks on reports | Reports | per-report key | `test_report_reconciliation.py` | VERIFIED |
 | F-51 | Empty report says "No data yet" | Reports | per-report key | `test_reports.py` | VERIFIED |
 | F-52 | Overview KPIs, search, activity, health | Overview; `/api/dashboard` | `require_login` + section keys | `test_dashboard.py` | VERIFIED |
-| F-53 | Period selector and permission masking | Overview | section keys | `test_dashboard_phase2.py` | VERIFIED |
+| F-53 | Period strip (From/To dates; 7D, 30D, 90D, This month, Last month, This FY presets) and permission masking | Overview | section keys | `test_dashboard_phase2.py`; browser probe 3 Nov 2026 | VERIFIED |
 | F-54 | Sales/purchase series, approvals card | Overview | `sales:read`, `stock:read` | `test_dashboard_v2.py` | VERIFIED |
 | F-55 | Month-to-date, projection, trend, breakdowns | Overview → Compare | `sales:read` | `test_dashboard_compare.py` | VERIFIED |
 | F-56 | State geography from invoice snapshots | Overview → Geography | `sales:read` | `test_dashboard_geo.py` | VERIFIED |
