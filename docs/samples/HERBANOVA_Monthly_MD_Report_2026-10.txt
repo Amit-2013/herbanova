@@ -3,7 +3,7 @@
 HERBANOVA SAMPLE CO | Monthly MD Report | 1–31 Oct 2026
 Generated 1 Nov 2026, 04:02 AM IST
 
-HISTORICAL SAMPLE: rendered before stock costing and expenses existed. Profit and expense figures are a layout reference only; current templates show live gross profit (partial when needed), expenses and net profit, with GAP-P01/P02/P03 only where an input is missing.
+HISTORICAL SAMPLE: rendered before stock costing and expenses existed. Profit and expense figures are a layout reference only; current templates show live gross profit (partial when needed), expenses and net profit, with GAP-P01/P02/P03 only where an input is missing. Input GST, filed-return reconciliation and statutory dues were also not captured at render time; the current accounts page reports them from supplier bills, filed returns and challans.
 
 KEY FIGURES
 - Sales: ₹ 8,90,900.00 (▲ up 151.7% vs previous)
@@ -60,7 +60,7 @@ ACCOUNTS SUMMARY
 - Revenue (taxable): ₹ 7,55,000.00
 - Collections: ₹ 1,00,000.00
 - Returns: ₹ 0.00
-- Output GST: ₹ 1,35,900.00 (input tax not captured, GAP-A05)
+- Output GST: ₹ 1,35,900.00 (input tax not captured in this historical sample; now reported from supplier bills)
 - Receivables outstanding: ₹ 11,44,900.00 as at 2026-10-31
 - Receivables over 60 days: ₹ 0.00
 - Payables outstanding: ₹ 20,000.00 (due dates estimated)
@@ -68,7 +68,7 @@ ACCOUNTS SUMMARY
 - Expenses: not captured in this historical sample (GAP-P02)
 - Net profit: not captured in this historical sample (GAP-P01)
 - Trial balance: debits equal credits
-- No financial-year or period lock is configured (GAP-A03)
+- Historical sample rendered before the financial-year close; the current report text states the close rule
 
 ATTACHED REPORTS
 - HERBANOVA_Monthly_MD_2026-10.pdf (Summary, comparison, ageing, top products, accounts, 23 rows, 3 KB)

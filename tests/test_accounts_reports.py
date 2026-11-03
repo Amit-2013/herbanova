@@ -5,8 +5,13 @@ so a screen can never show a number the documents do not support.
 """
 from datetime import date, timedelta
 from decimal import Decimal
+from uuid import uuid4
+
+from sqlalchemy import select
 
 from app.core.db import SessionLocal
+from app.models.accounts import Payment
+from app.models.core import CreditNote, Invoice, User
 from app.services import report_packs
 
 from test_dashboard_v2 import _invoice
@@ -110,19 +115,22 @@ def test_states_and_trend_carry_the_same_money(client, world):
 
 
 def test_missing_expenses_and_profit_are_gaps_not_zeroes(client, world):
-    report = _report(client)
+    # A window with no expense tracking and no payroll period at all: both are
+    # named as gaps, never printed as zero.
+    report = _report(client, from_date="2001-02-01", to_date="2001-02-28")
     rows = {r["key"]: r for r in report["profit_and_loss"]["rows"]}
     assert rows["expenses"]["available"] is False
     assert rows["expenses"]["value"] is None
     assert rows["expenses"]["gap"] == "GAP-P02"
+    assert rows["payroll"]["available"] is False
+    assert rows["payroll"]["value"] is None
+    assert rows["payroll"]["gap"] == "GAP-P03"
     assert rows["net_profit"]["available"] is False
     assert rows["net_profit"]["value"] is None
     pl_gaps = report["profit_and_loss"]["gaps"]
     assert rows["net_profit"]["gap"] == pl_gaps[0]["code"]
     assert report["net_profit"]["available"] is False
     codes = {g["code"] for g in pl_gaps}
-    # Expenses and payroll are incomplete; an earlier invoice without a stock
-    # issue also leaves cost incomplete, and that gap comes first.
     assert {"GAP-P02", "GAP-P03"} <= codes
     assert not {"GAP-A01", "GAP-A02"} & codes
 
@@ -162,3 +170,137 @@ def test_email_accounts_block_matches_the_report(client, world):
     assert Decimal(data["accounts"]["output_gst"]["total"]) \
         == Decimal(report["output_gst"]["total"])
     assert data["accounts"]["trial_balance"]["balanced"] is True
+
+
+# --- receivables by distributor: the statement in its own section ----------
+
+def _rbd(client, **params):
+    res = client.as_user("admin").get("/api/accounts/receivables-by-distributor",
+                                      params=params)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def _row(body, distributor_id):
+    return next(r for r in body["rows"] if r["distributor_id"] == distributor_id)
+
+
+def test_receivables_by_distributor_permissions_and_dates(client, world):
+    # The statements are on accounts:read, so the sales desk may read this report;
+    # a viewer has no accounts right at all.
+    assert client.as_user("sales").get(
+        "/api/accounts/receivables-by-distributor").status_code == 200
+    assert client.as_user("viewer").get(
+        "/api/accounts/receivables-by-distributor").status_code == 403
+    admin = client.as_user("admin")
+    assert admin.get("/api/accounts/receivables-by-distributor", params={
+        "from_date": "2026-01-10", "to_date": "2026-01-01"}).status_code == 422
+    assert admin.get("/api/accounts/receivables-by-distributor", params={
+        "to_date": (TODAY + timedelta(days=1)).isoformat()}).status_code == 422
+
+
+def test_receivables_by_distributor_opening_plus_movements_is_closing(client, world):
+    _invoice(world, date(2019, 4, 10), Decimal("700.00"))
+    _invoice(world, date(2019, 5, 10), Decimal("300.00"))
+    body = _rbd(client, from_date="2019-05-01", to_date="2019-05-31")
+    row = _row(body, world["distributor_id"])
+    assert Decimal(row["opening"]) >= Decimal("700.00")
+    assert Decimal(row["invoiced"]) >= Decimal("300.00")
+    assert row["invoices"] >= 1
+    for r in body["rows"]:
+        assert Decimal(r["closing"]) == (
+            Decimal(r["opening"]) + Decimal(r["invoiced"]) + Decimal(r["debited"])
+            - Decimal(r["credited"]) - Decimal(r["received"]))
+    assert Decimal(body["totals"]["closing"]) == sum(
+        (Decimal(r["closing"]) for r in body["rows"]), Decimal("0"))
+    assert body["count"] == len(body["rows"])
+
+
+def test_receivables_by_distributor_closing_reconciles_with_outstanding(client, world):
+    _invoice(world, DAY, Decimal("4321.00"))
+    body = _rbd(client, from_date=DAY.isoformat(), to_date=DAY.isoformat())
+    out = client.as_user("admin").get("/api/accounts/outstanding").json()
+    assert Decimal(body["totals"]["closing"]) == Decimal(str(out["receivable_total"]))
+
+
+def test_receivables_by_distributor_is_as_at_the_closing_date(client, world):
+    # A receipt and a credit note dated after the closing date must not change
+    # the earlier statement, and both must appear once the window reaches them.
+    invoice_id, _ = _invoice(world, date(2019, 8, 10), Decimal("2200.00"))
+    with SessionLocal() as db:
+        actor = db.scalar(select(User).where(User.username == "admin"))
+        invoice = db.get(Invoice, invoice_id)
+        db.add(Payment(kind="receipt", distributor_id=world["distributor_id"],
+                       invoice_id=invoice_id, amount=Decimal("500.00"),
+                       paid_on=date(2019, 9, 5), mode="bank",
+                       reference="RBD-ASAT", created_by=actor.id))
+        db.add(CreditNote(
+            credit_note_number=f"RBD{uuid4().hex[:6].upper()}"[:16],
+            financial_year="2019-20", invoice_id=invoice_id,
+            sales_order_id=invoice.sales_order_id,
+            distributor_id=world["distributor_id"], status="issued",
+            note_date=date(2019, 9, 5), reason="as-at test",
+            taxable_value=Decimal("200.00"), grand_total=Decimal("200.00"),
+            issued_by=actor.id))
+        db.commit()
+    at_august = _row(_rbd(client, from_date="2019-08-01", to_date="2019-08-31"),
+                     world["distributor_id"])
+    at_september = _row(_rbd(client, from_date="2019-08-01", to_date="2019-09-30"),
+                        world["distributor_id"])
+    assert Decimal(at_september["received"]) == Decimal(at_august["received"]) + Decimal("500.00")
+    assert Decimal(at_september["credited"]) == Decimal(at_august["credited"]) + Decimal("200.00")
+    assert Decimal(at_september["closing"]) == Decimal(at_august["closing"]) - Decimal("700.00")
+
+
+def test_receivables_by_distributor_overdue_needs_a_due_date_before_the_close(client, world):
+    invoice_id, _ = _invoice(world, date(2019, 7, 1), Decimal("640.00"))
+    with SessionLocal() as db:
+        db.get(Invoice, invoice_id).due_date = date(2019, 7, 15)
+        db.commit()
+    before_due = _row(_rbd(client, from_date="2019-07-01", to_date="2019-07-10"),
+                      world["distributor_id"])
+    after_due = _row(_rbd(client, from_date="2019-07-01", to_date="2019-07-31"),
+                     world["distributor_id"])
+    assert Decimal(before_due["overdue"]) == 0
+    assert Decimal(after_due["overdue"]) >= Decimal("640.00")
+    assert after_due["overdue_invoices"] >= 1
+
+
+def test_receivables_by_distributor_empty_window_says_so(client, world):
+    body = _rbd(client, from_date="2001-01-01", to_date="2001-12-31")
+    assert body["rows"] == []
+    assert body["count"] == 0
+    assert Decimal(body["totals"]["closing"]) == 0
+    assert "closing" in body["note"].lower()
+
+
+# --- KPI cards: each one opens its own report ------------------------------
+
+def test_each_kpi_card_opens_its_own_report_with_the_same_window(client, world):
+    """A card carries the window to the report that proves it.
+
+    The destinations are distinct: two cards that share a figure share a
+    screen, but no card funnels every figure into one page.
+    """
+    start, end = date(2019, 8, 1), date(2019, 8, 31)
+    res = client.as_user("admin").get("/api/accounts/report", params={
+        "from_date": start.isoformat(), "to_date": end.isoformat()})
+    assert res.status_code == 200, res.text
+    cards = {c["key"]: c for c in res.json()["cards"]}
+    window = f"?from={start.isoformat()}&to={end.isoformat()}"
+    expected = {
+        "revenue": f"#/accounts/gst-out{window}",
+        "gst": f"#/accounts/gst-out{window}",
+        "collections": f"#/accounts/cash{window}",
+        "cash_bank": f"#/accounts/cash{window}",
+        "outstanding": "#/accounts/receivables",
+        "overdue_60": f"#/accounts/ageing?as_of={end.isoformat()}",
+        "payables": "#/accounts/payables",
+        "payable_week": "#/accounts/payables?due=week",
+        "expenses": f"#/expenses{window}",
+        "net_profit": "#/accounts/reports?focus=pnl",
+    }
+    for key, href in expected.items():
+        assert cards[key]["href"] == href, key
+    screens = {c["href"].split("?")[0] for c in cards.values()}
+    assert len(screens) >= 5

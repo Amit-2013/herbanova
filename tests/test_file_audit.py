@@ -458,6 +458,42 @@ def test_every_pdf_opens_has_text_and_shows_hindi_and_the_rupee(client, world):
     assert _reads(text, "Rupees")
 
 
+def test_a_credit_and_a_debit_note_can_be_opened_and_printed(client, world):
+    """The notes list carries the line detail the drawer shows, and both note
+    kinds print a real PDF that names the document and its invoice."""
+    invoice = _invoice(client, world, qty="2")
+    line_id = invoice["lines"][0]["invoice_line_id"]
+    admin = client.as_user("admin")
+    credit = admin.post("/api/credit-notes", json={
+        "invoice_id": invoice["id"], "reason": "Rate difference agreed",
+        "lines": [{"invoice_line_id": line_id, "qty": "1"}]})
+    assert credit.status_code == 201, credit.text
+    debit = admin.post("/api/debit-notes", json={
+        "invoice_id": invoice["id"], "reason": "Freight undercharged",
+        "lines": [{"invoice_line_id": line_id, "qty": "1"}]})
+    assert debit.status_code == 201, debit.text
+
+    credit_list = admin.get("/api/credit-notes").json()
+    debit_list = admin.get("/api/debit-notes").json()
+    opened_credit = next(n for n in credit_list if n["id"] == credit.json()["id"])
+    opened_debit = next(n for n in debit_list if n["id"] == debit.json()["id"])
+    assert opened_credit["lines"][0]["sku"] == world["sku"]
+    assert opened_debit["lines"][0]["sku"] == world["sku"]
+    assert opened_credit["invoice_number"] == invoice["invoice_number"]
+    assert opened_debit["invoice_number"] == invoice["invoice_number"]
+
+    credit_pdf = _pdf(admin.post(f"/api/print/credit_note/{credit.json()['id']}",
+                                 params={"copy": "ORIGINAL"}),
+                      "credit-note-print.pdf")
+    assert "CREDIT NOTE" in credit_pdf
+    assert _reads(credit_pdf, credit.json()["credit_note_number"])
+    debit_pdf = _pdf(admin.post(f"/api/print/debit_note/{debit.json()['id']}",
+                                params={"copy": "ORIGINAL"}),
+                     "debit-note-print.pdf")
+    assert "DEBIT NOTE" in debit_pdf
+    assert _reads(debit_pdf, debit.json()["debit_note_number"])
+
+
 # -------------------------------------------------------------------- photo
 def _png(size=(40, 40)) -> bytes:
     from PIL import Image

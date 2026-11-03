@@ -1,7 +1,7 @@
 # 1. Getting Started
 
 **Audience:** everyone with a login.
-**Chapter status:** written and verified against source on 31 October 2026.
+**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification) and §1.11 (starting the servers) added 3 November 2026.
 **What you need:** the application address from your administrator, a username, and your password.
 
 ## 1.1 Opening the application
@@ -17,6 +17,8 @@ Enter the address in a browser. The server root redirects to **`/ui/`** (`app/ma
 3. Select **Sign in**.
 
 On success the application closes the sign-in screen, loads your identity and permission list from the server, and opens the main shell. The top-right corner shows your username, your role and a **Sign out** button.
+
+**Administrator accounts take a second step.** If you sign in as the Administrator or Super Admin, the password alone does not open the shell: a **Two-step verification** screen asks for a six-digit code from Google Authenticator, or — the first time — asks you to set the app up. This is described in §1.10.
 
 **VERIFIED:** the browser re-reads `/api/auth/me` after login instead of trusting a copy of the permissions kept in the page (`static/js/app.js:112-123`). What you can see is therefore decided by the server, not by the screen.
 
@@ -82,7 +84,7 @@ The sidebar has 19 entries. Most are filtered by your permissions when you sign 
 | Inventory | `stock:read` | Warehouses, batches, stock and movement ledger |
 | Suppliers | `supplier:read` | Supplier master and bank-change requests |
 | Approvals | `approval:read` | Credit-limit, sales-order, post-billing and HR requests |
-| Accounting & Finance | `accounts:read` | Outstanding, party ledgers, GST register, trial balance |
+| Accounting & Finance | `accounts:read`; `accounts:write` to act | Outstanding, party ledgers, GST register, trial balance, ledger heads, openings, vouchers, day book, balance sheet, bank reconciliation |
 | Reports | Per-report permission; `report:export` to download | The single reports page |
 | Geography | `sales:read` | Sales, returns and GST by buyer state |
 | HR Management | `hr:read` or `hr:attendance_self` | Employees, attendance, leave, OD, payroll |
@@ -94,9 +96,37 @@ The sidebar has 19 entries. Most are filtered by your permissions when you sign 
 
 An **employee** without `hr:read` sees the HR home page with their own attendance only; the directory, leave/OD registers and payroll buttons are hidden and refused by the server (`static/js/app.js:602-610`).
 
-**Branches, offices and attendance policy.** Every employee can be placed in a **Branch** and an **Office / work location** in the New/Edit employee form; only the offices of the chosen branch are offered, and choosing an office fills its branch. HR Management shows the office under **Location** in the People table, plus a **No attendance** chip when the policy exempts that person. A role with `hr:write` can open **Branches, offices & attendance policy** to create branches and offices, set a geofence, and write attendance rules. The branch and office selectors above the People list, the monthly register and the HR reports narrow every figure to that branch or office, and a printed sheet repeats the filter it used. An employee who is not required to mark attendance is refused a check-in by the server, and their exempt days appear as **not required**, never as absences.
+**Branches, offices and attendance policy.** Every employee can be placed in a **Branch** and an **Office / work location** in the New/Edit employee form; only the offices of the chosen branch are offered, and choosing an office fills its branch. HR Management shows the office under **Location** in the People table, plus a **No attendance** chip when the policy exempts that person. A role with `hr:write` can open **Branches & locations** to create branches and offices, set a geofence, and write attendance rules. **HR masters** on the same screen holds departments, holidays, leave types, salary components and salary structures; a role with payroll preparation rights also sees a **Salary** tab on each employee profile to assign a structure. The branch and office selectors above the People list, the monthly register and the HR reports narrow every figure to that branch or office, and a printed sheet repeats the filter it used. An employee who is not required to mark attendance is refused a check-in by the server, and their exempt days appear as **not required**, never as absences.
 
-## 1.6 Messages you may see
+## 1.6 Detail drawers
+
+Most records open in a panel that slides in from the right over the list you were reading — an invoice, a customer or supplier, a distributor ledger, a purchase order, an expense, an HR record or any Accounts entry. The list stays behind it, dimmed but visible, so you do not lose your place.
+
+**How wide it is.** The drawer takes a share of the screen, so a ledger or invoice line table can be read without leaving the list:
+
+| Your screen width | Drawer width |
+|---|---|
+| Large desktop (1440 px and wider) | 62% of the screen (60–65% band) |
+| Desktop (1024–1439 px) | 68% (65–70% band) |
+| Tablet (768–1023 px) | 82% (80–85% band) |
+| Phone (below 768 px) | The whole screen |
+
+**What the drawer does.**
+
+- It slides in from the right. The background page stays visible and darkened on a desktop or tablet.
+- The title and the **×** (close) button stay at the top; only the record below them scrolls.
+- The background page cannot scroll while the drawer is open, and it scrolls again as soon as the drawer closes.
+- On a phone the drawer fills the screen and the form fields stack in one column.
+- Table headers stay pinned to the top of the record while you scroll a long ledger.
+- Columns are tightened to fit the drawer; a very wide table (for example an invoice with CGST, SGST and IGST columns) scrolls inside its own box rather than dragging the whole drawer sideways, and the money columns keep their full figures.
+
+**How to close it.** Select **×**, or press **Escape**. On a desktop or tablet you can also click the darkened page outside the drawer. On a phone the panel fills the screen, so use **×** or **Escape**. Closing with any of these returns you to the list with the keyboard back where it was.
+
+Nothing about the record changes because of the wider panel: the same fields, buttons, permissions and server checks apply, and a save or action sends the same request as before.
+
+**VERIFIED:** the shared drawer was measured in the real application (test database) at 1600×900, 1280×900, 900×900 and 390×844 px on 3 November 2026 — widths 62%, 68%, 82% and 100%; no page-level horizontal scrolling; the pinned header stayed 4 px below the scrolled body's top; the **×**, Escape and outside click each closed the drawer and released the background scroll lock; no script error. The invoice, customer and distributor-ledger drawers were opened, and the dark theme was checked. Evidence and the list of what was not tested are in [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md) §22. Physical phones, tablets and screen readers were not tested.
+
+## 1.7 Messages you may see
 
 | Message | Meaning | What to do |
 |---|---|---|
@@ -105,13 +135,17 @@ An **employee** without `hr:read` sees the HR home page with their own attendanc
 | **Too many requests. Please wait a moment and try again.** | More than 20 sign-in attempts per minute from your address. | Wait at least a minute. |
 | **You must change your password before using the application** | A temporary password is in force, or the browser identity is out of date. | The change screen should appear at sign-in (§1.3); if it does not, sign out and in again. |
 | **Not authenticated** / **Session expired** | The cookie is missing, expired or revoked. | Sign in again. |
+| **That code was not accepted.** | An Administrator's six-digit code was wrong, or one already used. | Enter the code on screen for the next 30-second step (§1.10). |
+| **Too many wrong codes. Try again in N minute(s).** | Five wrong codes in a row; code entry is paused for 15 minutes. | Wait, then sign in again (§1.10). |
+| **Start signing in again** | The password step of an Administrator sign-in expired after 10 minutes. | Begin again with the username and password (§1.10). |
+| **Two-factor verification required** | The session did not complete the code step. | Sign in again (§1.10). |
 | **Permission denied** | Your role does not hold the required permission, or the screen allowed an action the server refuses. | Ask an administrator; do not retry repeatedly. |
 | **Only an Administrator can do this** | The action needs the Administrator role itself, not just a permission. | Ask the Administrator. |
 | A red message inside a form | Validation failed; the text names the field or rule. | Correct the field and submit again. |
 
 **VERIFIED (code):** the server messages are the literals in `app/core/rbac.py`, `app/api/auth.py` and `app/core/security.py`; the browser shows the server's detail text in the form (`static/js/app.js:118`).
 
-## 1.7 If you cannot sign in
+## 1.8 If you cannot sign in
 
 1. Check that you are using the address ending in `/ui/`.
 2. Check the username spelling; case does not matter.
@@ -119,7 +153,7 @@ An **employee** without `hr:read` sees the HR home page with their own attendanc
 4. If it still fails, ask an administrator to reset the password. The administrator can see whether the account is **Temporary** or **Locked** in the Logins screen and can end every open session by resetting.
 5. If the page loads but every panel is empty and the address bar is correct, the session may have expired; sign in again. If it persists, report your username, the time and the exact message — never your password.
 
-## 1.8 Roles and permissions (administrators)
+## 1.9 Roles and permissions (administrators)
 
 Open **Roles & Permissions** in the sidebar. The screen has three parts:
 
@@ -132,5 +166,59 @@ Open **Roles & Permissions** in the sidebar. The screen has three parts:
 The tree editor follows one rule: a **parent** permission is the module gate. Ticking it makes its children selectable but grants none of them. Tick each child you want; unticking the parent clears its children. A child without its parent is refused by the server. Four rights (`approval:credit_limit`, `invoice:edit_post_billing`, `email:manage`, `db:reset`) stay locked to the Administrator and cannot be given to another role.
 
 Module switches are Administrator-only even if a custom role holds `user:manage`. User accounts and temporary passwords are managed separately under **Settings & Administration → Logins and employees**. Every role change and every switch is written to the audit trail.
+
+## 1.10 Two-step verification (Administrator accounts)
+
+**Who it applies to.** Only the **Administrator** and **Super Admin** roles. Every other role signs in with a password alone, exactly as §1.2 describes. The server decides this from the account's role, so a custom role does not receive it and there is no permission switch to turn it on or off. The design and the operator procedure are in [`../ADMIN_2FA.md`](../ADMIN_2FA.md) (decision D-46).
+
+**What it needs.** A code from **Google Authenticator** or any authenticator app. No SMS, no e-mail and no internet connection is needed after the app holds the key; the code is calculated from the key and the device clock.
+
+**First sign-in (enrollment).**
+
+1. Type the username and password and select **Sign in**.
+2. A **Set up two-step verification** screen appears instead of the shell and shows a setup key.
+3. In the authenticator app choose **Add account → Enter a setup key** and type the key. The screen shows the account name and the settings it uses: issuer Herbanova, SHA1, six digits, 30 seconds.
+4. Type the six-digit code the app shows and select **Confirm and continue**.
+5. The screen lists **ten recovery codes**. Save them somewhere safe now — they are shown once. Select **I have saved them — continue** to open the shell.
+
+Until a code is confirmed, the password step opens no session, so no data can be read. Finishing enrollment ends any earlier session for the account.
+
+**Every later sign-in.**
+
+1. Username and password, then **Sign in**.
+2. The **Two-step verification** screen asks for the current six-digit code. Type it and select **Verify and continue**.
+3. If the phone is unavailable, select **Use a recovery code instead** and type one of the saved codes. Each recovery code works once.
+
+**Rules and messages.**
+
+| Situation | What happens |
+|---|---|
+| Wrong code | **That code was not accepted.** Type the code on screen now; if it is about to change, wait for the next 30-second step. |
+| The same code twice | The server remembers the last accepted step, so a used code is refused; wait for the next one. |
+| Five wrong codes in a row | Code entry pauses for **15 minutes**; the message says how many minutes remain. The password step itself is not locked. |
+| Recovery code | Single use; a code already used is refused. No screen shows how many are left, so keep the list you saved at enrollment. |
+| Password step older than 10 minutes | **Start signing in again.** Begin at the username and password. |
+| A session that skipped the code step | The server answers **401 Two-factor verification required**; sign in again. |
+| Password reset by an administrator | Does **not** remove the second factor. The account still needs its code. |
+
+**Lost phone and no recovery codes.** An administrator cannot recover the codes from the screen, and a password reset does not clear the second factor. An operator clears the account's two-step columns as described in [`../ADMIN_2FA.md`](../ADMIN_2FA.md); the next sign-in then starts enrollment again.
+
+**Deployment note (3 November 2026).** The second factor is enforced by the server, its tests pass, and enrollment was walked in a browser. The migration that adds its columns (`0029_totp`) is applied to the disposable test database and to the development database (applied 3 November 2026 after a verified backup), so on both an Administrator is sent through enrollment at the next sign-in. It is **not** applied to production. See [`../ADMIN_2FA.md`](../ADMIN_2FA.md).
+
+## 1.11 Starting the application (administrators and operators)
+
+The application can run as **two processes** — an API server and a front-end server — instead of one:
+
+```bash
+python scripts/run_backend.py     # API, default http://127.0.0.1:8000
+python scripts/run_frontend.py    # browser entry, default http://127.0.0.1:3000
+```
+
+- `run_backend.py` serves the API and its documentation.
+- `run_frontend.py` serves the `/ui/` pages and forwards `/api`, `/docs`, `/openapi.json` and `/redoc` to the backend, so the browser still uses one address and the session cookie travels unchanged.
+- Both scripts accept `--port`; the front-end also accepts `--backend http://127.0.0.1:8000` when the API is elsewhere. Run either with `--help` for the full list.
+- If the backend is stopped, the front-end answers **502** and says the API is not reachable instead of showing a broken page.
+
+Commands, options, the proxied paths, cookie and `APP_ENV` behaviour, and the evidence are in [`../RUNNING_SERVERS.md`](../RUNNING_SERVERS.md) (decision D-44).
 
 **Next chapter (planned):** 2. Finding your way — navigation, roles and permissions in detail.

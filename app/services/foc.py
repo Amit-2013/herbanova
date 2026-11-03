@@ -32,6 +32,7 @@ from .costing import FOC, money, replay
 from .hr import active_period_lock, business_today
 from .inventory import post_movement
 from .numbering import financial_year, next_document_number
+from .periods import active_close
 
 IST = ZoneInfo("Asia/Calcutta")
 ZERO = Decimal("0")
@@ -78,6 +79,12 @@ def _lock_check(db: Session, day: date) -> None:
         raise FocLockedPeriod(
             f"The accounting period {lock.year}-{lock.month:02d} is locked, so a "
             "free-sample note cannot be written in it. Unlock the month first.")
+    close = active_close(db, day)
+    if close is not None:
+        raise FocLockedPeriod(
+            f"Financial year {close.financial_year} is closed, so a free-sample "
+            "note cannot be written in it. The Administrator can reopen the "
+            "year with a reason.")
 
 
 def _clean(value: str | None, limit: int) -> str | None:

@@ -65,7 +65,9 @@ def test_sections_are_null_when_the_role_may_not_read_them(client, world):
     assert viewer["approvals"] is None                   # no approval:read
     assert viewer["recent_activity"] is None             # no audit:read
     assert viewer["leads"] is None                       # no lead:read
-    assert viewer["category_sales"]["available"] is False
+    # Category revenue is grouped from issued invoices, so a viewer with
+    # sales:read may see it; products without a category are named as such.
+    assert viewer["category_sales"]["available"] is True
 
     sales = _dash(client, "sales")
     assert sales["receivables_ageing"] is not None       # accounts:read

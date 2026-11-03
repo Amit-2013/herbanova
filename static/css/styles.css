@@ -107,6 +107,8 @@ a.nav:hover{background:rgba(255,255,255,.07);color:#fff}
 .page-head p{color:var(--mute);margin-top:5px;max-width:46em;font-size:13.5px}
 .head-actions{display:flex;gap:10px}
 .view{display:grid;gap:18px}
+/* A wide table scrolls inside .tw; it must not stretch the view's grid column. */
+.view>*{min-width:0}
 
 /* ---------- panels, tables, lists ---------- */
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;box-shadow:var(--shadow)}
@@ -115,10 +117,20 @@ a.nav:hover{background:rgba(255,255,255,.07);color:#fff}
 .panel-h h2{font-size:16px;font-weight:700;letter-spacing:-.01em}
 .cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
 
-.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--wash)}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--wash)}
 .toolbar input[type=search]{max-width:300px;flex:1 1 200px}
 .toolbar select{width:auto;min-width:190px}
-.toolbar .muted{margin-left:auto}
+.toolbar label{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:12.5px;color:var(--mute);font-weight:600;white-space:nowrap}
+.toolbar input[type=date],.toolbar input[type=month],.toolbar input[type=number],.toolbar input[type=text]{width:auto;min-width:0}
+.toolbar input[type=date],.toolbar input[type=month]{flex:0 0 160px}
+.toolbar input[type=number]{flex:0 0 110px}
+.toolbar input[type=text]{flex:0 1 190px}
+.toolbar .btn{flex:0 0 auto}
+.toolbar input:not([type=checkbox]),.toolbar select{min-height:40px}
+.toolbar>.muted:last-child{margin-left:auto}
+.toolbar>.seg:first-child{margin-left:0}
+/* Inside a padded card the toolbar is a plain row, aligned with the heading. */
+.panel:not(.flush)>.toolbar{padding:0;border:0;background:none}
 .tw{overflow-x:auto}
 table{width:100%;border-collapse:collapse;min-width:640px}
 th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--line-2);vertical-align:middle}
@@ -194,15 +206,15 @@ td small,.rows small{display:block;color:var(--mute);font-size:12.5px;line-heigh
 
 /* ---------- drawer and toast ---------- */
 #scrim{position:fixed;inset:0;background:rgba(9,24,17,.5);z-index:20}
-#drawer{position:fixed;top:0;right:0;height:100%;width:min(520px,100%);background:#fff;z-index:21;display:flex;flex-direction:column;box-shadow:-12px 0 36px rgba(9,24,17,.18);animation:in .2s ease-out}
+#drawer{position:fixed;top:0;right:0;height:100%;width:min(520px,100%);background:#fff;z-index:21;display:flex;flex-direction:column;box-shadow:-12px 0 36px rgba(9,24,17,.18);animation:in .24s cubic-bezier(.2,.7,.3,1)}
 #drawer.wide{width:min(680px,100%)}
-@keyframes in{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
-.drawer-h{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:22px 24px 14px;border-bottom:1px solid var(--line)}
+@keyframes in{from{transform:translateX(100%);opacity:.5}to{transform:none;opacity:1}}
+.drawer-h{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:22px 24px 14px;border-bottom:1px solid var(--line);flex:0 0 auto;position:relative;z-index:3;background:#fff}
 .drawer-h h2{font:600 23px/1.2 var(--serif);letter-spacing:-.01em}
 .drawer-h p{color:var(--mute);margin-top:3px;font-size:13.5px}
 .x{border:0;background:none;font-size:28px;line-height:1;color:var(--mute);cursor:pointer;padding:0 4px;border-radius:6px}
 .x:hover{color:var(--ink);background:var(--line-2)}
-.drawer-b{padding:4px 24px 28px;overflow-y:auto;flex:1}
+.drawer-b{padding:4px 24px 28px;overflow-y:auto;flex:1;min-height:0;overscroll-behavior:contain}
 .drawer-b h3{font-size:14.5px;margin:22px 0 6px}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .row3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
@@ -267,6 +279,16 @@ td small,.rows small{display:block;color:var(--mute);font-size:12.5px;line-heigh
   .lrow{grid-template-columns:1fr 1fr}
   .lrow .rm{width:100%}
   .rcv-line .row3{grid-template-columns:1fr 1fr}
+}
+@media (max-width:600px){
+  .toolbar{gap:8px}
+  .toolbar>input,.toolbar>select,.toolbar>label{flex:1 1 100%;min-width:0}
+  .toolbar>label{display:flex}
+  .toolbar>label>input:not([type=checkbox]),.toolbar>label>select{flex:1 1 auto;width:100%;min-width:0}
+  .toolbar>.muted:last-child{margin-left:0}
+  .toolbar>.sep{display:none}
+  .toolbar>.btn{flex:1 1 auto;justify-content:center}
+  th,td{padding:10px 12px}
 }
 @media (max-height:940px) and (min-width:821px){
   .side{padding-top:14px}
@@ -717,6 +739,18 @@ html[data-theme="dark"] .dash-error{color:#ffd5d0;border-color:#6e302a}
 .hr-split li{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line-2);padding-bottom:6px}
 .hr-tabs{margin:0 0 14px;flex-wrap:wrap}
 .hr-tabs button{min-height:38px}
+.acc-nav{display:flex;flex-wrap:wrap;gap:3px;padding:4px;margin:0 0 14px;background:#e7ece8;border-radius:11px}
+.acc-nav a{display:inline-flex;align-items:center;min-height:34px;padding:6px 11px;border-radius:8px;color:var(--mute);font-weight:600;font-size:13px;text-decoration:none;white-space:nowrap}
+.acc-nav a:hover{color:var(--ink);background:rgba(255,255,255,.55)}
+.acc-nav a[aria-current=page]{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(14,42,32,.14)}
+html[data-theme="dark"] .acc-nav{background:#22352c}
+html[data-theme="dark"] .acc-nav a:hover{background:rgba(255,255,255,.06)}
+html[data-theme="dark"] .acc-nav a[aria-current=page]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.4)}
+/* An amount is one token: it must not split the rupee sign from its digits. */
+[data-acc-sec="receivables-by-distributor"] td.n,
+[data-acc-sec="receivables-by-distributor"] th.n,
+[data-acc-sec="receivables-by-distributor"] td:last-child,
+[data-acc-sec="receivables-by-distributor"] th:last-child{white-space:nowrap}
 .attention button.att-item{width:100%;text-align:left;font:inherit;cursor:pointer}
 @media (max-width:600px){
   .hr-list li{grid-template-columns:88px minmax(0,1fr)}
@@ -793,4 +827,37 @@ html[data-theme="dark"] .hr-mx-c.od{background:#1c2f45;color:#9dc3ea}
   .hr-sums{gap:6px}
 }
 #drawer.hr-wide{width:min(1180px,100%)}
+/* One drawer, responsive everywhere: a record can be read without leaving the
+   list on a desktop, and takes the whole screen on a phone. The width lives in
+   --drawer-w so the wide and hr-wide drawers follow the same breakpoints. */
+#drawer,#drawer.wide,#drawer.hr-wide{width:var(--drawer-w,62%)}
+@media (min-width:1024px) and (max-width:1439.98px){#drawer{--drawer-w:68%}}
+@media (min-width:768px) and (max-width:1023.98px){#drawer{--drawer-w:82%}}
+@media (max-width:767.98px){
+  #drawer{--drawer-w:100%;width:100%;height:100dvh;max-width:100vw}
+  .drawer-h{padding:16px 16px 12px}
+  .drawer-h h2{font-size:20px}
+  .drawer-b{padding:4px 16px 22px}
+  .drawer-b th,.drawer-b td{padding:8px 8px}
+  .drawer-b .row2,.drawer-b .row3{grid-template-columns:minmax(0,1fr)}
+}
+body.drawer-open{overflow:hidden}
+.drawer-b .tw{overflow:visible}
+.drawer-b .tw.tscroll{overflow-x:auto;overflow-y:hidden}
+.drawer-b table{min-width:0}
+.drawer-b th{white-space:normal}
+.drawer-b td.n,.drawer-b th.n{white-space:nowrap}
+.drawer-b thead th{position:sticky;top:0;z-index:2;background:var(--wash);box-shadow:inset 0 -1px 0 var(--line)}
+html[data-theme="dark"] .drawer-h{background:var(--surface)}
+html[data-theme="dark"] .drawer-b thead th{background:var(--surface)}
 .hr-wrap{flex-wrap:wrap}
+/* Two-step verification screen */
+#totp .setup-key{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:15px;letter-spacing:.12em;word-break:break-all;background:var(--wash);
+  border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:6px 0 10px}
+#totp .codes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
+  margin:10px 0 16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:14px;letter-spacing:.04em}
+#totp .codes span{background:var(--wash);border:1px solid var(--line);border-radius:8px;
+  padding:8px 10px;text-align:center}
+@media (max-width:600px){#totp .codes{grid-template-columns:minmax(0,1fr)}}

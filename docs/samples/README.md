@@ -24,3 +24,10 @@ the `.txt` file to see the plain-text alternative.
 Regenerate after a template change with the same synthetic seed; do not point the
 generator at the application database. The email layout, figure sources and
 go-live checklist are documented in [docs/EMAIL_REPORTS.md](../EMAIL_REPORTS.md).
+
+**These renders predate Batch 5 (3 November 2026).** The current template adds a
+balance-sheet block (total assets, liabilities/equity/earnings and difference)
+read from `balance_sheet.balance_sheet()`, and the cash note now points to the
+balance sheet instead of saying an opening balance is not captured. The files
+here were kept as the historical renders they are; they were not edited by hand
+because that would misrepresent a generated artefact.

@@ -54,7 +54,9 @@ def test_pack_figures_match_the_dashboard_for_the_same_dates(client, world):
 
 
 def test_missing_inputs_are_marked_and_never_invented(client, world):
-    day = TODAY - timedelta(days=1)
+    # A month with no payroll period at all, so the gaps are the subject of the
+    # test rather than whatever the current month happens to hold.
+    day = date(2001, 2, 15)
     with SessionLocal() as db:
         data = report_packs.build(db, "daily", day, day)
     # Cost is captured, so gross profit is printed (partial or complete);
@@ -127,7 +129,7 @@ def test_accounts_block_and_gaps_appear_in_the_email(client, world):
         rendered = email_render.render(data, attachments, mode="live")
     assert "Accounts" in rendered["html"]
     assert "Trial balance" in rendered["html"]
-    assert "GAP-A03" in rendered["html"]
+    assert "closing balance is on the balance sheet" in rendered["html"]
     assert "No data yet" in rendered["html"]
 
 
@@ -272,6 +274,21 @@ def test_a_slot_is_enqueued_once_and_the_next_run_moves_past_it(world, monkeypat
         db.refresh(schedule_obj)
         assert schedule_obj.next_run_at == slot + timedelta(days=1)
         db.delete(schedule_obj)
+        db.commit()
+
+
+def test_a_schedule_with_no_next_run_is_committed_even_when_nothing_is_due(world):
+    """The backfill itself must be committed, not only a slot that fired."""
+    slot = datetime(2026, 11, 2, 3, 30, tzinfo=UTC)         # Monday 09:00 IST
+    with SessionLocal() as db:
+        schedule_obj = _add(db, _schedule(next_run_at=None))
+        db.commit()
+        schedule_id = schedule_obj.id
+        assert email_worker.enqueue_due(db, slot) == 0
+        db.expire_all()
+        stored = db.get(EmailSchedule, schedule_id)
+        assert stored.next_run_at == slot + timedelta(days=1)
+        db.delete(stored)
         db.commit()
 
 

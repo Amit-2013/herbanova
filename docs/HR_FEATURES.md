@@ -20,10 +20,11 @@ is not listed as a feature; the server is the control.
 | Employee profile | directory → **Open** | overview, documents, assets, history tabs, photo, letters and PDFs |
 | Attendance | HR dashboard section | today's list, monthly calendar, check-in/out, manual and bulk marking, corrections |
 | Leave and OD | HR dashboard section | leave types, balances, applications, team calendar, carry-forward, OD |
-| Payroll | HR dashboard → **Payroll** | periods, register, payslips, statutory summary, bank file, reconciliation |
+| Payroll | HR dashboard → **Payroll** | periods, register, skipped-employee list, payslips, statutory summary, bank file, reconciliation |
 | HR reports | HR dashboard → **Reports** | seven HR reports, each as JSON, CSV or PDF |
 | Locks | HR dashboard → **Period locks** | attendance and payroll month locks |
-| Branches, offices and attendance policy | HR dashboard → **Branches, offices & attendance policy** (`hr:write`) | branch and office masters with geofence, the HR responsible person, and the attendance-rule table with New/Edit/Delete |
+| Branches & locations | HR dashboard → **Branches & locations** (`hr:write`) | the branch and office masters with geofence and the HR responsible person, and the attendance-rule table with New/Edit/Delete (the drawer is titled "Branches, offices & attendance policy") |
+| HR masters | HR dashboard → **HR masters** (`hr:write`; the two salary tabs need `hr:payroll_prepare`) | departments, holidays with branch/office scope, leave types, salary components and salary structures |
 
 The HR menu is shown to anyone holding `hr:read` or `hr:attendance_self`
 (`static/js/app.js:172`). A staff member without `hr:read` sees the self-service
@@ -206,8 +207,11 @@ rate or amount is written in the code.
 - Payable days = `min(working days, present + paid leave)`; loss of pay is the
   remainder; earnings are prorated by payable/working days.
 - `INCENTIVE`, `OVERTIME`, `BONUS` and `REIMBURSEMENT` are not prorated.
-- An employee with no active salary structure is skipped silently. This is the
-  known **M-06** gap: the payroll screen does not list who was skipped.
+- An employee with no active salary structure is still skipped, but never
+  silently: the prepare result and the period screen list every active employee
+  left out with the reason ("No active salary structure covers this month" or
+  "Not in the prepared entries"), and the audit entry records their codes
+  (F-80, closes M-06). The screen offers **Assign salary structures**.
 - Preparing a period deletes and recalculates its draft entries while the period
   is `draft` or `under_review`; it cannot recalculate an approved period.
 
@@ -228,6 +232,7 @@ approval) → **approve** → `approved` → **process** → `processed` → **p
 | Output | Rule |
 |---|---|
 | Register | Every earning and deduction stored as a line with its basis |
+| Skipped employees | Every active employee the run did not pay, with the reason; returned by prepare and by the period screen, and their codes stored on the audit entry (F-80) |
 | Payslip | Own payslip after release (`processed`/`paid`); any payslip with `hr:confidential` |
 | Statutory summary | PF, ESI, PT and TDS from active components marked `statutory`; an unconfigured head is a gap, never zero |
 | Bank file | CSV or JSON; needs payroll **and** confidential rights; released periods only; JSON preview masks account numbers; skipped rows name the missing field, not its value |
@@ -305,20 +310,59 @@ test-mode mailer until SMTP and recipients are approved.
 
 **Tests.** `tests/test_hr_pack.py` (6).
 
-## 12. Known gaps and limitations
+## 12. HR masters
+
+**What it does.** A single wide drawer, `HR → HR masters`, holds the lists that
+payroll, leave and attendance read from, with a Create/Edit form per list. The
+button **Branches & locations** inside the drawer opens the branch/office
+screen; the same screen is reachable directly from HR tasks.
+
+| Tab | Route | Rules |
+|---|---|---|
+| Departments | `GET/POST /api/hr/departments`, `PATCH /api/hr/departments/{id}` | code is created once and cannot be changed; a rename is unique and updates every employee linked by `department_id`, while free-text department names are untouched; status is retired rather than deleted |
+| Holidays | `GET/POST /api/hr/holidays`, `PATCH /api/hr/holidays/{id}` | no branch and no office means company-wide; an office must belong to the chosen branch (422 otherwise); date and name cannot be cleared; attendance already marked keeps its recorded status |
+| Leave types | `GET/POST /api/hr/leave/types`, `PATCH /api/hr/leave/types/{id}` | carry-forward, encashment, half-day and document flags; no rate prefilled |
+| Salary components | `GET/POST/PATCH /api/hr/salary/components` | read and write need `hr:payroll_prepare`; a statutory head is allowed only on a deduction; every rate starts at 0 and is entered by the user, never inferred |
+| Salary structures | `GET/POST /api/hr/salary/structures` | one line per component (duplicate is 422); a new start date on or before the active structure's start is 409; a later date closes the previous structure the day before; write needs `hr:write` **and** `hr:confidential` or `hr:payroll_prepare` |
+
+**Employee salary tab.** The profile drawer adds a **Salary** tab for roles with
+`hr:payroll_prepare`; it lists the employee's structures with their effective
+window and opens the same structure form with the employee fixed. A structure
+saved from the profile returns to the profile's Salary tab.
+
+**Department assignment.** The one-page employee form suggests department names
+from this master through a datalist. A name typed exactly as a department is
+sent as `department_id`, so a later rename follows through; a name that matches
+nothing is stored as free text and is not affected by a rename.
+
+**Permissions.** Reads of departments, holidays and leave types follow
+`hr:read`; every create and edit requires `hr:write`. The server enforces each
+rule even if the button is hidden, and the role-boundary assertions live in
+`tests/test_hr_masters.py`.
+
+**Browser check (2 Nov 2026).** Department created and renamed with the change
+propagating to the linked employee after a directory refresh; a holiday created
+company-wide and then scoped to a branch and office; the office list narrowed
+to the chosen branch; an employee assigned to an active branch and office; a
+structure created from the masters and from the profile, the overlap guard
+shown in the form, and a later structure closing the previous one. The only
+error responses were the three deliberate ones (401 before login, 409 overlap,
+422 inactive branch).
+
+## 13. Known gaps and limitations
 
 | ID | Gap | Effect |
 |---|---|---|
-| M-06 | Payroll skips employees without a salary structure, silently; departments, holidays, leave types and the salary masters still have no screen | Payroll can understate the run; those masters can only be loaded through the API. Branches, offices and attendance rules do have a screen |
+| M-06 | **Closed 3 Nov 2026.** Payroll still does not pay an employee with no active salary structure, but the prepare result, the period screen and the audit entry now name every skipped employee with the reason, and the screen links to the salary-structure masters | The gap that remains is only the missing structure itself, which the screen now points at |
 | M-09 | Manual attendance from the screen is status-only; punch times and office are API fields | A correction cannot set a punch time from the browser |
-| — | No screen for attendance corrections, bulk attendance, leave-balance adjustment/carry-forward, the employee photo, or the department, holiday, leave-type and salary masters | API-only paths; see `FRONTEND_BACKEND_FIELD_MAPPING.md` and chapters 19–20 of the user manual |
+| — | No screen for attendance corrections, bulk attendance, leave-balance adjustment/carry-forward or the employee photo | API-only paths; see `FRONTEND_BACKEND_FIELD_MAPPING.md` and chapters 19–20 of the user manual |
 | — | `hr:attendance_self` users can read leave types, own balances, applications and OD | Deliberate (D-23); every read is scoped |
 | — | Bank file download event is audited, not the file contents | The preview masks account numbers; full numbers leave only in the downloaded file |
 | — | HR manager sees bank/ID but not salary structures | Deliberate (D-15); grant `hr:payroll_prepare` if the answer changes |
 | — | Payroll not posted to the ledger; overtime/salary-revision/reimbursement approvals absent | Not built (D-17, G-03) |
 | — | No physical-device or screen-reader test of the HR screens | Only headless Chrome at 1400×1000 and 390×844 |
 
-## 13. Test map
+## 14. Test map
 
 | Area | File | Tests |
 |---|---|---:|
@@ -335,7 +379,8 @@ test-mode mailer until SMTP and recipients are approved.
 | HR reports | `tests/test_hr_reports.py` | 5 |
 | Confidentiality and scope | `tests/test_hr_security.py` | 7 |
 | Branches, offices and attendance rules | `tests/test_hr_sites.py` | 7 |
-| **HR total** | | **76** |
+| Departments, holidays, salary components and structures | `tests/test_hr_masters.py` | 5 |
+| **HR total** | | **81** |
 
 The whole-project suite is 268 tests; the HR files are the 76 above. Central
 report tests (`test_reports.py`), role parity (`test_roles_parity.py`) and the

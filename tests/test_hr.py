@@ -17,7 +17,11 @@ def test_leave_approval_updates_attendance_and_blocks_self_approval(client, worl
     leave_type_id = created.json()["id"]
 
     hr = client.as_user("hr_manager")
+    # Leave is only marked on working days (the default weekly offs are Sat/Sun),
+    # so choose a Monday-to-Thursday start rather than a fixed calendar offset.
     start = date.today() + timedelta(days=10)
+    while start.weekday() >= 4:
+        start += timedelta(days=1)
     end = start + timedelta(days=1)
     applied = hr.post("/api/hr/leave/applications", json={
         "leave_type_id": leave_type_id, "date_from": start.isoformat(),
@@ -76,6 +80,14 @@ def test_payroll_prepare_submit_approve_process(client, world):
     prepared = admin.post(f"/api/hr/payroll/periods/{period_id}/prepare")
     assert prepared.status_code == 200, prepared.text
     assert prepared.json()["status"] == "under_review"
+    # M-06: an employee with no active structure is named, not silently dropped.
+    skipped = prepared.json()["skipped"]
+    skipped_ids = {s["employee_id"] for s in skipped}
+    assert client.employee_ids["payroll"] not in skipped_ids
+    assert all(s["reason"] == "No active salary structure covers this month"
+               for s in skipped)
+    register_skipped = admin.get(f"/api/hr/payroll/periods/{period_id}").json()["skipped"]
+    assert {s["employee_id"] for s in register_skipped} == skipped_ids
 
     submitted = admin.post(f"/api/hr/payroll/periods/{period_id}/submit")
     assert submitted.status_code == 200, submitted.text

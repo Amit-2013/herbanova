@@ -80,8 +80,8 @@ Severity: **H** = blocks the brief or leaks data, **M** = named requirement miss
 | H-25 | Managers are not scoped to their team: `reporting_manager` with `hr:read`/`hr:attendance_manage` sees every employee, attendance row and request. | H | `app/api/hr.py:575-592, 812-822, 924-934` |
 | H-26 | No in-app notifications or e-mail notifications (requests, decisions, birthdays, expiries). | H | no table/route |
 | H-27 | No HR report pack for the MD/Administrator and no scheduled HR e-mail. | H | `app/services/report_packs.py` has no HR pack |
-| H-28 | Branches, offices, departments, holidays and leave types have API but no screen. | M | SPA scan |
-| H-29 | Salary components/structures have API but no screen; salary setup is impossible from the UI. | H | SPA scan |
+| H-28 | Branches, offices, departments, holidays and leave types have API but no screen. **Fixed** for branches/offices (F-99) and departments/holidays/leave types (F-106–F-108). | M | SPA scan; see `FEATURE_INVENTORY.md` |
+| H-29 | Salary components/structures have API but no screen; salary setup is impossible from the UI. **Fixed** (F-109, F-110): HR masters and the profile Salary tab. | H | SPA scan; see `FEATURE_INVENTORY.md` |
 | H-30 | Attendance corrections have API but no screen; a staff member cannot raise one in the UI. | M | SPA scan |
 | H-31 | Leave cancellation has API but no UI action. | M | SPA scan |
 | H-32 | Payroll register route is not used by the UI; the period drawer is the only view. | L | SPA scan |

@@ -2,7 +2,9 @@
 
 **Date:** 1 November 2026
 **Scope:** read-only audit of what the system does today, what the Overview can honestly show, and what must be captured before a card can show a number.
-**Status:** audit complete; no code, schema or data was changed. Phase 2 starts only after owner approval.
+**Status:** audit complete; no code, schema or data was changed by the audit itself. Phase 2 starts only after owner approval.
+
+**Gap-closure update (3 November 2026):** migration `0024_catalog_order_dates` closes GAP-D01 and GAP-D02 and the sales-order part of GAP-D05 (see the status column in §5). Rows below keep their original finding and are marked with the revision that resolved them; the purchase-order expected date remains open.
 
 Evidence markers: **VERIFIED** (read in code), **MEASURED** (run and timed), **PARTIAL** (some data exists, some does not), **MISSING** (no data or no code), **PLANNED** (Phase 2/3 work).
 
@@ -31,13 +33,13 @@ Evidence markers: **VERIFIED** (read in code), **MEASURED** (run and timed), **P
 
 | Module | What exists today | Endpoints | Tables | Missing or half-built |
 |---|---|---|---|---|
-| **Products** | Create, list/search, edit; SKU unique; HSN/UQC; MRP; status active/inactive | `GET/POST /api/products`, `PATCH /api/products/{id}`, `GET /api/products/options` | `products` | No category, brand or reorder level; no created/updated timestamp; no batch-level cost |
-| **Stock and batches** | Warehouses, batches with expiry/owner, append-only movement ledger, exact on-hand, FEFO allocation at dispatch, receipt via GRN | `GET/POST /api/warehouses`, `GET /api/inventory/batches`, `GET /api/inventory/movements` | `warehouses`, `batches`, `stock_movements` | No warehouse capacity; no batch cost or valuation; no batch `created_at`; no write-off/shrinkage reason; no QC status; no recall view |
+| **Products** | Create, list/search, edit; SKU unique; HSN/UQC; MRP; category, brand and reorder level (`0024`); status active/inactive | `GET/POST /api/products`, `PATCH /api/products/{id}`, `GET /api/products/options`, `GET /api/products/catalog` | `products` | No created/updated timestamp; no batch-level cost |
+| **Stock and batches** | Warehouses, batches with expiry/owner, append-only movement ledger, exact on-hand, FEFO allocation at dispatch, receipt via GRN; each stock row carries the product's reorder level | `GET/POST /api/warehouses`, `GET /api/inventory/batches`, `GET /api/inventory/movements` | `warehouses`, `batches`, `stock_movements` | No warehouse capacity; no batch cost or valuation; no batch `created_at`; no write-off/shrinkage reason; no QC status; no recall view |
 | **Purchase orders** | Create, list, receive in parts (GRN), cancel; duplicate-delivery guard; receipt posts stock once | `GET/POST /api/purchase-orders`, `GET /{id}`, `POST /{id}/receive`, `POST /{id}/cancel` | `purchase_orders`, `purchase_order_lines`, `goods_receipts`, `goods_receipt_lines` | No expected delivery date; no purchase invoice or input tax; no supplier price history view |
-| **Sales orders** | Draft → pending approval → approved → dispatched / rejected / cancelled; credit and stock checked at submit and dispatch; warehouse chosen at dispatch | `GET/POST /api/sales-orders`, `GET /{id}`, `GET /{id}/tax-preview`, `POST /{id}/submit`, `/cancel`, `/dispatch` | `sales_orders`, `sales_order_lines`, `batches`, `stock_movements`, `approval_requests`, `invoices` | No requested delivery date; no approval timestamp on the order itself; no pipeline view |
+| **Sales orders** | Draft → pending approval → approved → dispatched / rejected / cancelled; credit and stock checked at submit and dispatch; warehouse chosen at dispatch; promised delivery date and approval timestamp (`0024`) | `GET/POST /api/sales-orders`, `GET /{id}`, `GET /{id}/tax-preview`, `PATCH /{id}/delivery-date`, `POST /{id}/submit`, `/cancel`, `/dispatch` | `sales_orders`, `sales_order_lines`, `batches`, `stock_movements`, `approval_requests`, `invoices` | No pipeline view inside the order screen (the Overview shows it); promises recorded before `0024` are null and excluded from lateness |
 | **Approvals** | Central queue; sales-order, post-billing and HR categories; segregation of duties; reason required on decision; audit-logged | `GET /api/approvals`, `POST /api/approvals/{id}/decide`, `POST /api/approvals/post-billing/{invoice_id}`, supplier bank changes | `approval_requests` | No SLA/ageing policy; no notification to approvers (Telegram only mirrors audit events) |
-| **Billing** | Tax invoices at dispatch, immutable; credit/debit notes; cancellation with reason; post-billing amendment via approval; secure PDF, print log, verification | `GET/POST` under `/api/invoices`, `/api/credit-notes`, `/api/debit-notes`, `/api/printing` | `invoices`, `invoice_lines`, `credit_notes`, `debit_notes`, `document_sequences`, `print_logs` | Invoice has no due date (ageing is by invoice date); no input tax; no e-invoice/e-way integration (MOD-15 conditional) |
-| **Accounts** | Receipts and payments, outstanding, party ledgers, ageing, outward GST register, trial balance; all derived from documents | `GET/POST /api/payments`, `/outstanding`, `/ledger/...`, `/ageing`, `/gst-register`, `/trial-balance` | `payments`, plus documents above | No purchase-side GST; no opening cash/bank balance or bank reconciliation, so "cash position" is not reliable |
+| **Billing** | Tax invoices at dispatch, immutable; credit/debit notes; cancellation with reason; post-billing amendment via approval; secure PDF, print log, verification | `GET/POST` under `/api/invoices`, `/api/credit-notes`, `/api/debit-notes`, `/api/printing` | `invoices`, `invoice_lines`, `credit_notes`, `debit_notes`, `document_sequences`, `print_logs` | Invoice freezes its payment terms and due date at issue (`0025`); ageing shows the due-date split. No input tax; no e-invoice/e-way integration (MOD-15 conditional) |
+| **Accounts** | Receipts and payments, outstanding, party ledgers, ageing, outward GST register, input GST, trial balance, chart of accounts, opening balances, vouchers, day book, balance sheet and bank reconciliation | `GET/POST /api/payments`, `/outstanding`, `/ledger/...`, `/ageing`, `/gst-register`, `/trial-balance`, `/ledger-accounts`, `/opening-balances`, `/vouchers`, `/day-book`, `/balance-sheet`, `/bank-statements` | `payments`, `ledger_accounts`, `opening_balances`, `vouchers`, `voucher_lines`, `bank_statements`, `bank_statement_lines`, plus documents above | Documents are not posted as vouchers automatically; the balance sheet merges both layers and names what the document layer does not cover (expenses, payroll, stock cost) |
 | **Leads and follow-ups** | Create, owner, status, next follow-up, append-only activity history, overdue flags | `GET/POST /api/leads`, `/{id}`, `/activities`, `/status`, `/follow-up`, `/owner`, `GET /api/leads/owners` | `leads`, `lead_activities` | No configurable SLA; status history is prose in `lead_activities.summary`, not structured; **0 lead rows in the live database** |
 | **HR** | Employee master, offices/geofence attendance, manual attendance, leave, OD, approvals, salary structures, payroll, HR reports and dashboard | `/api/hr/*` (≈45 routes), `/api/employees` | `employees`, `hr_*` (18 tables) | No licence/certificate expiry; HR figures are intentionally permission-scoped |
 | **Reports** | 27 catalog reports including stock, sales, invoices, leads, purchases, receivables, ageing, GST, trial balance and 12 HR reports; CSV/XLSX/PDF export; reconciliation checks | `GET /api/reports`, `GET /api/reports/{key}`, `GET /api/reports/{key}/export` | read-only across all | No scheduled delivery; no dashboard-card export |
@@ -151,7 +153,7 @@ Measured on the development machine with a warm local PostgreSQL, one session pe
 | Warehouse over capacity | **No** | — | No capacity field; **needs capture** |
 | Receivables over 60 days | **Yes** | `ledger.ageing_rows()` buckets 61-90 + 90+ | — |
 | Approvals needing the Administrator | **Yes** | `approval_requests.reasons` contains `credit_limit`, or post-billing edits | JSON filtering |
-| Low stock vs reorder level | **No** | — | No reorder level; **needs capture** |
+| Low stock vs reorder level | **Yes** (`0024`) | `products.reorder_level` compared with `SUM(batches.on_hand)`; products with no level are excluded, not treated as zero | — |
 
 ### 4.3 Charts and lists
 
@@ -163,7 +165,7 @@ Measured on the development machine with a warm local PostgreSQL, one session pe
 | Expiry watch with filters and detail | **Yes** (filters/counts new) | `batches` + product + warehouse | Batch value needs cost; suggested action is a rule, not stored |
 | Open POs with % received | **Yes** | ordered vs received per PO line | — |
 | Approvals with approve/reject | **Yes** | `POST /api/approvals/{id}/decide`; permission-checked, reason required, audit-logged (`approvals.py:147`) | — |
-| Sales by category (donut) | **No** | — | No product category; **needs capture** |
+| Sales by category | **Yes** (`0024`) | `invoice_lines` taxable value joined to `products.category`, uncategorised named separately | Margin by category still needs cost per category |
 | Top products with change | **Yes** | `invoice_lines` grouped by product for current and previous period | — |
 | Recent activity | **Yes** | `audit_log` (`audit.py:67`) | Visible only with `audit:read` (Administrator). Others get "Not permitted" |
 | System health | **PARTIAL** | Modules: `module_register`; Alembic: `alembic_version` | Last backup and restore result are **not stored**; alert channel can only show configured/not configured |
@@ -186,17 +188,17 @@ Measured on the development machine with a warm local PostgreSQL, one session pe
 
 | ID | Gap | Blocks | Proposed capture |
 |---|---|---|---|
-| GAP-D01 | No product category or brand | Sales by category, margin by category | Add `products.category` (migration + backfill UI) |
-| GAP-D02 | No reorder level / minimum stock | Low-stock alert, stock cover alert | Add `products.reorder_level` |
+| GAP-D01 | No product category or brand | Sales by category, margin by category | **Resolved in `0024`**: `products.category`, `products.brand`, the product form, search and the catalog facets. Margin by category still needs cost per category |
+| GAP-D02 | No reorder level / minimum stock | Low-stock alert, stock cover alert | **Resolved in `0024`**: nullable `products.reorder_level`, low-stock attention, stock-report flag. Stock cover (days) still needs a consumption rate |
 | GAP-D03 | No warehouse capacity | Warehouse over-capacity alert, capacity share | Add `warehouses.capacity_units` — **resolved in v2** (nullable units + note, migration `0009`) |
 | GAP-D04 | No batch cost or valuation policy | Expiry value, stock value by warehouse, accurate gross margin | Add batch cost at receipt (from GRN) or a documented valuation policy |
-| GAP-D05 | No expected delivery date on POs | Supplier on-time delivery, PO ageing vs promise, "due this week" | Add `purchase_orders.expected_date` |
-| GAP-D06 | No due date on invoices | Ageing by due date (today it is by invoice date) | Add `invoices.due_date`, default from distributor terms |
+| GAP-D05 | No expected delivery date on POs | Supplier on-time delivery, PO ageing vs promise, "due this week" | **Sales-order part resolved in `0024`**: `sales_orders.expected_delivery_date`, approval stamp and promise lateness. Purchase-order part still open: add `purchase_orders.expected_date` |
+| GAP-D06 | No due date on invoices | Ageing by due date (today it is by invoice date) | **Closed 3 Nov 2026:** `invoices.due_date` and `payment_terms_days` frozen at issue (migration `0025`); ageing reports the due-date split |
 | GAP-D07 | No input tax on purchases | GST output vs input summary | Purchase invoice capture with tax |
 | GAP-D08 | No structured lead status history | Lead funnel by status over time, conversion SLA | Write status changes to a structured column/table (activity text is not queryable) |
 | GAP-D09 | No persisted backup/restore result | "Last backup" and "Restore test" health cards | Write a run record (time, revision, outcome) from `backup_restore_test.py` |
 | GAP-D10 | No batch QC status / licence expiry | QC and compliance cards | New fields/tables |
-| GAP-D11 | No cash/bank opening balances | Cash position | Bank reconciliation or opening-balance capture |
+| GAP-D11 | No cash/bank opening balances | Cash position | **Closed 3 Nov 2026:** `opening_balances` and `ledger_accounts` (migration `0027`); the balance sheet shows each cash and bank head's closing balance and a total |
 
 ### Engineering gaps (data exists; work is code)
 
@@ -234,9 +236,9 @@ These are visual changes to the Overview and shared tokens; no route, permission
 Every card below can be correct today; where data is absent the card shows **"No data yet"** and names the gap (GAP-Dxx) instead of inventing a figure.
 
 - 8 KPI tiles with exact server counts, plus trend lines only for units on hand, expiry buckets, approvals and (partially) POs and orders.
-- Needs-attention rules for expired batches, receivables >60 days and Administrator approvals. Capacity and reorder rules are shown as "Not configured" with the gap ID.
+- Needs-attention rules for expired batches, receivables >60 days and Administrator approvals. Capacity and reorder rules are shown as "Not configured" with the gap ID. *(Reorder became live in `0024`; capacity became configurable in v2 migration `0009`.)*
 - Sales vs purchases trend, receivables ageing (reconciled to the report), stock by warehouse (units; capacity share marked unavailable), expiry watch with filters and drill-down, open POs with % received, approvals with decide actions, top products with period comparison, recent activity (permission-gated), module health and Alembic head.
-- "Sales by category" renders as "No data yet — no product category is captured (GAP-D01)".
+- "Sales by category" renders as "No data yet — no product category is captured (GAP-D01)". *(Superseded by `0024`: the panel groups issued invoices by the captured category.)*
 - Global search: a new read-only endpoint that reuses existing indexed columns.
 - Period selector, generated-at timestamp, 30–60 s in-process cache.
 - Theme toggle, skeletons, empty/error states, keyboard navigation, command palette for navigation and "New sales order".
@@ -249,7 +251,7 @@ Every card below can be correct today; where data is absent the card shows **"No
 4. Frontend: extend the existing SPA — inline SVG charts, no new runtime dependency; Overview becomes the landing view it already is (`#/dash`).
 5. Tests: seeded correctness, permission per role, reconciliation, empty and not-configured states.
 
-**No migration is required for Phase 2.** Migrations appear only in Phase 3 for approved capture fields (category, reorder level, capacity, expected date, due date), each with a rollback.
+**No migration is required for Phase 2.** Migrations appear only in Phase 3 for approved capture fields (category, reorder level, capacity, expected date, due date), each with a rollback. *(Delivered: capacity in `0009`; category, brand, reorder level, sales-order expected date and approval stamp in `0024`; invoice due date, payment terms and the financial-year close in `0025`.)*
 
 ---
 
@@ -389,11 +391,11 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 
 | Pack | Sources that exist | What must be shown as a gap |
 |---|---|---|
-| Daily Business Summary | Orders, invoices, receipts, GRNs, leads, approvals, expiry, audit — all dated; gross profit from captured issue cost | Gross profit is labelled partial when invoices are not costed (GAP-P01); expenses before `tracked_from` (GAP-P02); payroll months that are absent or draft (GAP-P03) |
+| Daily Business Summary | Orders, invoices, receipts, GRNs, leads, approvals, expiry, audit — all dated; gross profit from captured issue cost | Gross profit is labelled partial when invoices are not costed (GAP-P01); expenses before `tracked_from` are shown as a partial total marked Partial (GAP-P02); payroll counts approved months, allocating a month the window cuts short by working days, and names a month with no approved payroll (GAP-P03) |
 | Weekly Management Report | The above plus ageing, top products, credit use, PO ageing; expenses and payroll by month | The same three P&L gaps; net profit is withheld until all three are complete |
 | Monthly MD Report | Month windows from `_compare_windows`, 12-month trend, top 5 products/customers/states, Accounts block | The same three P&L gaps, plus new customers (GAP-V16) |
 | Alerts digest | Expiry, capacity, approvals, overdue follow-ups, >60-day receivables | Nothing new |
-| Accounts pack | Revenue, collections, outstanding/ageing, payables outstanding, GST output, trial balance, credit exposure, P&L with reconciliation and notes | Balance sheet, input GST, TDS, due dates, bank reconciliation, vouchers and year-end close (GAP-A03..A10); P&L gaps only when an input is missing |
+| Accounts pack | Revenue, collections, outstanding/ageing with due-date split, payables outstanding, output GST, input GST and net GST payable, filed-return reconciliation, TDS/statutory dues, trial balance, credit exposure, P&L with reconciliation and notes; a balance-sheet block (total assets, liabilities/equity/earnings, difference) added in Batch 5 | The balance sheet is read from `balance_sheet.balance_sheet()` at the pack's end date, so it cannot drift from the screen; the cash note says sitting balances are on the balance sheet. Vouchers and bank reconciliation have screens and APIs but no pack tile. P&L gaps appear only when an input is missing. A closed financial year and invoice due dates are enforced since Batch 3; input GST, reconciliation and statutory dues since Batch 4; vouchers, openings, the balance sheet and bank reconciliation since Batch 5. |
 | Custom pack | Any existing report in the catalog, by key | Whichever report already declares |
 
 `tests/test_email_reports.py` compares the pack's sales, purchases, returns, receipts and outstanding against the same dashboard service and the same ledger function, so a pack cannot drift from the screens.
@@ -404,21 +406,21 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 |---|---|---|
 | Money in and out | **VERIFIED** | `payments` (receipt/payment, cash/bank/upi/cheque/neft/other, date, party, optional invoice/PO). Append-only. |
 | Receivables | **VERIFIED** | Derived from issued invoices minus notes and receipts (`ledger.receivable_rows`). |
-| Ageing | **VERIFIED** | Four buckets as of a selected date (`ledger.ageing_rows`). |
+| Ageing | **VERIFIED** | Four buckets as of a selected date (`ledger.ageing_rows`), plus a due-date split (overdue, due within 7 days, later, no due date) read from the invoice snapshot. |
 | Payables | **PARTIAL** | Derived from received goods at order cost minus payments. **No invoice, no due date, no supplier terms.** |
 | Party ledgers | **VERIFIED** | `distributor_ledger`, `supplier_ledger`. |
 | Credit/debit notes | **VERIFIED** | Issued notes with reason, tax and stock return. |
 | GST outward | **VERIFIED** | Invoice and note tax split; `gst_register`. |
-| GST inward / net payable | **MISSING** | Purchase tax is not captured anywhere. A net payable figure would be invented. |
-| Trial balance | **PARTIAL** | Derived double-entry summary from documents (`ledger.trial_balance`), balanced check included. It is **not** a posted ledger: no opening balances, no expense or TDS accounts. |
-| Chart of accounts / vouchers / journal | **MISSING** | No account, voucher or journal table. |
-| Day book / cash book / bank book | **PARTIAL** | A dated payment book can be produced; opening balances and running closing balances cannot. |
+| GST inward / net payable | **CLOSED 3 Nov 2026** | `purchase_invoices` and `statutory_challans` (migration `0026`) plus `app/services/gst.py`. Input tax is captured head by head on a supplier bill; eligible input is netted, blocked input is shown separately, expense ITC is a memo. With no posted bill the figure reads **No data yet**, not zero. |
+| Trial balance | **PARTIAL** | Derived double-entry summary from documents (`ledger.trial_balance`), balanced check included. It stays document-derived: openings, expense and TDS accounts are not in it. The balance sheet (GAP-A10, closed) is the statement that merges openings and vouchers with it. |
+| Chart of accounts / vouchers / journal | **CLOSED 3 Nov 2026** | `ledger_accounts`, `opening_balances`, `vouchers` and `voucher_lines` (migration `0027`) plus `app/services/journal.py`. Nine heads are seeded; a voucher is drafted, refused while unbalanced, posted, reversed by a mirror dated today and listed in the day book. |
+| Day book / cash book / bank book | **CLOSED 3 Nov 2026 (day book); cash and bank books remain document views** | The day book lists posted and reversed vouchers with debit and credit totals. A cash or bank book is the payments view by mode; its closing balance is the balance sheet's cash and bank total. |
 | Expenses / expense heads | **CLOSED 2 Nov 2026** | `expenses`, `expense_heads` and `expense_settings` (migration `0020`); approval threshold with an on/off switch, non-creditable GST flag, audited reversal and receipts. |
-| P&L / balance sheet | **P&L CLOSED 2 Nov 2026; balance sheet still MISSING** | `profit_loss.statement()` builds revenue, returns, COGS, expenses, payroll, gross profit and net profit, with GAP-P01/P02/P03 when an input is missing. Closing stock valuation and opening balances are still not captured, so a balance sheet is still not produced (GAP-A10). |
-| Financial-year / period locks | **PARTIAL** | Accounting months can be locked through `hr_period_locks` scope `accounting` (migration `0022`). A locked month refuses purchase-cost corrections and expense creation or reversal with HTTP 423. Invoice changes, credit notes, receipts, payments and a year-end close are not covered (GAP-A03). |
-| TDS / statutory dues | **MISSING** | No TDS section, rate, deduction or challan. |
-| Bank reconciliation / unposted vouchers | **MISSING** | No bank statement import, no posting state. |
-| Invoice due dates | **MISSING** | No due date or payment term on an invoice, so "due this week" cannot be computed. |
+| P&L / balance sheet | **CLOSED 3 Nov 2026** | `profit_loss.statement()` builds revenue, returns, COGS, expenses, payroll, gross profit and net profit, with GAP-P01/P02/P03 when an input is missing; partial inputs are marked **Partial** with a fix link, and a month a window cuts short is allocated by working days (D-36). `balance_sheet.balance_sheet()` (migration `0027`) merges the latest captured opening, posted vouchers and the document trial balance by head, with section totals, retained earnings, cash and bank, and a named difference. It warns that its document layer has no expense, payroll or stock-cost postings rather than guessing them; closing stock is still not valued in it. |
+| Financial-year / period locks | **CLOSED 3 Nov 2026** | `financial_year_closes` (migration `0025`) and `app/services/periods.py`. The Administrator closes a completed year with a reason; every dated document (dispatch and invoice, receipts and payments, credit/debit notes, invoice cancellation, expenses, cost corrections, free-sample notes) is refused with HTTP 423 until the year is reopened. Accounting-month locks remain the narrower gate for cost corrections and expenses. |
+| TDS / statutory dues | **CLOSED 3 Nov 2026** | Vendor TDS is captured on the supplier bill (`tds_section`, `tds_rate`, `tds_amount`); payroll statutory heads come only from approved or later periods; challans record deposits. Outstanding is cumulative withheld minus deposited, per head. |
+| Bank reconciliation / unposted vouchers | **CLOSED 3 Nov 2026** | `bank_statements` and `bank_statement_lines` (migration `0027`) plus `app/services/bank_rec.py`. A statement is captured per bank head and period; a line is matched only to a payment or voucher line whose amount and direction agree; the proof shows adjusted book, adjusted statement and the remaining difference. Vouchers carry a draft/posted/reversed state, so "unposted" is the draft list. |
+| Invoice due dates | **CLOSED 3 Nov 2026** | `invoices.payment_terms_days` and `invoices.due_date`, frozen from the distributor's terms at issue (migration `0025`); NULL when no terms were captured. Ageing reports the due-date split. Supplier payables still estimate their due date from current terms. |
 | Discounts | **PARTIAL** | Invoice/discount fields exist on documents and the discount-slab master; a period discount total is computable only from stored fields, not from free text. |
 | Post-billing changes | **VERIFIED** | Audit log records issued-invoice amendments and approval decisions. |
 | Accounts permission | **CLOSED 2 Nov 2026** | The additive `accounts:reports` key gates the dashboard, P&L report and Accounts email block; `accounts:read` is unchanged for the statements and the sales desk. `expense:read`/`expense:write` gate the Expenses screen and API. |
@@ -440,15 +442,15 @@ No figure in v2 will be invented. Missing inputs are returned as `null` with a g
 | GAP-E09 | No email delivery provider/reputation handling | Rate limits | Send in batches of 20 with a pause; provider-specific APIs not integrated |
 | GAP-A01 | No expense table or heads | Expenses, P&L, net profit | **Closed 2 Nov 2026:** migration `0020` adds expenses, heads, settings, approval and reversal; the P&L reads approved entries by head |
 | GAP-A02 | No cost on stock or invoice lines | COGS, gross profit, margin | **Closed 2 Nov 2026:** migration `0021` captures cost on the movement ledger; COGS is proved per invoice, partial/NULL when cost is unknown |
-| GAP-A03 | No closed-period lock | Locked-period enforcement | **Partially closed 2 Nov 2026:** accounting months can be locked; a locked month refuses cost corrections and expense creation/reversal (migration `0022`, HTTP 423). Invoice changes, credit notes, receipts, payments and year-end close are not covered |
-| GAP-A04 | No invoice due date | Payables/receivables due this week | Show outstanding ageing only |
-| GAP-A05 | No purchase-side tax | Input GST, net GST, GSTR-3B | Show output GST only, labelled |
-| GAP-A06 | No GSTR-1/3B filings | Reconciliation | Not shown |
-| GAP-A07 | No TDS records | TDS/statutory dues | "No data yet" |
-| GAP-A08 | No vouchers/journal/day book posting | Day book, unposted vouchers | Payment book only; "unposted vouchers" is not a concept yet |
-| GAP-A09 | No bank statement/reconciliation | Bank reconciliation status | "Not available" |
-| GAP-A10 | No opening balances | Cash/bank balance, balance sheet | Show net movement recorded, labelled |
-| GAP-A11 | No balance-sheet asset/liability capture | Balance sheet | "No data yet"; the trial balance is shown instead |
+| GAP-A03 | No closed-period lock | Locked-period enforcement | **Closed 3 Nov 2026:** a completed financial year can be closed (migration `0025`); dated documents are refused with HTTP 423 until an Administrator reopens the year with a reason. Accounting-month locks (migration `0022`) remain the narrower gate |
+| GAP-A04 | No invoice due date | Payables/receivables due this week | **Closed 3 Nov 2026:** terms and due date are frozen on the invoice at issue; ageing shows overdue, due within 7 days, later and no due date |
+| GAP-A05 | No purchase-side tax | Input GST, net GST, GSTR-3B | **Closed 3 Nov 2026:** a supplier bill records tax head by head (migration `0026`); net payable = output less eligible input, blocked input shown separately |
+| GAP-A06 | No GSTR-1/3B filings | Reconciliation | **Closed 3 Nov 2026:** filed figures are captured per month and form; each line is compared with the register and a difference is shown |
+| GAP-A07 | No TDS records | TDS/statutory dues | **Closed 3 Nov 2026:** vendor TDS on the bill, approved payroll heads, challan deposits and the outstanding remainder per head |
+| GAP-A08 | No vouchers/journal/day book posting | Day book, unposted vouchers | **Closed 3 Nov 2026:** `vouchers`/`voucher_lines` (migration `0027`); draft, posted and reversed state; a day book with a balanced check |
+| GAP-A09 | No bank statement/reconciliation | Bank reconciliation status | **Closed 3 Nov 2026:** a statement per bank head and period, line matching to payments or voucher lines, and a proof that names the difference |
+| GAP-A10 | No opening balances | Cash/bank balance, balance sheet | **Closed 3 Nov 2026:** `ledger_accounts` and `opening_balances` (migration `0027`); the balance sheet merges openings, vouchers and documents and names what the document layer does not cover |
+| GAP-A11 | No balance-sheet asset/liability capture | Balance sheet | **Closed 3 Nov 2026 by GAP-A10:** asset and liability heads can be added and their balances captured as openings or posted as vouchers. There is no depreciation or stock-valuation automation. |
 | GAP-A12 | No MD login role | MD dashboard access | MD receives email; the Administrator can grant `accounts:reports` to a role |
 
 ## B5. Build order for Part B

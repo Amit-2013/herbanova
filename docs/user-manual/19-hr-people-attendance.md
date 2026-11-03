@@ -136,7 +136,8 @@ the rest have no screen in this build.
 
 **Open** in the People table (or **Edit employee** in the profile) shows the
 record in five tabs: **Overview**, **Documents (n)**, **Assets (n)**,
-**Letters & ID** and **History**.
+**Letters & ID** and **History**. A role with `hr:payroll_prepare` also sees a
+**Salary** tab between **Documents** and **Assets**; it is described in §19.6.
 
 **Overview** shows identity and job data, contacts, branch, office, shift and
 **Attendance policy** with its source. **Bank and statutory numbers** appear only
@@ -164,11 +165,13 @@ printing a blank, and every download is audited.
 There is no photo control on the screen; the photo routes exist for the API and
 the ID card.
 
-## 19.5 Branches, offices and attendance policy
+## 19.5 Branches and locations
 
-**Branches, offices & attendance policy** (`hr:write`) opens a wide drawer with
-three tables: **Branches**, **Offices and work locations** and **Attendance
-requirements**. Every change is audited.
+**Branches & locations** (`hr:write`) opens a wide drawer titled *Branches,
+offices & attendance policy* with three tables: **Branches**, **Offices and work
+locations** and **Attendance requirements**. Every change is audited. The same
+drawer opens from the **Branches & locations** button inside **HR masters**
+(§19.6).
 
 ### Branch
 
@@ -245,7 +248,88 @@ named, so the hidden controls are a convenience, not the control. In the monthly
 register an exempt day is **– not required**, never an absence, and payroll does
 not count it as loss of pay.
 
-## 19.6 Shifts
+## 19.6 HR masters
+
+**HR masters** (`hr:write`; salary tabs need `hr:payroll_prepare`) opens a wide
+drawer with five tabs: **Departments**, **Holidays**, **Leave types**, **Salary
+components** and **Salary structures**. Each tab has **New …** and **Edit**
+forms. Codes are permanent; a record is retired by setting it inactive instead
+of deleting it, because payroll, leave and attendance history still point to it.
+Every change writes an audit row.
+
+### Departments
+
+Create with **Department code** and **Department name**. On an existing
+department the code is read-only, the name can change and **Status** is editable.
+
+- A rename is refused if another department already uses that name.
+- Employees linked to the department are updated by the rename. The link is made
+  when the department name on the employee form matches a master name exactly;
+  free-text department names on other employees are left alone.
+- The employee form suggests the master names as you type.
+
+### Holidays
+
+Record **Date**, **Holiday name**, and optionally **Branch** and **Office**.
+
+| Choice | Applies to |
+|---|---|
+| Branch and office empty | The whole company |
+| Branch only | Every office in that branch |
+| Branch and office | That office |
+
+- An office that belongs to a different branch is refused.
+- A holiday date or name cannot be blanked once saved.
+- Marking attendance on a date that later becomes a holiday does not rewrite
+  history: the status already recorded stays.
+
+### Leave types
+
+Create with **Code**, **Name**, **Paid / Unpaid**, **Days per year**,
+**Carry forward**, **Encashable**, **Half day** and **Document required**.
+No number is prefilled as a company entitlement; enter the policy your company
+uses.
+
+### Salary components
+
+An **Earning** or **Deduction** with a **Calculation** of **Fixed amount**,
+**% of basic** or **% of gross**.
+
+- A **statutory head** (provident fund, employee state insurance, professional
+  tax, tax deducted at source) applies only to a deduction; marking an earning
+  statutory is refused before saving. Gratuity and full-and-final settlement
+  are not modelled.
+- **Default rate** starts at zero and is a starting value for new structure
+  lines, never a hidden payroll rule. Nothing is calculated until a structure
+  supplies the amount or percent.
+- Only roles with payroll preparation rights can open this tab; changing a
+  component needs `hr:write` as well.
+
+### Salary structures
+
+A structure is the employee's pay for an effective period. Choose **Employee**,
+**Effective from**, **Payment mode** (bank transfer, cash or cheque), tick each
+component that applies, then enter the **Amount** for a fixed component or the
+**Percent** for a % of basic/gross component.
+
+- Each component appears once; a duplicate is refused.
+- A new structure must start after the current one. If you choose the same date
+  or earlier, the save is refused and the previous structure still applies.
+- A later date closes the previous structure the day before, so payroll always
+  finds exactly one structure for the month.
+- Payroll uses the structure that covers the month; an employee with no active
+  structure is still skipped (see the warning in §20.4).
+
+### Salary tab on the employee profile
+
+A role with `hr:payroll_prepare` sees a **Salary** tab in the employee profile.
+It lists the employee's structures with their effective window and a **New
+salary structure** button. The form opens with the employee fixed, and saving
+returns you to the same tab. Salary is confidential: the tab is shown only to
+payroll-enabled roles, and every change is recorded in the audit trail. The
+server does not write an audit row merely because the tab was opened.
+
+## 19.7 Shifts
 
 **Shift settings** lists **Shift**, **Office hours**, **Grace (min)**,
 **Weekly offs** and **Status**.
@@ -262,7 +346,7 @@ not count it as loss of pay.
 - Changing a timing does not rewrite minutes already recorded. Future check-ins
   use the new timings.
 
-## 19.7 Attendance — today
+## 19.8 Attendance — today
 
 **Attendance** opens today's register.
 
@@ -322,7 +406,7 @@ If the month is locked, the server refuses the write with **423** and names the
 reason. The screen cannot supply an override reason; only the Administrator can
 override a single entry through the API, and that override is audited.
 
-## 19.8 Monthly attendance
+## 19.9 Monthly attendance
 
 **Monthly attendance** (or **My monthly attendance** for staff) shows a month
 grid per employee.
@@ -341,7 +425,7 @@ The distinction that matters: a **blank day** was not recorded and is a gap; a
 day the policy exempts is **not required** and is not a gap. The footer repeats
 both counts. Absence is only what somebody recorded as absent.
 
-## 19.9 Importing employees
+## 19.10 Importing employees
 
 **Import** (`hr:write`) opens a drawer that creates nothing until you confirm.
 
@@ -361,7 +445,7 @@ Bank and ID columns require `hr:confidential` or `hr:payroll_prepare`; without
 that right, leave them out. A duplicate employee code is refused. The whole
 import is recorded in the audit trail.
 
-## 19.10 Letter templates
+## 19.11 Letter templates
 
 **Letter templates** (`hr:write`) lists each template with its code and status.
 **Edit** changes the name, the body and whether it is **Active**. The body may
@@ -370,7 +454,7 @@ the employee record. An unknown placeholder is refused when you save.
 
 A retired template stays in the list but cannot generate a letter.
 
-## 19.11 Messages you may meet
+## 19.12 Messages you may meet
 
 | Message | What it means | What to do |
 |---|---|---|
@@ -385,7 +469,7 @@ A retired template stays in the list but cannot generate a letter.
 | **A branch or office with active staff cannot be switched off or moved…** | People are still assigned | Reassign them first |
 | **No employee must mark attendance. Add an attendance rule before recording it manually.** | Every active employee is exempt | Create or change a rule |
 
-## 19.12 What this chapter does not cover
+## 19.13 What this chapter does not cover
 
 These exist on the server but have no control in this build. They are recorded
 as gaps, not described as screens:
@@ -397,20 +481,30 @@ as gaps, not described as screens:
 | Punch times, office and overtime in manual attendance | API fields (M-09) |
 | Employee photo upload | API only |
 | Manager, address, emergency contact, probation/exit fields on the employee form | API or import (`manager_code`, `date_of_birth`) |
-| Departments, holidays, leave types and salary masters | API only (M-06); the leave calendar's holidays are empty until they are loaded |
 | Leave-balance adjustment and carry-forward | API only |
+| Saving a new leave type or salary component through the browser | The forms exist; the write was not exercised in the 2 Nov 2026 check and has no automated test (F-108, F-109) |
 
-## 19.13 Verification for this chapter
+## 19.14 Verification for this chapter
 
 - The branch, office and rule screens, the cascade, the Location column, the
   **No attendance** chip, the resolved policy text, the monthly legend and the
   site filters were read in a browser on 1 November 2026 (read-only check,
   `docs/VERIFICATION_REPORT.md` §10.2). Screenshots were unavailable in that
   environment.
-- Creating and editing through the browser was **not** exercised by the review:
-  the automated browser refused write actions. Those paths are covered by
-  `tests/test_hr_sites.py`, `test_hr_directory.py`, `test_hr_attendance.py`,
-  `test_hr.py`, `test_hr_profile.py` and `test_hr_documents.py`.
+- Creating and editing through the browser was **not** exercised by the 1 November
+  review: the automated browser refused write actions. The branch, office and
+  rule paths are covered by `tests/test_hr_sites.py`, `test_hr_directory.py`,
+  `test_hr_attendance.py`, `test_hr.py`, `test_hr_profile.py` and
+  `test_hr_documents.py`.
+- On 2 November 2026 a separate test instance allowed writes. Verified live:
+  department create and rename with the linked employee following after a
+  directory refresh, holiday create and edit with company-wide then branch+office
+  scope and the office list narrowing to the branch, employee assignment to an
+  active branch and office, and salary structures created from both the masters
+  and the profile. The overlap guard appeared in the form, and a later structure
+  closed the previous one. `tests/test_hr_masters.py` (5 tests) covers the same
+  write paths and role boundaries. Creating a leave type or salary component
+  through the browser was **not** exercised and is listed as a gap above.
 - The exempt employee's screen state (**No attendance**, **– not required**,
   refused check-in message) is proven by `test_hr_sites.py`; the development
   database held no attendance rule when the manual was written, so that state

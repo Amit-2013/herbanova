@@ -111,11 +111,20 @@ register), `accounts` (receivables, ageing, payables, GST register, trial
 balance), `alerts` (none), `custom` (the reports ticked on the schedule).
 
 Every pack that includes Accounts content also carries the Accounts summary block
-(revenue, collections, returns, output GST, receivables, payables, gross profit,
-expenses, net profit and the gaps that remain). Gross profit is labelled
+(revenue, collections, returns, net GST payable, receivables, payables, gross
+profit, expenses, net profit and the gaps that remain). The GST tile reads
+**Net GST payable** — output tax on issued documents less eligible input tax on
+captured supplier bills — and reads "No data yet" until a supplier bill is
+posted; the plain-text part states the output figure and says no supplier bill
+with input tax is captured yet. Output GST remains in the notes and the attached
+GST register. Gross profit is labelled
 "partial, X of Y invoices costed" when some invoices have no captured cost.
-Net profit appears only when every invoice is costed, expenses cover the window
-and payroll is complete; otherwise its first gap (GAP-P01/P02/P03) is shown.
+Expenses and payroll that cover only part of the window are printed as the
+provable total followed by "(partial, GAP-P02)" or "(partial, GAP-P03)". Net
+profit appears only when every invoice is costed, expenses cover the window and
+payroll is complete; otherwise its first gap (GAP-P01/P02/P03) is shown. A
+payroll month the window cuts short contributes its approved gross allocated by
+working days and is described as allocated in the limitations note.
 
 ### Where the figures come from
 
@@ -298,8 +307,8 @@ Green header with company and period → greeting and headline → KPI tiles →
 Needs attention → Comparison table (current, previous, same period last year) →
 Sales vs purchases chart and table → Receivables ageing chart and table →
 Top products / top customers / top states → Accounts summary (revenue,
-collections, returns, output GST, receivables, payables, gross profit, expenses
-and net profit, with a gap only where an input is missing) → Attached reports
+collections, returns, net GST payable, receivables, payables, gross profit,
+expenses and net profit, with a gap only where an input is missing) → Attached reports
 table → dashboard button → footer.
 
 ---
@@ -388,7 +397,7 @@ configured; queuing never pretends a message can be delivered.
 | Period rules | Daily, weekly, completed month vs month-to-date |
 | Figures | Pack sales equals the dashboard for the same dates; missing inputs are "No data yet"; trial balance balanced |
 | Content | HTML and plain text carry the same figures and the test marker; every block is a table row; attachments are named and inside the budget |
-| Accounts block | Equals `/api/accounts/report` for revenue, outstanding and output GST; gaps present |
+| Accounts block | Equals `/api/accounts/report` for revenue, outstanding, output GST and net GST payable; the net tile reads "No data yet" until a supplier bill is posted; the pack adds a balance-sheet block read from the same service as the screen (total assets, liabilities/equity/earnings, difference) and its cash note says closing balances are on the balance sheet. No GAP-A10 row is raised, because the balance sheet is now produced. |
 | Test/live mode | Redirect to one address; fail closed with no address; live mode needs recipients; explicit and group recipients |
 | Scheduling | A slot is enqueued once; two workers cannot create the same delivery; next run moves past it; paused schedule skipped; stale claim released |
 | Failure handling | Transient failure retried four times with increasing delay; permanent failure stops at once |
@@ -443,5 +452,67 @@ so the installation returns to the environment-only defaults.
 | Secure expiring download link for oversized attachments | No tokenised public dashboard exists (GAP-E05); the email names the files and points to Reports. |
 | In-process scheduler | Would duplicate sends per web worker; a separate DB-backed worker is used. |
 | Automatic retention deletion | Deleting delivery rows destroys evidence of what was sent; retention is left to the owner. |
-| Expense, cost and profit figures | Included when the inputs are complete. Gross profit is live and labelled partial when invoices are uncosted (GAP-P01); expenses before `tracked_from` are GAP-P02; a missing or draft payroll month is GAP-P03. Net profit is withheld until all three are complete rather than estimated. |
+| Expense, cost and profit figures | Included when the inputs are complete. Gross profit is live and labelled partial when invoices are uncosted (GAP-P01); expenses before `tracked_from` are printed as a partial total marked Partial (GAP-P02); payroll counts approved months, allocating a month the window cuts short by working days, and names a month with no approved payroll (GAP-P03). Net profit is withheld until all three are complete rather than estimated. |
 | Holiday calendar maintenance | The worker reads `hr_holidays`; keeping it current is an HR task. |
+
+---
+
+## 14. Reliability fixes — 3 November 2026
+
+Three defects in the delivery path and the database session were corrected. No
+setting, table or endpoint changed shape; behaviour that already worked is
+unchanged.
+
+### 14.1 SMTP transport follows the port
+
+Until this fix a saved security choice could contradict a well-known port — for
+example port 465 with STARTTLS, or 587 with implicit SSL — and the connection
+failed before authentication. `app/services/email_config.py` now decides the
+transport from the port first: **465 → SSL**, **587 → STARTTLS**; any other port
+uses the saved choice (`SMTP_SSL` / `SMTP_STARTTLS`). The saved value still wins
+where the port does not imply one, so a non-standard port is not silently
+overridden. Decision D-47.
+
+### 14.2 A failed read no longer poisons the session
+
+`load_row` in `app/services/email_config.py` now rolls the session back when a
+`SQLAlchemyError` is raised while reading the settings row. Before, a failed read
+left the session in a state where every later statement in the same request
+failed too, so one unreadable row took down the whole screen rather than the
+single field.
+
+### 14.3 The worker survives a failure and commits its schedule
+
+In `app/services/email_worker.py`:
+
+- `enqueue_due` now commits the moved `next_run_at` even when nothing else was
+  due, so a schedule cannot be enqueued twice on the next cycle.
+- `process_one` rolls back on any exception, re-reads the delivery row, treats a
+  row or schedule deleted mid-send as a skip, records the failure with
+  `_record_failure`, and rolls back if that commit itself fails. The worker loop
+  therefore keeps running after a bad message instead of stopping.
+
+A schedule that somehow has no next run is now committed rather than re-derived
+each cycle.
+
+### 14.4 Database connection pool
+
+The API's engine is bounded and recycled instead of growing without limit:
+`db_pool_size=10`, `db_max_overflow=20`, `db_pool_timeout=30`,
+`db_pool_recycle=1800`, with `pool_pre_ping=True`
+(`app/core/config.py`, `app/core/db.py`). A connection dropped by the database
+restart is checked before use rather than failing the request. Decision D-48.
+
+### 14.5 Tests and what is not verified
+
+| Test | What it proves |
+|---|---|
+| `tests/test_email_settings.py::test_well_known_smtp_ports_decide_the_transport` | 465 gives SSL and 587 gives STARTTLS regardless of the saved choice; another port keeps the saved choice |
+| `tests/test_email_settings.py::test_an_unreadable_settings_row_rolls_the_session_back` | A failed read rolls back and leaves the session usable |
+| `tests/test_email_reports.py::test_a_schedule_with_no_next_run_is_committed_even_when_nothing_is_due` | The schedule's next run is persisted when a cycle finds nothing due |
+
+The full suite passes (**446 passed** on 3 November 2026). **Live delivery is
+NOT VERIFIED:** there are no live SMTP credentials in this environment and real
+sends are prohibited, so the transport selection is proven by the unit test and a
+local `smtplib` sink only. The first real send remains part of the go-live
+checklist in §12, item 3.

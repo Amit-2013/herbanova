@@ -15,7 +15,7 @@ from ..core.rbac import require
 from ..core.rules import DISCOUNT_APPROVAL_PCT
 from ..models.core import (ApprovalRequest, Distributor, Product, SalesOrder, SalesOrderLine,
                            User, Warehouse)
-from ..services import capacity, costing
+from ..services import capacity, costing, periods
 from ..services.audit import audit
 from ..services.discounts import best_slab
 from ..services.inventory import post_movement
@@ -52,6 +52,9 @@ class SOLineIn(BaseModel):
 class SOIn(BaseModel):
     distributor_id: int
     lines: list[SOLineIn] = Field(min_length=1)
+    # The promise is optional. Blank means the buyer was given no date, and the
+    # order then contributes nothing to a lateness figure.
+    expected_delivery_date: date | None = None
 
     @field_validator("lines")
     @classmethod
@@ -59,6 +62,24 @@ class SOIn(BaseModel):
         skus = [ln.sku for ln in v]
         if len(set(skus)) != len(skus):
             raise ValueError("duplicate SKU in lines")
+        return v
+
+    @field_validator("expected_delivery_date")
+    @classmethod
+    def promise_not_past(cls, v):
+        if v is not None and v < date.today():
+            raise ValueError("the expected delivery date cannot be in the past")
+        return v
+
+
+class DeliveryIn(BaseModel):
+    expected_delivery_date: date | None = None
+
+    @field_validator("expected_delivery_date")
+    @classmethod
+    def promise_not_past(cls, v):
+        if v is not None and v < date.today():
+            raise ValueError("the expected delivery date cannot be in the past")
         return v
 
 
@@ -97,7 +118,9 @@ class SOOut(BaseModel):
     needs_approval: bool
     created_by: str
     created_at: datetime | None = None
+    approved_at: datetime | None = None
     dispatched_at: datetime | None = None
+    expected_delivery_date: date | None = None
     cancel_reason: str | None = None
     lines: list[SOLineOut]
     approval: ApprovalBrief | None = None
@@ -148,7 +171,9 @@ def _build(db: Session, orders: list[SalesOrder]) -> list[SOOut]:
             id=o.id, so_number=o.so_number, distributor_id=d.id, distributor_code=d.code,
             distributor_name=d.name, status=o.status, total=o.total, needs_approval=o.needs_approval,
             created_by=users.get(o.created_by, "?"), created_at=o.created_at,
-            dispatched_at=o.dispatched_at, cancel_reason=o.cancel_reason,
+            approved_at=o.approved_at, dispatched_at=o.dispatched_at,
+            expected_delivery_date=o.expected_delivery_date,
+            cancel_reason=o.cancel_reason,
             lines=[SOLineOut(sku=prods[ln.product_id].sku, product_name=prods[ln.product_id].name,
                              qty=ln.qty, unit_price=ln.unit_price, mrp=prods[ln.product_id].mrp,
                              discount_pct=discount_pct(prods[ln.product_id].mrp, ln.unit_price),
@@ -191,7 +216,28 @@ def get_order(order_id: int, db: Session = Depends(get_db), _=Depends(require("s
     return _build(db, [so])[0]
 
 
-# ---------------------------------------------------------------- tax preview (FR-13)
+@router.patch("/{order_id}/delivery-date", response_model=SOOut)
+def set_delivery_date(order_id: int, body: DeliveryIn, db: Session = Depends(get_db),
+                      user=Depends(require("sales:write"))):
+    """Record or clear the date promised to the buyer.
+
+    Allowed until the order is closed (dispatched, cancelled or rejected).
+    Sending null removes the promise; no date is inferred from terms.
+    """
+    so = _lock_order(db, order_id)
+    if so.status not in ("draft", "pending_approval", "approved"):
+        raise HTTPException(409, f"Order is {so.status}; its promise can no longer change")
+    before = so.expected_delivery_date
+    if before == body.expected_delivery_date:
+        raise HTTPException(422, "The expected delivery date is unchanged")
+    so.expected_delivery_date = body.expected_delivery_date
+    audit(db, user.id, "so.delivery_date", f"so:{so.id}",
+          {"from": str(before) if before else None,
+           "to": str(so.expected_delivery_date) if so.expected_delivery_date else None})
+    db.commit()
+    return _build(db, [so])[0]
+
+
 @router.get("/{order_id}/tax-preview")
 def tax_preview(order_id: int, db: Session = Depends(get_db), _=Depends(require("sales:read"))):
     """The discount slab and the GST the invoice will charge, before dispatch.
@@ -234,7 +280,8 @@ def create_order(body: SOIn, db: Session = Depends(get_db), user=Depends(require
         total += lt
         lines.append(SalesOrderLine(product_id=p.id, qty=ln.qty, unit_price=price, line_total=lt))
     so = SalesOrder(so_number=f"SO-{datetime.now():%Y%m%d}-{uuid4().hex[:6].upper()}",
-                    distributor_id=dist.id, status="draft", total=total, created_by=user.id, lines=lines)
+                    distributor_id=dist.id, status="draft", total=total, created_by=user.id,
+                    expected_delivery_date=body.expected_delivery_date, lines=lines)
     db.add(so)
     try:
         db.flush()
@@ -242,7 +289,9 @@ def create_order(body: SOIn, db: Session = Depends(get_db), user=Depends(require
         db.rollback()
         raise HTTPException(409, "Order number clash - please retry")
     audit(db, user.id, "so.create", f"so:{so.id}",
-          {"so_number": so.so_number, "distributor": dist.code, "total": str(total), "lines": len(lines)})
+          {"so_number": so.so_number, "distributor": dist.code, "total": str(total),
+           "lines": len(lines),
+           "expected_delivery_date": str(so.expected_delivery_date) if so.expected_delivery_date else None})
     db.commit()
     return _build(db, [so])[0]
 
@@ -301,6 +350,7 @@ def submit_order(order_id: int, db: Session = Depends(get_db), user=Depends(requ
         so.status, so.needs_approval = "pending_approval", True
     else:
         so.status = "approved"
+        so.approved_at = datetime.now(timezone.utc)
     audit(db, user.id, "so.submit", f"so:{so.id}",
           {"status": so.status, "reasons": reasons, "exposure": str(exposure), "limit": str(dist.credit_limit)})
     db.commit()
@@ -337,6 +387,10 @@ def dispatch_order(order_id: int, body: DispatchIn, db: Session = Depends(get_db
         raise HTTPException(409, "Order already dispatched - duplicate dispatch rejected")
     if so.status != "approved":
         raise HTTPException(409, f"Order is {so.status}; only an approved order can be dispatched")
+    try:
+        periods.refuse_if_closed(db, date.today(), "this dispatch and its invoice")
+    except periods.PeriodClosed as exc:
+        raise HTTPException(423, str(exc))
     wh = db.get(Warehouse, body.warehouse_id)
     if not wh:
         raise HTTPException(404, "Warehouse not found")
@@ -413,6 +467,11 @@ def dispatch_order(order_id: int, body: DispatchIn, db: Session = Depends(get_db
                 "invoice_line_expiry": str(line.expiry)
             })
     audit_kw = {"warehouse_id": wh.id, "allocations": [a.model_dump(mode="json") for a in out]}
+    applied = getattr(invoice, "advance_applied", None)
+    if applied:
+        audit_kw["advance_applied"] = [
+            {"payment_id": a["payment_id"], "number": a["number"],
+             "amount": str(a["amount"])} for a in applied]
     if expiry_changes:
         audit_kw["expiry_changes"] = expiry_changes
     audit(db, user.id, "so.dispatch", f"so:{so.id}", audit_kw)

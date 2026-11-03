@@ -4,6 +4,14 @@
 
 **What this register contains:** every application table (50) and every column (604), taken from the database itself, with the matching ORM class, type, nullability, database default, primary/foreign/unique keys, indexes, check constraints and incoming relationships. Inline `#` comments from the model source are reproduced in the Notes column.
 
+**Gap-closure update (3 November 2026):** migration `0024_catalog_order_dates` adds five nullable columns — `products.category`, `products.brand`, `products.reorder_level`, `sales_orders.approved_at` and `sales_orders.expected_delivery_date`. They are documented in the table sections below; the module totals in this header predate that revision and have not been re-introspected, so treat them as 604 + 5 for the current schema.
+
+**Gap-closure update (3 November 2026, Batch 5):** migrations `0025_due_dates_and_year_close`, `0026_gst_and_statutory` and `0027_ledger_and_bank_rec` are applied to the development database, which is now at head `0027_ledger_and_bank_rec` with 83 tables. `0025` added `invoices.due_date` and `invoices.payment_terms_days` (documented below) plus `financial_year_closes`; `0026` added `purchase_invoices`, `gst_returns` and `statutory_challans`; `0027` added `ledger_accounts`, `opening_balances`, `vouchers`, `voucher_lines`, `bank_statements` and `bank_statement_lines`. The module totals in this header still describe the 31 October audit; the six `0027` tables are documented in "Postings and reconciliation" below.
+
+**Gap-closure update (3 November 2026, advances):** migration `0028_advances` adds `payment_allocations` (8 columns, below) and seeds two chart heads, `1110 Advances to suppliers` (asset, role `supplier_advance`) and `2110 Advances from distributors` (liability, role `distributor_advance`), widening `ck_ledger_account_role` to accept the two roles. It was applied to the development database on 3 November 2026 (backup taken first; `alembic current` = `0028_advances (head)`), so `payment_allocations` exists there with 0 rows and `ledger_accounts` holds 11 seeded heads. The Receipts and payments module is now 2 tables / 21 columns; the 50-table total above still describes the original audit.
+
+**Gap-closure update (3 November 2026, two-factor):** migration `0029_totp` adds seven nullable-or-defaulted columns to `users` (documented under [`users`](#users)) and bumps `token_version` for the Administrator roles so pre-release sessions end. It also leaves sessions revoked on downgrade by design. **Status: applied to the disposable test database and to the development database** on 3 November 2026 after the owner's explicit `apply 0029_totp` and a verified backup; `alembic current` reads `0029_totp (head)` on both. The development table and row counts below are unchanged (84 tables, 6 users); the `users` table now has 24 columns.
+
 **Usage columns are a text-search guide, not proof of use.** `be/ui/rep` counts word-boundary occurrences of the column name in backend code (`app/api`, `app/services`, `app/core`), the browser app (`static/js/app.js`, `static/index.html`) and report builders. Generic names (`id`, `status`, `created_at`) are counted wherever the word appears, so treat the numbers as a pointer for follow-up, not a semantic claim.
 
 **Row counts** are the development dataset on the audit date; they are not a production volume and not a performance benchmark.
@@ -87,7 +95,15 @@
 
 **Receipts and payments**
 
+- [`payment_allocations`](#payment_allocations) — How much of one receipt or payment settled one invoice or purchase order; the unallocated remainder is the party's advance.
 - [`payments`](#payments) — Receipts from distributors and payments to suppliers, with allocation to an invoice or note.
+
+**Accounting controls**
+
+- [`financial_year_closes`](#financial_year_closes) — Closed financial years, with the closing and reopening reason and actor; an active row refuses dated documents in that year.
+- [`gst_returns`](#gst_returns) — Figures reported as filed on GSTR-1 and GSTR-3B, one row per form and month, for comparison with the registers.
+- [`purchase_invoices`](#purchase_invoices) — Supplier tax invoices captured for input GST and vendor TDS; never a payable, reversible, append-only.
+- [`statutory_challans`](#statutory_challans) — Deposits of deducted TDS or payroll statutory dues, by head and period.
 
 ---
 
@@ -460,10 +476,14 @@
 | 45 | `transporter_name` | varchar(120) | yes | — | — |  | 9/3/0 |
 | 46 | `eway_bill_number` | varchar(30) | yes | — | — |  | 10/3/0 |
 | 47 | `eway_bill_date` | date | yes | — | — |  | 9/5/0 |
+| 48 | `payment_terms_days` | integer | yes | — | — | frozen from the distributor at issue | — |
+| 49 | `due_date` | date | yes | — | IX | invoice_date + terms; NULL when no terms | — |
 
 **Unique constraints:** `uq_invoice_number_fy` (invoice_number, financial_year)
 
-**Indexes:** `ix_invoices_invoice_date` (invoice_date); `ix_invoices_invoice_number` (invoice_number); `uq_invoice_number_fy` (invoice_number, financial_year) unique
+**Indexes:** `ix_invoices_invoice_date` (invoice_date); `ix_invoices_invoice_number` (invoice_number); `ix_invoices_due_date` (due_date); `uq_invoice_number_fy` (invoice_number, financial_year) unique
+
+**Check constraints:** `ck_invoice_payment_terms`: `payment_terms_days IS NULL OR payment_terms_days >= 0`
 
 **Foreign keys:** (cancelled_by) → `users`(id); (distributor_id) → `distributors`(id); (issued_by) → `users`(id); (sales_order_id) → `sales_orders`(id)
 
@@ -558,9 +578,9 @@
 
 ### products
 
-**Purpose:** Product / SKU master with HSN, tax rate, price and status.
+**Purpose:** Product / SKU master with HSN, tax rate, price, status, grouping (category/brand) and replenishment level.
 
-**ORM:** `Product` · **Rows (dev):** 3 · **Columns:** 8
+**ORM:** `Product` · **Rows (dev):** 3 · **Columns:** 11
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -572,12 +592,15 @@
 | 6 | `status` | varchar(20) | no | — | IX |  | 430/170/49 |
 | 7 | `hsn` | varchar(8) | yes | — | IX |  | 71/28/0 |
 | 8 | `uqc` | varchar(3) | yes | — | — |  | 13/3/0 |
+| 9 | `category` | varchar(60) | yes | — | IX | Added in `0024`; blank means uncategorised, never invented | new |
+| 10 | `brand` | varchar(60) | yes | — | IX | Added in `0024` | new |
+| 11 | `reorder_level` | numeric(14, 3) | yes | — | — | Added in `0024`; null means "not set", never zero | new |
 
-**Indexes:** `ix_products_hsn` (hsn); `ix_products_sku` (sku) unique; `ix_products_status` (status)
+**Indexes:** `ix_products_hsn` (hsn); `ix_products_sku` (sku) unique; `ix_products_status` (status); `ix_products_category` (category); `ix_products_brand` (brand)
 
 **Referenced by:** `batches.product_id`, `credit_note_lines.product_id`, `debit_note_lines.product_id`, `discount_slabs.product_id`, `goods_receipt_lines.product_id`, `invoice_lines.product_id`, `purchase_order_lines.product_id`, `sales_order_lines.product_id`
 
-**Check constraints:** `ck_mrp_nonneg`: `mrp >= 0::numeric`; `ck_product_hsn`: `hsn IS NULL OR length(hsn::text) >= 4 AND length(hsn::text) <= 8`
+**Check constraints:** `ck_mrp_nonneg`: `mrp >= 0::numeric`; `ck_product_hsn`: `hsn IS NULL OR length(hsn::text) >= 4 AND length(hsn::text) <= 8`; `ck_products_reorder_nonneg`: `reorder_level IS NULL OR reorder_level >= 0`
 
 
 ### purchase_order_lines
@@ -658,9 +681,9 @@
 
 ### sales_orders
 
-**Purpose:** Sales orders with distributor, status, taxable value, tax and total.
+**Purpose:** Sales orders with distributor, status, taxable value, tax, total, approval stamp and the date promised to the buyer.
 
-**ORM:** `SalesOrder` · **Rows (dev):** 2 · **Columns:** 12
+**ORM:** `SalesOrder` · **Rows (dev):** 2 · **Columns:** 14
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -676,6 +699,8 @@
 | 10 | `created_at` | timestamp | no | now() | IX |  | 42/6/18 |
 | 11 | `dispatched_at` | timestamp | yes | — | — |  | 11/1/2 |
 | 12 | `cancel_reason` | varchar(300) | yes | — | — |  | 15/5/0 |
+| 13 | `approved_at` | timestamp with time zone | yes | — | — | Added in `0024`; stamped when the order becomes approved, so approval time can be separated from dispatch | new |
+| 14 | `expected_delivery_date` | date | yes | — | — | Added in `0024`; the promise made to the buyer. Null means no promise, so the order is excluded from lateness rather than counted as late | new |
 
 **Indexes:** `ix_sales_orders_so_number` (so_number) unique; `ix_sales_orders_status_created` (status, created_at)
 
@@ -714,7 +739,7 @@
 
 **Purpose:** Application users: password hash, role, lockout state, token version.
 
-**ORM:** `User` · **Rows (dev):** 6 · **Columns:** 17
+**ORM:** `User` · **Rows (dev):** 6 · **Columns:** 24 (17 before `0029_totp`; rows 18–24 added 3 November 2026)
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -735,6 +760,15 @@
 | 15 | `secondary_set_at` | timestamp | yes | — | — |  | 1/0/0 |
 | 16 | `db_reset_count` | integer | yes | 0 | — |  | 6/0/0 |
 | 17 | `db_reset_at` | timestamp | yes | — | — |  | 1/0/0 |
+| 18 | `totp_secret` | varchar(512) | yes | — | — | Fernet-sealed TOTP secret, key derived from `APP_SECRET`; never returned by an API | `0029` |
+| 19 | `totp_enabled` | boolean | no | false | — | the switch the backend checks; a password-only session is refused while true | `0029` |
+| 20 | `totp_confirmed_at` | timestamptz | yes | — | — | when enrollment was confirmed | `0029` |
+| 21 | `totp_last_counter` | integer | yes | — | — | last accepted 30-second step; blocks replay | `0029` |
+| 22 | `totp_failed_attempts` | integer | no | 0 | — | wrong codes in a row; five pause code entry for 15 minutes | `0029` |
+| 23 | `totp_locked_until` | timestamptz | yes | — | — | end of the code-entry pause; the password lockout is separate | `0029` |
+| 24 | `totp_recovery_hashes` | json | yes | — | — | argon2 hashes of the ten single-use recovery codes | `0029` |
+
+Rows 18–24 are added by migration `0029_totp`, applied to the development database on 3 November 2026. The upgrade also bumped `token_version` for the Administrator roles (3 → 4 for `admin` and `admin2`), ending their pre-release sessions; no other row value changed.
 
 **Unique constraints:** `uq_users_employee_id` (employee_id); `uq_users_username_key` (username_key); `users_username_key` (username)
 
@@ -1600,7 +1634,7 @@
 
 ### payments
 
-**Purpose:** Receipts from distributors and payments to suppliers, with allocation to an invoice or note.
+**Purpose:** Receipts from distributors and payments to suppliers. Since `0028_advances` the allocation lives in `payment_allocations`, so new rows leave `invoice_id` and `purchase_order_id` null and a receipt or payment may settle several documents; a remainder with no allocation is the party's advance. Rows written before that revision name at most one document on the row and count as fully settled.
 
 **ORM:** `Payment` · **Rows (dev):** 1 · **Columns:** 13
 
@@ -1624,10 +1658,349 @@
 
 **Foreign keys:** (created_by) → `users`(id); (distributor_id) → `distributors`(id); (invoice_id) → `invoices`(id); (purchase_order_id) → `purchase_orders`(id); (supplier_id) → `suppliers`(id)
 
-**Referenced by:** nothing
+**Referenced by:** `payment_allocations.payment_id`, `bank_statement_lines.matched_payment_id`
 
 **Check constraints:** `ck_payment_amount_positive`: `amount > 0::numeric`; `ck_payment_kind`: `kind::text = ANY (ARRAY['receipt'::character varying, 'payment'::character varying]::text[])`; `ck_payment_mode`: `mode::text = ANY (ARRAY['cash'::character varying, 'bank'::character varying, 'upi'::character varying, 'cheque'::character varying, 'neft'::character varying, 'other'::character varying]::text[])`; `ck_payment_party`: `kind::text = 'receipt'::text AND distributor_id IS NOT NULL AND supplier_id IS NULL OR kind::text = 'payment'::text AND supplier_id IS NOT NULL AND distributor_id IS NULL`
 
+
+---
+
+### payment_allocations
+
+**Purpose:** How much of one receipt or payment settled one invoice or purchase order. A receipt may settle several invoices, and an advance may settle an invoice issued later, so the link cannot live on the payment row. The payment's amount minus its allocations is the advance still available to the party; `applied_on` dates the settlement so a ledger can tell a settlement from an advance at any point in time. Rows are append-only, like the payment they belong to.
+
+**ORM:** `PaymentAllocation` · **Rows (dev):** 0 (created by `0028_advances` on 3 November 2026) · **Columns:** 8
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('payment_allocations_id_seq') | PK |  | — |
+| 2 | `payment_id` | integer | no | — | FK→payments.id, IX |  | — |
+| 3 | `invoice_id` | integer | yes | — | FK→invoices.id, IX | exactly one of this and `purchase_order_id` | — |
+| 4 | `purchase_order_id` | integer | yes | — | FK→purchase_orders.id, IX | exactly one of this and `invoice_id` | — |
+| 5 | `amount` | numeric(14, 2) | no | — | — | the settled part, never more than the payment | — |
+| 6 | `applied_on` | date | no | — | IX | payment day for a settlement; document day when an earlier advance is drawn down | — |
+| 7 | `created_by` | integer | yes | — | FK→users.id |  | — |
+| 8 | `created_at` | timestamptz | no | now() | — |  | — |
+
+**Indexes:** `ix_payment_allocations_payment_id` (payment_id); `ix_payment_allocations_invoice_id` (invoice_id); `ix_payment_allocations_purchase_order_id` (purchase_order_id); `ix_payment_allocations_applied_on` (applied_on); `uq_payment_allocation_invoice` (payment_id, invoice_id) unique, partial `WHERE invoice_id IS NOT NULL`; `uq_payment_allocation_order` (payment_id, purchase_order_id) unique, partial `WHERE purchase_order_id IS NOT NULL`
+
+**Foreign keys:** (payment_id) → `payments`(id); (invoice_id) → `invoices`(id); (purchase_order_id) → `purchase_orders`(id); (created_by) → `users`(id)
+
+**Referenced by:** nothing
+
+**Check constraints:** `ck_payment_allocation_target`: `(invoice_id IS NOT NULL AND purchase_order_id IS NULL) OR (invoice_id IS NULL AND purchase_order_id IS NOT NULL)`; `ck_payment_allocation_amount`: `amount > 0::numeric`
+
+**Note:** the table is created by `0028_advances`, which the test database has and the dev database does not yet carry; the columns above are read from the migration and ORM.
+
+
+## Accounting controls
+
+### financial_year_closes
+
+**Purpose:** A closed Indian financial year (1 April to 31 March), with who closed it and why, and who reopened it. While a row is active, dated accounting documents inside that year are refused (HTTP 423).
+
+**ORM:** `FinancialYearClose` · **Rows (dev):** 0 · **Columns:** 9
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('financial_year_closes_id_seq') | PK |  | — |
+| 2 | `financial_year` | varchar(9) | no | — | UQ, IX | `2025-26`; check length = 7 | — |
+| 3 | `active` | boolean | no | true | — | true while the year is closed | — |
+| 4 | `reason` | varchar(300) | no | — | — | typed by the closing user, at least 5 characters | — |
+| 5 | `closed_by` | integer | no | — | FK→users.id |  | — |
+| 6 | `closed_at` | timestamptz | no | now() | — |  | — |
+| 7 | `reopened_by` | integer | yes | — | FK→users.id |  | — |
+| 8 | `reopened_at` | timestamptz | yes | — | — |  | — |
+| 9 | `reopen_reason` | varchar(300) | yes | — | — | typed by the Administrator | — |
+
+**Unique constraints:** `financial_year_closes_financial_year_key` (financial_year)
+
+**Check constraints:** `ck_fy_close_label`: `length(financial_year) = 7`
+
+**Referenced by:** nothing
+
+---
+
+
+### purchase_invoices
+
+**Purpose:** A supplier's tax invoice, captured for input GST and vendor TDS. Records the tax the supplier charged head by head; it is deliberately not a payable, so capturing a bill never moves an outstanding balance. A wrong entry is reversed with a reason and excluded from the register, never edited or deleted.
+
+**ORM:** `PurchaseInvoice` · **Rows (dev):** 0 (migration `0026` applied 3 November 2026; no bill captured yet) · **Columns:** 20
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('purchase_invoices_id_seq') | PK |  | — |
+| 2 | `supplier_id` | integer | no | — | FK→suppliers.id, IX |  | — |
+| 3 | `purchase_order_id` | integer | yes | — | FK→purchase_orders.id | optional link to the order received | — |
+| 4 | `supplier_invoice_number` | varchar(40) | no | — | UQ (per supplier while posted) | the supplier's own number | — |
+| 5 | `invoice_date` | date | no | — | IX | refused inside a locked month or closed year | — |
+| 6 | `taxable_value` | numeric(14,2) | no | — | — | check >= 0 | — |
+| 7 | `cgst_amount` | numeric(14,2) | no | 0 | — |  | — |
+| 8 | `sgst_amount` | numeric(14,2) | no | 0 | — |  | — |
+| 9 | `igst_amount` | numeric(14,2) | no | 0 | — |  | — |
+| 10 | `cess_amount` | numeric(14,2) | no | 0 | — |  | — |
+| 11 | `round_off` | numeric(14,2) | no | 0 | — | signed rounding line, like a sales invoice | — |
+| 12 | `itc_eligible` | boolean | no | true | — | recorded, not judged | — |
+| 13 | `tds_section` | varchar(10) | yes | — | — | e.g. `194C` | — |
+| 14 | `tds_rate` | numeric(5,2) | yes | — | — | check 0-100 | — |
+| 15 | `tds_amount` | numeric(14,2) | no | 0 | — |  | — |
+| 16 | `status` | varchar(10) | no | 'posted' | — | `posted` / `reversed` | — |
+| 17 | `reversal_reason` | varchar(300) | yes | — | — | required when reversed | — |
+| 18 | `note` | varchar(300) | yes | — | — |  | — |
+| 19 | `created_by` | integer | no | — | FK→users.id |  | — |
+| 20 | `created_at` | timestamptz | no | now() | — |  | — |
+
+**Derived:** `number` (`PUR-000001`), `tax_total` (sum of the four heads) and `total` (`taxable + tax_total + round_off`) are properties, never stored.
+
+**Unique indexes:** `uq_purchase_invoice_number` (supplier_id, supplier_invoice_number) WHERE `status = 'posted'`; `ix_purchase_invoices_date` (invoice_date)
+
+**Check constraints:** `ck_purchase_invoice_amounts`; `ck_purchase_invoice_tds_rate`; `ck_purchase_invoice_status`; `ck_purchase_invoice_reversal_reason` (`status = 'posted' OR reversal_reason IS NOT NULL`)
+
+**Foreign keys:** (supplier_id) → `suppliers`(id); (purchase_order_id) → `purchase_orders`(id); (created_by) → `users`(id)
+
+**Referenced by:** nothing
+
+### gst_returns
+
+**Purpose:** The figures the practitioner reported as filed on the GST portal, one row per form and month. The application never files and never reads the portal; reconciliation compares these figures with the computed registers and shows any difference.
+
+**ORM:** `GstReturn` · **Rows (dev):** 0 (migration `0026` applied 3 November 2026; none filed yet) · **Columns:** 19
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('gst_returns_id_seq') | PK |  | — |
+| 2 | `form` | varchar(10) | no | — | UQ | `GSTR-1` / `GSTR-3B` | — |
+| 3 | `year` | integer | no | — | UQ |  | — |
+| 4 | `month` | integer | no | — | UQ | check 1-12 | — |
+| 5 | `filed_on` | date | no | — | — |  | — |
+| 6 | `reference` | varchar(40) | yes | — | — | ARN or acknowledgement | — |
+| 7 | `outward_taxable` | numeric(14,2) | no | 0 | — | check >= 0 | — |
+| 8 | `outward_cgst` | numeric(14,2) | no | 0 | — |  | — |
+| 9 | `outward_sgst` | numeric(14,2) | no | 0 | — |  | — |
+| 10 | `outward_igst` | numeric(14,2) | no | 0 | — |  | — |
+| 11 | `outward_cess` | numeric(14,2) | no | 0 | — |  | — |
+| 12 | `itc_cgst` | numeric(14,2) | no | 0 | — | GSTR-3B only | — |
+| 13 | `itc_sgst` | numeric(14,2) | no | 0 | — | GSTR-3B only | — |
+| 14 | `itc_igst` | numeric(14,2) | no | 0 | — | GSTR-3B only | — |
+| 15 | `itc_cess` | numeric(14,2) | no | 0 | — | GSTR-3B only | — |
+| 16 | `note` | varchar(300) | yes | — | — |  | — |
+| 17 | `created_by` | integer | no | — | FK→users.id |  | — |
+| 18 | `created_at` | timestamptz | no | now() | — |  | — |
+| 19 | `updated_by` | integer | yes | — | FK→users.id |  | — |
+
+**Unique constraints:** `uq_gst_return_period` (form, year, month)
+
+**Check constraints:** `ck_gst_return_form`; `ck_gst_return_month`; `ck_gst_return_amounts`
+
+**Foreign keys:** (created_by, updated_by) → `users`(id)
+
+**Referenced by:** nothing
+
+### statutory_challans
+
+**Purpose:** Evidence of money paid to the government against deducted TDS or payroll statutory dues. Append-only; the dues report subtracts the recorded deposits from the withheld amount and names any shortfall.
+
+**ORM:** `StatutoryChallan` · **Rows (dev):** 0 (migration `0026` applied 3 November 2026; none filed yet) · **Columns:** 11
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('statutory_challans_id_seq') | PK |  | — |
+| 2 | `kind` | varchar(10) | no | — | IX | `tds` / `pf` / `esi` / `pt` | — |
+| 3 | `bsr_code` | varchar(10) | yes | — | — |  | — |
+| 4 | `challan_number` | varchar(30) | no | — | — |  | — |
+| 5 | `paid_on` | date | no | — | IX |  | — |
+| 6 | `amount` | numeric(14,2) | no | — | — | check > 0 | — |
+| 7 | `period_year` | integer | no | — | — |  | — |
+| 8 | `period_month` | integer | no | — | — | check 1-12 | — |
+| 9 | `section` | varchar(10) | yes | — | — | tax section, when relevant | — |
+| 10 | `created_by` | integer | no | — | FK→users.id |  | — |
+| 11 | `created_at` | timestamptz | no | now() | — |  | — |
+
+**Check constraints:** `ck_challan_kind`; `ck_challan_amount`; `ck_challan_month`
+
+**Foreign keys:** (created_by) → `users`(id)
+
+**Referenced by:** nothing
+
+---
+
+## Postings and reconciliation
+
+Added by `0027_ledger_and_bank_rec` (3 November 2026). The dev row counts below were read from the migrated database on 3 November 2026; only the seeded chart of accounts has rows.
+
+### ledger_accounts
+
+**Purpose:** One head in the chart of accounts. The seeded heads mirror the buckets the documents already produce, so the balance sheet can add document postings to the same rows. Extra heads (loans, fixed assets and so on) are created by an Administrator and receive only openings and vouchers. A head is deactivated, never deleted, so a voucher can always name the account it posted to. Migration `0028_advances` adds two more seeded heads — `1110 Advances to suppliers` (asset, role `supplier_advance`) and `2110 Advances from distributors` (liability, role `distributor_advance`) — bringing the seeded chart to 11; the dev row count below predates that revision.
+
+**ORM:** `LedgerAccount` · **Rows (dev):** 9 (seeded, no amount) · **Columns:** 9
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('ledger_accounts_id_seq') | PK |  | — |
+| 2 | `code` | varchar(12) | no | — | UQ | `1000`, `1010`, … | — |
+| 3 | `name` | varchar(80) | no | — | UQ | Cash, Bank, … | — |
+| 4 | `type` | varchar(12) | no | — | — | asset / liability / equity / income / expense | — |
+| 5 | `role` | varchar(20) | yes | — | UQ (when not null) | links the head to a document bucket | — |
+| 6 | `active` | boolean | no | true | — | false hides it from new entries; the history stays | — |
+| 7 | `note` | varchar(300) | yes | — | — |  | — |
+| 8 | `created_by` | integer | yes | — | FK→users.id | null for the seeded heads | — |
+| 9 | `created_at` | timestamptz | no | now() | — |  | — |
+
+**Indexes:** `uq_ledger_account_code` (code) unique; `uq_ledger_account_name` (name) unique; `uq_ledger_account_role` (role) unique, partial `WHERE role IS NOT NULL`
+
+**Check constraints:** `ck_ledger_account_type`: `type IN ('asset','liability','equity','income','expense')`; `ck_ledger_account_role`: `role IS NULL OR role IN ('cash','bank','receivables','payables','output_gst','capital','sales','purchases','round_off','supplier_advance','distributor_advance')` (the last two added by `0028_advances`; the list was widened, never narrowed)
+
+**Foreign keys:** (created_by) → `users`(id)
+
+**Referenced by:** `opening_balances`, `voucher_lines`, `bank_statements`
+
+---
+
+### opening_balances
+
+**Purpose:** The position carried into a financial year, one row per head. Captured, never derived: a closing balance cannot be produced from documents that start after the books do. Debit and credit are stored as entered, so an unbalanced opening trial balance is shown as a difference rather than silently plugged. A row is refused inside a closed financial year.
+
+**ORM:** `OpeningBalance` · **Rows (dev):** 0 · **Columns:** 10
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('opening_balances_id_seq') | PK |  | — |
+| 2 | `ledger_account_id` | integer | no | — | FK→ledger_accounts.id, IX | unique with `financial_year` | — |
+| 3 | `financial_year` | varchar(9) | no | — | — | `2026-27`; check length = 7 | — |
+| 4 | `debit` | numeric(14,2) | no | 0 | — | check >= 0 | — |
+| 5 | `credit` | numeric(14,2) | no | 0 | — | exactly one side is positive | — |
+| 6 | `note` | varchar(300) | yes | — | — |  | — |
+| 7 | `created_by` | integer | no | — | FK→users.id |  | — |
+| 8 | `created_at` | timestamptz | no | now() | — |  | — |
+| 9 | `updated_by` | integer | yes | — | FK→users.id |  | — |
+| 10 | `updated_at` | timestamptz | yes | — | — |  | — |
+
+**Unique constraints:** `uq_opening_balance_year` (ledger_account_id, financial_year)
+
+**Indexes:** `ix_opening_balances_account` (ledger_account_id)
+
+**Check constraints:** `ck_opening_amounts`; `ck_opening_one_side`; `ck_opening_fy_label`
+
+**Foreign keys:** (ledger_account_id) → `ledger_accounts`(id); (created_by) → `users`(id); (updated_by) → `users`(id)
+
+**Referenced by:** nothing
+
+---
+
+### vouchers
+
+**Purpose:** A journal, receipt, payment or contra voucher with a posting state. A draft may be edited or deleted; posting freezes it and its lines enter the books. A mistake is reversed, which writes the mirror voucher and marks the original reversed, so the day book keeps the trail. Numbering (`VCH-000001`) is derived from the id, never stored.
+
+**ORM:** `Voucher` · **Rows (dev):** 0 · **Columns:** 13
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('vouchers_id_seq') | PK |  | — |
+| 2 | `voucher_date` | date | no | — | IX | refused in a locked month or closed year, or in the future | — |
+| 3 | `voucher_type` | varchar(10) | no | — | — | journal / receipt / payment / contra | — |
+| 4 | `narration` | varchar(300) | yes | — | — |  | — |
+| 5 | `status` | varchar(10) | no | 'draft' | IX | draft / posted / reversed | — |
+| 6 | `reversal_of_id` | integer | yes | — | FK→vouchers.id | set on the mirror voucher | — |
+| 7 | `reversal_reason` | varchar(300) | yes | — | — | required when reversed | — |
+| 8 | `created_by` | integer | no | — | FK→users.id |  | — |
+| 9 | `created_at` | timestamptz | no | now() | — |  | — |
+| 10 | `posted_by` | integer | yes | — | FK→users.id |  | — |
+| 11 | `posted_at` | timestamptz | yes | — | — | required when posted | — |
+| 12 | `reversed_by` | integer | yes | — | FK→users.id |  | — |
+| 13 | `reversed_at` | timestamptz | yes | — | — |  | — |
+
+**Indexes:** `ix_vouchers_date` (voucher_date); `ix_vouchers_status` (status)
+
+**Check constraints:** `ck_voucher_type`; `ck_voucher_status`; `ck_voucher_reversal_reason`; `ck_voucher_posted_at`
+
+**Foreign keys:** (reversal_of_id) → `vouchers`(id); (created_by), (posted_by), (reversed_by) → `users`(id)
+
+**Referenced by:** `voucher_lines`, `vouchers` (self, through `reversal_of_id`)
+
+---
+
+### voucher_lines
+
+**Purpose:** One side of a voucher. Exactly one of debit and credit is positive, so a line cannot sit on both sides.
+
+**ORM:** `VoucherLine` · **Rows (dev):** 0 · **Columns:** 6
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('voucher_lines_id_seq') | PK |  | — |
+| 2 | `voucher_id` | integer | no | — | FK→vouchers.id, IX | deleted with the draft voucher | — |
+| 3 | `ledger_account_id` | integer | no | — | FK→ledger_accounts.id, IX |  | — |
+| 4 | `narration` | varchar(300) | yes | — | — |  | — |
+| 5 | `debit` | numeric(14,2) | no | 0 | — | check >= 0 | — |
+| 6 | `credit` | numeric(14,2) | no | 0 | — | check >= 0 | — |
+
+**Indexes:** `ix_voucher_lines_voucher` (voucher_id); `ix_voucher_lines_account` (ledger_account_id)
+
+**Check constraints:** `ck_voucher_line_amounts`; `ck_voucher_line_one_side`
+
+**Foreign keys:** (voucher_id) → `vouchers`(id); (ledger_account_id) → `ledger_accounts`(id)
+
+**Referenced by:** `bank_statement_lines` (through `matched_voucher_line_id`)
+
+---
+
+### bank_statements
+
+**Purpose:** One bank statement period and the balances the bank printed. The opening and closing balances are entered from the statement, never computed; the difference between the printed closing and the lines' movement is shown, not plugged. A statement is refused when its period overlaps an existing one for the same head.
+
+**ORM:** `BankStatement` · **Rows (dev):** 0 · **Columns:** 9
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('bank_statements_id_seq') | PK |  | — |
+| 2 | `ledger_account_id` | integer | no | — | FK→ledger_accounts.id, IX | must be a head with role `bank` | — |
+| 3 | `period_from` | date | no | — | — | unique with head and `period_to` | — |
+| 4 | `period_to` | date | no | — | — | check period_from <= period_to | — |
+| 5 | `opening_balance` | numeric(14,2) | no | — | — | as printed by the bank | — |
+| 6 | `closing_balance` | numeric(14,2) | no | — | — | as printed by the bank | — |
+| 7 | `note` | varchar(300) | yes | — | — |  | — |
+| 8 | `created_by` | integer | no | — | FK→users.id |  | — |
+| 9 | `created_at` | timestamptz | no | now() | — |  | — |
+
+**Unique constraints:** `uq_bank_statement_period` (ledger_account_id, period_from, period_to)
+
+**Indexes:** `ix_bank_statements_account` (ledger_account_id)
+
+**Check constraints:** `ck_bank_statement_period`
+
+**Foreign keys:** (ledger_account_id) → `ledger_accounts`(id); (created_by) → `users`(id)
+
+**Referenced by:** `bank_statement_lines`
+
+---
+
+### bank_statement_lines
+
+**Purpose:** One line printed by the bank, matched to at most one book entry — or to a voucher line that touches the same bank head. `amount` is signed from the business's point of view: a deposit is positive, a withdrawal negative.
+
+**ORM:** `BankStatementLine` · **Rows (dev):** 0 · **Columns:** 10
+
+| # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
+|---:|---|---|:--:|---|---|---|---|
+| 1 | `id` | integer | no | nextval('bank_statement_lines_id_seq') | PK |  | — |
+| 2 | `statement_id` | integer | no | — | FK→bank_statements.id, IX | deleted with the statement | — |
+| 3 | `line_date` | date | no | — | — |  | — |
+| 4 | `description` | varchar(200) | no | — | — |  | — |
+| 5 | `reference` | varchar(60) | yes | — | — | bank reference / cheque number | — |
+| 6 | `amount` | numeric(14,2) | no | — | — | signed; check amount <> 0 | — |
+| 7 | `matched_payment_id` | integer | yes | — | FK→payments.id, UQ (partial) | one receipt or payment matches one line | — |
+| 8 | `matched_voucher_line_id` | integer | yes | — | FK→voucher_lines.id, UQ (partial) | never together with `matched_payment_id` | — |
+| 9 | `matched_at` | timestamptz | yes | — | — |  | — |
+| 10 | `matched_by` | integer | yes | — | FK→users.id |  | — |
+
+**Indexes:** `ix_bank_statement_lines_statement` (statement_id); `uq_bank_line_payment` (matched_payment_id) unique, partial `WHERE matched_payment_id IS NOT NULL`; `uq_bank_line_voucher_line` (matched_voucher_line_id) unique, partial `WHERE matched_voucher_line_id IS NOT NULL`
+
+**Check constraints:** `ck_bank_line_amount`; `ck_bank_line_one_match`
+
+**Foreign keys:** (statement_id) → `bank_statements`(id); (matched_payment_id) → `payments`(id); (matched_voucher_line_id) → `voucher_lines`(id); (matched_by) → `users`(id)
+
+**Referenced by:** nothing
 
 ---
 

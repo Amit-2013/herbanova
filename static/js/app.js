@@ -25,9 +25,17 @@ const state = {user: null, perms: new Set(), features: null, featureFlags: [], m
                users: [], roles: [], employees: [], permCatalog: [], audit: {rows: [], actions: [], actors: [], total: 0},
                tax: {company: null, rates: [], slabs: [], states: [], rateFilter: "all"},
                invoices: [], creditNotes: [], debitNotes: [], invFilter: "all",
-               accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null},
-               acc: {from: "", to: "", state: "", report: null, loading: false, error: null, seq: 0,
-                     cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0}},
+               accounts: {outstanding: null, entries: [], gst: null, tb: null, ageing: null,
+                          years: null, locks: [], inputGst: null, netGst: null,
+                          reconciliation: null, filedReturns: null, dues: null,
+                          challans: null,
+                          ledger: {heads: null, openings: null, openingFy: "",
+                                   sheet: null, vouchers: null, daybook: null,
+                                   statements: null, selected: null, detail: null,
+                                   candidates: null, rec: null}},
+               acc: {from: "", to: "", state: "", section: "reports", payDue: "", report: null, loading: false, error: null, seq: 0,
+                     cmp: {mode: "full_month", month: "", data: null, loading: false, error: null, seq: 0},
+                     rbd: {data: null, loading: false, error: null, seq: 0, from: "", to: ""}},
                exp: {rows: [], heads: [], settings: null, status: "", head: "", q: "",
                      loading: false, error: null, seq: 0, loaded: false},
                foc: {stock: [], notes: [], loading: false, error: null, loaded: false},
@@ -144,12 +152,32 @@ function openDrawer(title, sub, html, wide = false) {
   $("#drawer").classList.toggle("wide", wide);
   $("#scrim").classList.remove("hide");
   $("#drawer").classList.remove("hide");
+  document.body.classList.add("drawer-open");
+  fitDrawerTables();
   const first = $("#dbody").querySelector("input,select,textarea");
   (first || $("#dclose")).focus();
+}
+/* A wide table (invoice lines, ledgers) scrolls inside its own box rather than
+   dragging the whole drawer body sideways. Only tables that genuinely do not fit
+   are wrapped, so the sticky header keeps working on the rest. */
+function fitDrawerTables() {
+  const body = $("#dbody");
+  if (!body || !drawerOpen()) return;
+  body.querySelectorAll("table").forEach(t => {
+    let wrap = t.parentElement;
+    if (!wrap.classList.contains("tw")) {
+      wrap = document.createElement("div");
+      wrap.className = "tw";
+      t.replaceWith(wrap);
+      wrap.appendChild(t);
+    }
+    wrap.classList.toggle("tscroll", t.getBoundingClientRect().width > wrap.clientWidth + 1);
+  });
 }
 function closeDrawer() {
   $("#scrim").classList.add("hide");
   $("#drawer").classList.add("hide");
+  document.body.classList.remove("drawer-open");
   $("#dbody").innerHTML = "";
   if (lastFocus && document.contains(lastFocus)) lastFocus.focus();
   lastFocus = null;
@@ -186,6 +214,7 @@ function enter(u) {
   closePalette();
   $("#mustChange").classList.add("hide");
   $("#login").classList.add("hide");
+  $("#totp").classList.add("hide");
   $("#shell").classList.remove("hide");
   $("#who").textContent = u.username;
   const show = (id, on) => { const el = $(id); if (el) el.classList.toggle("hide", !on); };
@@ -227,6 +256,8 @@ function leave(msg) {
   closeDrawer();
   $("#mustChange").classList.add("hide");
   $("#changePwForm").reset();
+  $("#totp").classList.add("hide");
+  $("#totpForm").reset();
   $("#shell").classList.add("hide");
   $("#login").classList.remove("hide");
   $("#lerr").textContent = msg || "";
@@ -246,14 +277,10 @@ async function changePassword(form) {
   const f = form.elements, err = $("#mcErr"), btn = $("#mcBtn");
   err.textContent = "";
   const current = f.current_password.value, next = f.new_password.value;
+  // The policy itself lives only on the server; the browser checks what it can
+  // know locally (the two fields match) and shows the server's own reasons.
   if (!current) { err.textContent = "Enter your current password."; return; }
   if (next !== f.confirm_password.value) { err.textContent = "The new passwords do not match."; return; }
-  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(re => re.test(next)).length;
-  if (next.length < 12 || next.length > 128 || classes < 3) {
-    err.textContent = "Use 12 to 128 characters with at least three of: lowercase, uppercase, digits, symbols.";
-    return;
-  }
-  if (next === current) { err.textContent = "The new password must differ from the current password."; return; }
   btn.disabled = true;
   const res = await api("/api/auth/change-password", {method: "POST",
     body: {current_password: current, new_password: next}});
@@ -270,9 +297,97 @@ async function login(e) {
   const res = await api("/api/auth/login", {method: "POST", body: {username: $("#u").value.trim(), password: $("#p").value}});
   btn.disabled = false;
   if (!res.ok) { $("#lerr").textContent = res.status === 401 ? "Username or password is incorrect." : detail(res.body); return; }
+  const data = res.body || {};
+  // The server decides whether a password alone is enough. It never sends a
+  // session cookie until the authenticator step (or enrollment) is complete.
+  if (data.status === "otp_required") { $("#p").value = ""; return showTotp("verify"); }
+  if (data.status === "setup_required") { $("#p").value = ""; return showTotp("setup"); }
   $("#p").value = "";
   const me = await api("/api/auth/me");           // permissions come from the server, not from a copy in this file
   enter(me.ok ? me.body : res.body);
+}
+
+/* ---------- two-step verification (Administrator accounts) ---------- */
+let totpUseRecovery = false;
+let totpPending = null;
+
+function showTotp(mode) {
+  $("#login").classList.add("hide");
+  $("#mustChange").classList.add("hide");
+  $("#shell").classList.add("hide");
+  $("#totp").classList.remove("hide");
+  $("#totpForm").classList.remove("hide");
+  $("#totpRecoveryBox").classList.add("hide");
+  $("#totpErr").textContent = "";
+  $("#totpCode").value = "";
+  totpUseRecovery = false;
+  totpPending = null;
+  const setup = mode === "setup";
+  $("#totpSetup").classList.toggle("hide", !setup);
+  $("#totpRecoveryToggle").parentElement.classList.toggle("hide", setup);
+  $("#totpCodeLabel").textContent = setup ? "Six-digit code from the app" : "Six-digit code from the app";
+  $("#totpCode").setAttribute("maxlength", "12");
+  $("#totpCode").setAttribute("inputmode", "numeric");
+  $("#totpBtn").textContent = setup ? "Confirm and continue" : "Verify and continue";
+  if (setup) {
+    $("#totpTitle").textContent = "Set up two-step verification";
+    $("#totpHint").textContent = "Administrator accounts need Google Authenticator in addition to the password. Add the key below, then enter the six-digit code it shows.";
+    loadTotpSetup();
+  } else {
+    $("#totpTitle").textContent = "Two-step verification";
+    $("#totpHint").textContent = "Enter the six-digit code from Google Authenticator to finish signing in.";
+    $("#totpCode").focus();
+  }
+}
+
+async function loadTotpSetup() {
+  $("#totpSecret").textContent = "…";
+  $("#totpAccount").textContent = "";
+  const res = await api("/api/auth/2fa/setup");
+  if (!res.ok) {
+    $("#totpSecret").textContent = "";
+    $("#totpErr").textContent = detail(res.body) || "Setup could not start. Sign in again.";
+    return;
+  }
+  $("#totpSecret").textContent = res.body.secret;
+  $("#totpAccount").textContent = res.body.account || "";
+  $("#totpCode").focus();
+}
+
+async function totpSubmit(e) {
+  e.preventDefault();
+  const setup = !$("#totpSetup").classList.contains("hide");
+  const value = $("#totpCode").value.trim();
+  const err = $("#totpErr"), btn = $("#totpBtn");
+  err.textContent = "";
+  if (!value) { err.textContent = setup || !totpUseRecovery ? "Enter the six-digit code." : "Enter a recovery code."; return; }
+  btn.disabled = true;
+  const path = setup ? "/api/auth/2fa/confirm" : "/api/auth/2fa/verify";
+  const body = (!setup && totpUseRecovery) ? {recovery_code: value} : {code: value};
+  const res = await api(path, {method: "POST", body});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body) || "That code was not accepted."; return; }
+  if (setup) {
+    totpPending = res.body;
+    $("#totpCodes").innerHTML = (res.body.recovery_codes || []).map(c => `<span>${esc(c)}</span>`).join("");
+    $("#totpForm").classList.add("hide");
+    $("#totpRecoveryBox").classList.remove("hide");
+    $("#totpDone").focus();
+    return;
+  }
+  const me = await api("/api/auth/me");
+  enter(me.ok ? me.body : res.body);
+}
+
+function totpToggleRecovery() {
+  totpUseRecovery = !totpUseRecovery;
+  $("#totpCodeLabel").textContent = totpUseRecovery ? "Recovery code" : "Six-digit code from the app";
+  $("#totpCode").setAttribute("maxlength", totpUseRecovery ? "11" : "12");
+  $("#totpCode").setAttribute("inputmode", totpUseRecovery ? "text" : "numeric");
+  $("#totpRecoveryToggle").textContent = totpUseRecovery ?
+    "Use the authenticator code instead" : "Use a recovery code instead";
+  $("#totpCode").value = "";
+  $("#totpCode").focus();
 }
 async function boot() {
   const me = await api("/api/auth/me");
@@ -289,7 +404,7 @@ async function loadAll() {
   const canAccounts = can("accounts:read");
   const canApprovals = can("approval:read");
   const isAdminRole = !!state.user && String(state.user.role || "").trim().toLowerCase() === "admin";
-  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, da, ff] = await Promise.all([
+  const [h, mo, p, w, b, o, ds, so, ap, ld, us, rl, em, pcat, sp, bc, co, rt, sl, st, inv, cn, dn, ao, ae, ag, fy, pl, da, ff] = await Promise.all([
     api("/api/health"), api("/api/modules"),
     can("product:read") ? api("/api/products?page=1&page_size=200") : none,
     can("stock:read") ? api("/api/warehouses") : none,
@@ -311,6 +426,8 @@ async function loadAll() {
     canAccounts ? api("/api/accounts/outstanding") : none,
     canAccounts ? api("/api/accounts/payments") : none,
     canAccounts ? api("/api/accounts/ageing") : none,
+    canAccounts ? api("/api/accounts/financial-years") : none,
+    canAccounts ? api("/api/accounts/period-locks") : none,
     api(`/api/dashboard?${dashQuery()}`),
     isAdminRole ? api("/api/features") : none]);
   if (!state.user) return;
@@ -352,6 +469,8 @@ async function loadAll() {
   if (ao.ok) state.accounts.outstanding = ao.body;
   state.accounts.entries = ae.ok ? ae.body : [];
   if (ag.ok) state.accounts.ageing = ag.body;
+  if (fy.ok) state.accounts.years = fy.body;
+  state.accounts.locks = pl.ok ? pl.body : [];
   $("#env").textContent = h.ok ? `Environment: ${h.body.env}` : "Service unreachable";
   const failed = [p, w, b, o, ds, so, canApprovals ? ap : null, ld, sp].find(r => r && !r.ok);
   if (failed) toast(failed, "Some data could not be loaded");
@@ -389,7 +508,22 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
                    approvals: "approval:read",
                    hr: "hr:read", scheduled: "email:manage"};
 function route() {
-  let [v, sub] = (location.hash.replace(/^#\//, "") || "dash").split("/");
+  // A hash may carry a query (`#/accounts/gst-out?from=...&to=...`) so a KPI
+  // card can open its own report with the same window. The query is read here
+  // and applied after the section has rendered.
+  const raw = location.hash.replace(/^#\//, "") || "dash";
+  const slash = raw.indexOf("/");
+  let v = slash < 0 ? raw : raw.slice(0, slash);
+  let sub = slash < 0 ? "" : raw.slice(slash + 1);
+  let query = "";
+  const qMark = sub.indexOf("?");
+  if (qMark >= 0) { query = sub.slice(qMark + 1); sub = sub.slice(0, qMark); }
+  const vMark = v.indexOf("?");
+  if (vMark >= 0) {
+    query = v.slice(vMark + 1) + (query ? "&" + query : "");
+    v = v.slice(0, vMark);
+  }
+  const hashParams = new URLSearchParams(query);
   // Customers and distributors are one master. The older address still opens
   // the screen, so dashboard drill-downs, links and bookmarks keep working.
   if (v === "distributors") v = "customers";
@@ -413,11 +547,27 @@ function route() {
   if (state.view === "followups") renderFollowups();
   if (state.view === "customers") renderCustomers();
   if (state.view === "settings") renderSettings();
-  if (state.view === "hr") { if (can("hr:read")) openHr(); else renderHr(); }
+  if (state.view === "hr") {
+    if (can("hr:read")) openHr(); else renderHr();
+    // A gap link lands directly on the payroll list, where the missing month is opened.
+    if (sub === "payroll" && can("hr:payroll_prepare")) hrPayroll();
+  }
   if (state.view === "compare") loadCompare();
   if (state.view === "geo") loadGeo();
-  if (state.view === "accounts") openAccountsReports();
-  if (state.view === "expenses") openExpenses();
+  if (state.view === "accounts") {
+    const picked = ACC_SECTIONS.find(x => x.key === sub && accSectionAllowed(x));
+    state.acc.section = picked ? picked.key : defaultAccountsSection();
+    state.acc.payDue = hashParams.get("due") === "week" ? "week" : "";
+    applyAccountsSection();
+    openAccountsReports();
+    openAccountsStatements();
+    // A card can land here with ?due=week after the statements were rendered;
+    // re-draw them so the list matches the link that opened it.
+    if (state.accounts.outstanding) renderAccounts();
+    openAccountsSectionData();
+    applyAccountsQuery(hashParams);
+  }
+  if (state.view === "expenses") { openExpenses(); applyExpensesQuery(hashParams); }
   if (state.view === "foc") openFoc();
   if (state.view === "scheduled") openScheduled();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
@@ -1118,14 +1268,33 @@ function renderTopProducts(t, d) {
 }
 
 function renderCategory(c) {
-  const el = $("#category");
+  const el = $("#category"), meta = $("#categoryMeta");
   if (!c || c.available === false) {
+    if (meta) meta.textContent = "Not available";
     el.innerHTML = `<div class="category-empty"><div class="donut" aria-hidden="true"></div>
       <div><b>No data yet</b><p>${esc(c && c.note || "Sales cannot be grouped by category until a category is captured on each product.")}</p>
       <code>${esc(c && c.gap || "GAP-D01")}</code></div></div>`;
     return;
   }
-  el.innerHTML = `<p class="gap-note">Category totals are not available.</p>`;
+  const rows = c.rows || [];
+  if (meta) {
+    const d = state.dash || {};
+    meta.textContent = d.from && d.to
+      ? `${fmtDate(d.from)} to ${fmtDate(d.to)} · taxable value`
+      : "Issued invoices · taxable value";
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="category-empty"><div><b>No data yet</b><p>${esc(c.note || "No issued invoice falls in this period.")}</p></div></div>`;
+    return;
+  }
+  const max = Math.max(...rows.map(r => Number(r.revenue)), 0) || 1;
+  el.innerHTML = `<ul class="rows">${rows.map(r => {
+    const pct = Math.max(0, Number(r.revenue) / max * 100);
+    return `<li><div><b>${esc(r.category)}</b><small>${plural(r.invoices, "invoice")} · ${esc(qty(r.qty))} units</small>
+      <div class="wh-bar" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div></div>
+      <div class="r"><span class="num">₹ ${money(r.revenue)}</span></div></li>`;
+  }).join("")}</ul>
+  <p class="gap-note">${esc(c.note)}</p>`;
 }
 
 /* ---------- phase 3 insight cards ---------- */
@@ -1146,13 +1315,26 @@ function renderInsightPipeline(p) {
   const parts = [];
   if (p.sales) {
     const d = p.sales.dispatch || {};
-    const dispatch = d.average_days != null
-      ? `Raised to dispatch: ${d.average_days} days on average across ${plural(d.measured, "dispatched order")}. ${d.note || ""}`
-      : `Order-to-dispatch time is not available yet. ${d.note || ""}`;
+    const notes = [];
+    notes.push(d.average_days != null
+      ? `Raised to dispatch: ${d.average_days} days on average across ${plural(d.measured, "dispatched order")}.`
+      : "Order-to-dispatch time is not available yet.");
+    if (d.approval_average_days != null) {
+      notes.push(`Approval: ${d.approval_average_days} days across ${plural(d.approval_measured, "order")}`
+        + (d.after_approval_average_days != null
+          ? `; approved to dispatch: ${d.after_approval_average_days} days across ${plural(d.after_approval_measured, "order")}.` : "."));
+    }
+    const dl = d.delivery || {};
+    if (dl.measured) {
+      notes.push(`Promised date met on ${dl.on_time} of ${plural(dl.measured, "dispatched order")}`
+        + (dl.late ? `; ${dl.late} late by ${dl.average_days_late} days on average.` : "."));
+    }
+    if (d.overdue_open) notes.push(`${plural(d.overdue_open, "open order")} already past the promised date.`);
+    if (d.note) notes.push(d.note);
     parts.push(col(`Sales orders · ${plural(p.sales.total, "order")}`, p.sales.rows,
       r => `<li><div><b>${esc(r.label)}</b><small>${plural(r.count, "order")}</small></div>
         <div class="r"><span class="num">₹ ${money(r.value)}</span></div></li>`,
-      `<p class="gap-note">${esc(dispatch)}</p>`));
+      notes.map(n => `<p class="gap-note">${esc(n)}</p>`).join("")));
   }
   if (p.leads) parts.push(col(`Leads · ${plural(p.leads.total, "lead")}`, p.leads.rows,
     r => `<li><div><b>${esc(r.label)}</b></div><span class="num">${qty(r.count)}</span></li>`));
@@ -2049,7 +2231,7 @@ function renderAccounts() {
   if (!can("accounts:read")) return;
   const out = state.accounts.outstanding;
   const recv = out ? out.receivables.filter(r => Number(r.outstanding) > 0) : [];
-  const pay = out ? out.payables.filter(p => Number(p.outstanding) > 0) : [];
+  const pay = out ? payablesForView() : [];
   $("#arows").innerHTML = recv.map(r => `<tr><td class="strong">${esc(r.number)}</td><td>${esc(r.date)}</td>
     <td>${esc(r.distributor || "")}</td><td class="n">${money(r.grand_total)}</td>
     <td class="n">${money(r.received)}</td><td class="n strong">${money(r.outstanding)}</td></tr>`).join("");
@@ -2057,25 +2239,35 @@ function renderAccounts() {
     out ? " Every issued invoice has been settled in full." : " Refresh to try again.");
   $("#payrows").innerHTML = pay.map(p => `<tr><td class="strong">${esc(p.number)}</td><td>${esc(p.supplier || "")}</td>
     <td class="n">${money(p.received_value)}</td><td class="n">${money(p.paid)}</td>
+    <td>${p.due_on ? esc(fmtDate(p.due_on)) : `<span class="muted">not estimated</span>`}</td>
     <td class="n strong">${money(p.outstanding)}</td></tr>`).join("");
   empty($("#payempty"), !pay.length, "Nothing is payable.", " No supplier is owed for goods already received.");
   $("#recvSub").textContent = out
     ? `${money(out.receivable_total)} outstanding across ${plural(recv.length, "invoice")}.`
     : "What distributors still owe on issued invoices.";
   $("#paySub").textContent = out
-    ? `${money(out.payable_total)} outstanding across ${plural(pay.length, "order")}.`
+    ? (state.acc.payDue === "week"
+       ? `${money(pay.reduce((sum, p) => sum + Number(p.outstanding || 0), 0))} estimated to fall due within 7 days. The full payables list is under Payables without the filter.`
+       : `${money(out.payable_total)} outstanding across ${plural(pay.length, "order")}. Due dates are estimated from each supplier's current terms.`)
     : "What the business still owes suppliers for goods received.";
 
   const entries = state.accounts.entries || [];
-  $("#enrows").innerHTML = entries.map(e => `<tr><td class="strong">${esc(e.number)}</td><td>${esc(e.paid_on)}</td>
-    <td>${e.kind === "receipt" ? "Receipt" : "Payment"}</td><td>${esc(e.party || "")}</td>
-    <td>${esc(e.invoice_number || e.purchase_order_number || "unallocated")}</td>
-    <td class="n">${money(e.amount)}</td><td>${esc(e.mode)}</td></tr>`).join("");
+  $("#enrows").innerHTML = entries.map(e => {
+    const settled = (e.allocations || []).map(a => `${a.number || "—"} · ₹ ${money(a.amount)}`).join("<br>");
+    const against = settled || esc(e.invoice_number || e.purchase_order_number || "—");
+    const advance = Number(e.advance) > 0 ? `<small>Advance ₹ ${money(e.advance)}</small>` : "";
+    return `<tr><td class="strong">${esc(e.number)}</td><td>${esc(e.paid_on)}</td>
+      <td>${e.kind === "receipt" ? "Receipt" : "Payment"}</td><td>${esc(e.party || "")}</td>
+      <td>${against}${advance}</td>
+      <td class="n">${money(e.amount)}</td><td>${esc(e.mode)}</td></tr>`;
+  }).join("");
   empty($("#enempty"), !entries.length, "No money has been recorded yet.",
     can("accounts:write") ? " Select “Record receipt” or “Record payment” to add the first one." : "");
   if (state.accounts.gst) renderGstRegister();
   if (state.accounts.tb) renderTrialBalance();
   renderAgeing();
+  renderRbd();
+  if (state.accounts.years) renderPeriods();
 }
 
 function renderAgeing() {
@@ -2084,13 +2276,22 @@ function renderAgeing() {
     b.rows.map(r => ({...r, bucket: b.label}))) : [];
   $("#agerows").innerHTML = rows.map(r => `<tr><td class="strong">${esc(r.number)}</td>
     <td>${esc(r.date)}</td><td>${esc(r.distributor || "")}</td><td class="n">${r.days}</td>
-    <td>${esc(r.bucket)}</td><td class="n strong">${money(r.outstanding)}</td></tr>`).join("");
+    <td>${esc(r.bucket)}</td>
+    <td>${r.due_date ? esc(r.due_date) : `<span class="muted">no due date</span>`}</td>
+    <td class="n">${r.days_overdue > 0 ? `<span class="bad">${r.days_overdue}</span>` : "–"}</td>
+    <td class="n strong">${money(r.outstanding)}</td></tr>`).join("");
   empty($("#ageempty"), !rows.length, age ? "Nothing is outstanding." : "Ageing could not be loaded.",
     age ? " Every issued invoice has been settled." : " Use “Rebuild ageing” to try again.");
   if (age) {
+    const zero = {total: 0, count: 0};
+    const due = {overdue: zero, due_this_week: zero, not_yet_due: zero,
+                 no_due_date: zero, ...(age.due || {})};
     $("#ageTot").textContent = `${money(age.total)} outstanding across ${plural(age.count, "invoice")} · `
       + age.buckets.map(b => `${b.label} ${money(b.total)}`).join(" · ")
       + ` · as at ${age.as_of}`;
+    $("#ageDue").textContent = `Overdue ${money(due.overdue.total)} (${plural(due.overdue.count, "invoice")}) · `
+      + `due within 7 days ${money(due.due_this_week.total)} (${plural(due.due_this_week.count, "invoice")}) · `
+      + `${money(due.not_yet_due.total)} later · ${money(due.no_due_date.total)} with no due date`;
   }
 }
 
@@ -2099,6 +2300,850 @@ async function loadAgeing() {
   const res = await api(`/api/accounts/ageing${asOf ? "?as_of=" + encodeURIComponent(asOf) : ""}`);
   if (!res.ok) return toast(res, "Ageing could not be rebuilt");
   state.accounts.ageing = res.body; renderAgeing();
+}
+
+/* ---------- financial years and month locks ---------- */
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December"];
+
+function isAdminUser() {
+  return !!state.user && String(state.user.role || "").trim().toLowerCase() === "admin";
+}
+
+function renderPeriods() {
+  const fy = state.accounts.years;
+  const years = fy ? fy.years : [];
+  $("#fyrows").innerHTML = years.map(y => {
+    const stateText = y.active ? `<span class="bad">Closed</span>`
+      : (y.reopened_at ? `Open <small>reopened ${esc(String(y.reopened_at).slice(0, 10))}${y.reopen_reason ? ": " + esc(y.reopen_reason) : ""}</small>` : "Open");
+    const button = y.active
+      ? (isAdminUser() ? `<button class="btn ghost" type="button" data-act="fy-reopen" data-fy="${esc(y.financial_year)}">Reopen</button>`
+                       : `<span class="muted">Only the Administrator can reopen</span>`)
+      : (can("accounts:write") ? `<button class="btn ghost" type="button" data-act="fy-close" data-fy="${esc(y.financial_year)}">Close year</button>` : "");
+    return `<tr><td class="strong">${esc(y.financial_year)}</td><td>${esc(y.first)}</td><td>${esc(y.last)}</td>
+      <td>${stateText}</td><td>${esc(y.closed_by || "–")}</td><td>${esc(y.reason || "–")}</td><td>${button}</td></tr>`;
+  }).join("");
+  empty($("#fyempty"), !years.length, fy ? "No completed financial year yet." : "Financial years could not be loaded.",
+    fy ? " A year appears here once its last day has passed." : " Refresh to try again.");
+  $("#periodNote").textContent = fy ? `Current year ${fy.current}. Only completed years can be closed.` : "";
+
+  const locks = state.accounts.locks || [];
+  const active = locks.filter(l => l.active);
+  const lbtn = can("accounts:write");
+  $("#lockMonthBtn").classList.toggle("hide", !lbtn);
+  $("#lockrows").innerHTML = locks.map(l => {
+    const st = l.active
+      ? `<span class="bad">Locked</span>`
+      : `Open${l.unlock_reason ? " · " + esc(l.unlock_reason) : ""}`;
+    const btn = l.active && isAdminUser()
+      ? `<button class="btn ghost" type="button" data-act="lock-unlock" data-id="${l.id}">Unlock</button>` : "";
+    return `<tr><td class="strong">${MONTHS[l.month - 1]} ${l.year}</td><td>${st}</td>
+      <td>${esc(l.reason || "–")}</td><td>${esc(l.locked_by || "–")}</td><td>${btn}</td></tr>`;
+  }).join("");
+  empty($("#lockempty"), !locks.length, "No accounting month has been locked.",
+    " Lock a month while its figures are being reconciled.");
+  $("#lockNote").textContent = `${plural(active.length, "month")} locked.`;
+}
+
+async function loadPeriods() {
+  const [fy, lk] = await Promise.all([api("/api/accounts/financial-years"),
+                                      api("/api/accounts/period-locks")]);
+  if (fy.ok) state.accounts.years = fy.body; else toast(fy, "Financial years could not be loaded");
+  if (lk.ok) state.accounts.locks = lk.body; else toast(lk, "Month locks could not be loaded");
+  renderPeriods();
+}
+
+function periodReasonDrawer(title, sub, hint, onSave) {
+  openDrawer(title, sub, `<form id="periodReasonForm" novalidate>
+    <label for="pr-reason">Reason</label><input id="pr-reason" name="reason" placeholder="${esc(hint)}" autocomplete="off">
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn" type="submit">${esc(title)}</button></div></form>`);
+  $("#periodReasonForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const reason = form.querySelector("[name=reason]").value.trim();
+    if (reason.length < 5) return drawerErr(form, "Give a reason of at least 5 characters.");
+    const res = await onSave(reason);
+    if (!res.ok) return drawerErr(form, detail(res.body));
+    closeDrawer(); toast(res, "Saved"); await loadPeriods();
+  });
+}
+
+function drawerErr(form, message) {
+  const box = form.querySelector(".err");
+  box.textContent = message; box.classList.remove("hide");
+}
+
+function closeFinancialYear(label) {
+  periodReasonDrawer(`Close ${label}`, "The year's documents become final.", "Why is this year being closed?",
+    reason => api(`/api/accounts/financial-years/${encodeURIComponent(label)}/close`,
+                  {method: "POST", body: {reason}}));
+}
+
+function reopenFinancialYear(label) {
+  periodReasonDrawer(`Reopen ${label}`, "Documents dated in the year become changeable again.", "Why is this year being reopened?",
+    reason => api(`/api/accounts/financial-years/${encodeURIComponent(label)}/reopen`,
+                  {method: "POST", body: {reason}}));
+}
+
+function lockAccountingMonth() {
+  const value = $("#lockMonth").value;
+  if (!/^\d{4}-\d{2}$/.test(value)) return toast({ok: false, status: "—", body: {detail: "Choose a month first"}}, "Choose a month");
+  const [year, month] = value.split("-").map(Number);
+  periodReasonDrawer(`Lock ${MONTHS[month - 1]} ${year}`, "Posting into this month stops until it is unlocked.",
+    "Why is this month being locked?", reason =>
+      api("/api/accounts/period-locks", {method: "POST", body: {year, month, reason}}));
+}
+
+function unlockAccountingMonth(lockId) {
+  const lock = (state.accounts.locks || []).find(l => String(l.id) === String(lockId));
+  const label = lock ? `${MONTHS[lock.month - 1]} ${lock.year}` : "this month";
+  periodReasonDrawer(`Unlock ${label}`, "Posting into the month is allowed again.", "Why is this month being unlocked?",
+    reason => api(`/api/accounts/period-locks/${lockId}/unlock`, {method: "POST", body: {reason}}));
+}
+
+/* ---------- stored ledger: heads, openings, balance sheet, vouchers ----------
+   The document trial balance above stays the source for what documents say.
+   This section is the person's own posting: a chart of heads, opening balances,
+   vouchers with a draft and posted state, and a day book. Nothing is guessed; a
+   draft may be unbalanced while typed, and posting refuses it until it balances. */
+const LEDGER_TYPE_LABEL = {asset: "Asset", liability: "Liability", equity: "Equity",
+                           income: "Income", expense: "Expense"};
+const VOUCHER_TYPE_LABEL = {journal: "Journal", receipt: "Receipt",
+                            payment: "Payment", contra: "Contra"};
+const VOUCHER_STATE_LABEL = {draft: "Draft", posted: "Posted", reversed: "Reversed"};
+
+function currentFyLabel(d = new Date()) {
+  const y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+  return `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
+}
+const lgState = () => state.accounts.ledger;
+
+function renderLedgerHeads() {
+  const heads = lgState().heads || [];
+  $("#lhrows").innerHTML = heads.map(h => {
+    const role = h.role ? `<span class="chip">${esc(h.role.replace(/_/g, " "))}</span>`
+                        : `<span class="gap-note">unlinked</span>`;
+    const btn = can("accounts:write")
+      ? `<button class="btn ghost sm" type="button" data-act="ledger-head-toggle" data-id="${h.id}" data-on="${h.active ? 1 : 0}">${h.active ? "Deactivate" : "Activate"}</button>`
+      : "";
+    return `<tr><td class="strong">${esc(h.code)}</td><td>${esc(h.name)}</td>
+      <td>${esc(LEDGER_TYPE_LABEL[h.type] || h.type)}</td><td>${role}</td>
+      <td>${h.active ? `<span class="chip ok">Active</span>` : `<span class="chip off">Inactive</span>`}</td>
+      <td>${esc(h.note || "–")}</td><td>${btn}</td></tr>`;
+  }).join("");
+  empty($("#lhempty"), !heads.length, "No ledger head is on file.",
+    " A head is needed before a voucher can post.");
+  $("#lhTot").textContent = `${plural(heads.filter(h => h.active).length, "active head")} of ${heads.length}.`;
+}
+
+async function loadLedgerHeads() {
+  const res = await api("/api/accounts/ledger-accounts?include_inactive=true");
+  if (!res.ok) return toast(res, "Ledger heads could not be loaded");
+  lgState().heads = Array.isArray(res.body) ? res.body : [];
+  renderLedgerHeads();
+}
+
+function renderOpenings() {
+  const ob = lgState().openings;
+  $("#obrows").innerHTML = ob ? ob.rows.map(r => {
+    const btn = can("accounts:write")
+      ? `<button class="btn ghost sm" type="button" data-act="edit-opening" data-id="${r.account_id}">Set</button>` : "";
+    return `<tr${r.active ? "" : ` class="muted"`}><td class="strong">${esc(r.code)}</td>
+      <td>${esc(r.name)}</td><td>${esc(LEDGER_TYPE_LABEL[r.type] || r.type)}</td>
+      <td class="n">${Number(r.debit) ? money(r.debit) : ""}</td>
+      <td class="n">${Number(r.credit) ? money(r.credit) : ""}</td>
+      <td>${esc(r.note || "–")}</td><td>${btn}</td></tr>`;
+  }).join("") : "";
+  empty($("#obempty"), !ob || !ob.rows.length, "No ledger head is on file.",
+    " A head is needed before an opening balance can be entered.");
+  if (ob) {
+    $("#obNote").innerHTML = `Debit ${money(ob.debit_total)} · credit ${money(ob.credit_total)} · `
+      + (ob.balanced ? `<span class="chip ok">Balanced</span>`
+                     : `<span class="chip bad">Difference ${money(ob.difference)}</span>`);
+  } else {
+    $("#obNote").textContent = "";
+  }
+}
+
+async function loadOpenings() {
+  const fy = ($("#obFy").value || "").trim() || currentFyLabel();
+  $("#obFy").value = fy;
+  const res = await api(`/api/accounts/opening-balances?financial_year=${encodeURIComponent(fy)}`);
+  if (!res.ok) return toast(res, "Opening balances could not be loaded");
+  lgState().openings = res.body;
+  lgState().openingFy = fy;
+  renderOpenings();
+}
+
+function editOpening(accountId) {
+  const ob = lgState().openings;
+  const row = ob && ob.rows.find(r => String(r.account_id) === String(accountId));
+  if (!row) return toast({ok: false, status: "—", body: {detail: "Reload the openings first"}}, "Not found");
+  openDrawer(`Opening balance · ${row.code}`, `Financial year ${ob.financial_year}. Setting both sides to zero clears the row.`, `
+    <form id="obForm" data-account="${row.account_id}" data-fy="${esc(ob.financial_year)}" novalidate>
+      <div class="note">${esc(row.name)} · ${esc(LEDGER_TYPE_LABEL[row.type] || row.type)}</div>
+      <div class="row2">
+        <div><label for="ob-debit">Debit (₹)</label><input id="ob-debit" name="debit" inputmode="decimal" value="${Number(row.debit) ? Number(row.debit).toFixed(2) : ""}" placeholder="0.00"></div>
+        <div><label for="ob-credit">Credit (₹)</label><input id="ob-credit" name="credit" inputmode="decimal" value="${Number(row.credit) ? Number(row.credit).toFixed(2) : ""}" placeholder="0.00"></div>
+      </div>
+      <label for="ob-note">Note</label><input id="ob-note" name="note" value="${esc(row.note || "")}" placeholder="Optional" autocomplete="off">
+      <div class="note">Enter either a debit or a credit. Opening balances are part of the year, so a closed year refuses the change.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save opening</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveOpening(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const debit = Number(f.debit.value || 0), credit = Number(f.credit.value || 0);
+  if (debit < 0 || credit < 0) { err.textContent = "Debit and credit cannot be negative."; return; }
+  if (debit > 0 && credit > 0) { err.textContent = "Enter either a debit or a credit."; return; }
+  btn.disabled = true;
+  const res = await api("/api/accounts/opening-balances", {method: "PUT", body: {
+    account_id: Number(form.dataset.account), financial_year: form.dataset.fy,
+    debit: f.debit.value || "0", credit: f.credit.value || "0",
+    note: f.note.value.trim() || null,
+  }});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Opening balance saved");
+  closeDrawer();
+  lgState().openings = res.body;
+  renderOpenings();
+  loadBalanceSheet();
+}
+
+function newLedgerHead() {
+  openDrawer("New ledger head", "A head is a line the stored ledger can post to. Only a seeded head carries the role that links it to the document trial balance.", `
+    <form id="ledgerHeadForm" novalidate>
+      <div class="row2">
+        <div><label for="lh-code">Code</label><input id="lh-code" name="code" autocomplete="off" maxlength="12" placeholder="5200"></div>
+        <div><label for="lh-type">Type</label><select id="lh-type" name="type">${Object.entries(LEDGER_TYPE_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+      </div>
+      <label for="lh-name">Name</label><input id="lh-name" name="name" autocomplete="off" maxlength="80" placeholder="Freight inward">
+      <label for="lh-note">Note</label><input id="lh-note" name="note" autocomplete="off" maxlength="300" placeholder="Optional">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Create head</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveLedgerHead(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const code = f.code.value.trim(), name = f.name.value.trim();
+  if (!code || !name) { err.textContent = "Enter a code and a name."; return; }
+  btn.disabled = true;
+  const res = await api("/api/accounts/ledger-accounts", {method: "POST", body: {
+    code, name, type: f.type.value, note: f.note.value.trim() || null,
+  }});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Ledger head created");
+  closeDrawer();
+  await loadLedgerHeads();
+  loadOpenings();
+}
+
+async function toggleLedgerHead(id, on) {
+  const res = await api(`/api/accounts/ledger-accounts/${id}`, {method: "PATCH", body: {active: !on}});
+  toast(res, res.ok ? (on ? "Head deactivated" : "Head activated") : "Not changed");
+  if (res.ok) await loadLedgerHeads();
+}
+
+/* ------------------------------------------------------------ balance sheet */
+const BS_SECTIONS = [["asset", "Assets"], ["liability", "Liabilities"],
+                     ["equity", "Equity"], ["income", "Income"],
+                     ["expense", "Expenses"]];
+
+function renderBalanceSheet() {
+  const sheet = lgState().sheet;
+  const tb = $("#bsrows");
+  if (!sheet) {
+    tb.innerHTML = "";
+    empty($("#bsempty"), true, "The balance sheet is not built yet.",
+      " Choose a date and select “Build balance sheet”.");
+    $("#bscash").innerHTML = "";
+    $("#bsBal").textContent = "";
+    $("#bsOpening").textContent = "";
+    $("#bsWarnings").innerHTML = "";
+    return;
+  }
+  let body = "";
+  BS_SECTIONS.forEach(([key, label]) => {
+    const rows = sheet.sections[key] || [];
+    if (!rows.length) return;
+    body += `<tr><td colspan="5" class="strong">${esc(label)}</td></tr>`;
+    rows.forEach(r => {
+      body += `<tr><td>${esc(r.code ? `${r.code} · ${r.name}` : r.name)}${r.unmapped ? ` <span class="gap-note">unlinked</span>` : ""}</td>
+        <td class="n">${money(r.opening)}</td><td class="n">${money(r.vouchers)}</td>
+        <td class="n">${money(r.documents)}</td><td class="n strong">${money(r.balance)}</td></tr>`;
+    });
+  });
+  const t = sheet.totals;
+  body += `<tr><td class="strong">Total assets</td><td></td><td></td><td></td><td class="n strong">${money(t.asset)}</td></tr>`
+    + `<tr><td class="strong">Total liabilities</td><td></td><td></td><td></td><td class="n strong">${money(t.liability)}</td></tr>`
+    + `<tr><td class="strong">Total equity</td><td></td><td></td><td></td><td class="n strong">${money(t.equity)}</td></tr>`
+    + `<tr><td class="strong">Retained earnings <small>income less expenses</small></td><td></td><td></td><td></td><td class="n strong">${money(t.retained_earnings)}</td></tr>`
+    + `<tr><td class="strong">Difference</td><td></td><td></td><td></td><td class="n strong">${money(t.difference)}</td></tr>`;
+  tb.innerHTML = body;
+  empty($("#bsempty"), !body, "Nothing to show.", "");
+  $("#bsBal").innerHTML = t.balanced
+    ? `<span class="chip ok">Balanced</span>`
+    : `<span class="chip bad">Difference ${money(t.difference)}</span>`;
+  const opening = sheet.opening || {};
+  $("#bsOpening").textContent =
+    `As at ${fmtDate(sheet.as_of)} · opening balances ${sheet.opening_fy ? `for ${sheet.opening_fy}` : "not captured"}`
+    + ` · movements from ${sheet.window_start || "the first document"}`
+    + ` · opening debit ${money(opening.debit_total)} and credit ${money(opening.credit_total)}`
+    + (opening.balanced ? " (balanced)." : ` (difference ${money(opening.difference)}).`);
+
+  const cb = sheet.cash_bank || {rows: [], total: 0};
+  $("#bscash").innerHTML = cb.rows.map(r =>
+      `<tr><td>${esc(r.code ? `${r.code} · ${r.name}` : r.name)}</td><td class="n strong">${money(r.balance)}</td></tr>`).join("")
+    + `<tr><td class="strong">Cash and bank total</td><td class="n strong">${money(cb.total)}</td></tr>`;
+  $("#bsWarnings").innerHTML = (sheet.warnings || []).map(w => `<li>${esc(w)}</li>`).join("");
+}
+
+async function loadBalanceSheet() {
+  const asOf = $("#bsAsOf").value;
+  const res = await api(`/api/accounts/balance-sheet${asOf ? "?as_of=" + encodeURIComponent(asOf) : ""}`);
+  if (!res.ok) return toast(res, "Balance sheet could not be built");
+  lgState().sheet = res.body;
+  renderBalanceSheet();
+}
+
+/* ---------------------------------------------------------------- vouchers */
+function renderVouchers() {
+  const rows = lgState().vouchers || [];
+  $("#vrows").innerHTML = rows.map(v => {
+    let actions = "";
+    if (can("accounts:write")) {
+      if (v.status === "draft") {
+        actions = `<button class="btn ghost sm" type="button" data-act="edit-voucher" data-id="${v.id}">Edit</button> `
+          + `<button class="btn ghost sm" type="button" data-act="post-voucher" data-id="${v.id}">Post</button> `
+          + `<button class="btn ghost sm" type="button" data-act="delete-voucher" data-id="${v.id}">Delete</button>`;
+      } else if (v.status === "posted") {
+        actions = `<button class="btn ghost sm" type="button" data-act="reverse-voucher" data-id="${v.id}">Reverse</button>`;
+      }
+    }
+    const chip = v.status === "posted" ? `<span class="chip ok">Posted</span>`
+      : v.status === "reversed" ? `<span class="chip bad">Reversed</span>`
+      : `<span class="chip warn">Draft</span>`;
+    const reverse = v.reverse_of ? ` <small>mirror of #${v.reverse_of}</small>` : "";
+    return `<tr><td class="strong">${esc(v.number)}${reverse}</td><td>${esc(v.date)}</td>
+      <td>${esc(VOUCHER_TYPE_LABEL[v.type] || v.type)}</td>
+      <td>${esc(v.narration || "–")}${v.reversal_reason ? `<small>${esc(v.reversal_reason)}</small>` : ""}</td>
+      <td class="n">${money(v.debit)}</td><td class="n">${money(v.credit)}</td>
+      <td>${chip}</td><td class="rowacts">${actions}</td></tr>`;
+  }).join("");
+  empty($("#vempty"), !rows.length, "No voucher falls in this window.",
+    can("accounts:write") ? " Select “New voucher” to post the first one." : "");
+  const drafts = rows.filter(v => v.status === "draft").length;
+  $("#vNote").textContent = rows.length
+    ? `${plural(rows.length, "voucher")}, ${drafts} draft. A draft is not in the day book.` : "";
+}
+
+async function loadVouchers() {
+  const qs = new URLSearchParams();
+  const from = $("#vFrom").value, to = $("#vTo").value, status = $("#vStatus").value;
+  if (from) qs.set("date_from", from);
+  if (to) qs.set("date_to", to);
+  if (status) qs.set("status", status);
+  const res = await api(`/api/accounts/vouchers${qs.toString() ? "?" + qs : ""}`);
+  if (!res.ok) return toast(res, "Vouchers could not be loaded");
+  lgState().vouchers = Array.isArray(res.body) ? res.body : [];
+  lgState().voucherFilters = {from, to, status};
+  renderVouchers();
+}
+
+let voucherLineSeq = 0;
+
+function voucherLineRow(line = {}, accounts = []) {
+  const selected = line.account_id ?? "";
+  const options = `<option value="">Choose a head</option>` + accounts.map(h =>
+    `<option value="${h.id}"${String(h.id) === String(selected) ? " selected" : ""}>${esc(h.code)} · ${esc(h.name)}</option>`).join("");
+  const amount = (v) => Number(v) ? Number(v).toFixed(2) : "";
+  return `<tr data-vline="${++voucherLineSeq}">
+    <td><select data-vl-account>${options}</select></td>
+    <td><input data-vl-debit inputmode="decimal" value="${amount(line.debit)}" placeholder="0.00" aria-label="Debit"></td>
+    <td><input data-vl-credit inputmode="decimal" value="${amount(line.credit)}" placeholder="0.00" aria-label="Credit"></td>
+    <td><input data-vl-narration value="${esc(line.narration || "")}" autocomplete="off" aria-label="Line narration"></td>
+    <td><button class="btn ghost sm" type="button" data-act="voucher-remove-line">Remove</button></td>
+  </tr>`;
+}
+
+function voucherForm(voucher = null) {
+  const accounts = (lgState().heads || []).filter(h => h.active);
+  if (accounts.length < 2) {
+    return toast({ok: false, status: "—",
+      body: {detail: "At least two active ledger heads are needed before a voucher can be written."}}, "No heads to post to");
+  }
+  const lines = voucher ? (voucher.lines || []) : [{}, {}];
+  openDrawer(voucher ? `Edit ${voucher.number}` : "New voucher",
+    "Debit equals credit before it can post. A draft is saved as typed and is not in the day book.", `
+    <form id="voucherForm" data-id="${voucher ? voucher.id : ""}" novalidate>
+      <div class="row2">
+        <div><label for="v-date">Date</label><input id="v-date" name="date" type="date" value="${voucher ? esc(voucher.date) : isoDay(0)}"></div>
+        <div><label for="v-type">Type</label><select id="v-type" name="type">
+          ${Object.entries(VOUCHER_TYPE_LABEL).map(([k, v]) => `<option value="${k}"${voucher && voucher.type === k ? " selected" : ""}>${v}</option>`).join("")}
+        </select></div>
+      </div>
+      <label for="v-narration">Narration</label>
+      <input id="v-narration" name="narration" value="${esc(voucher ? voucher.narration || "" : "")}" placeholder="What this voucher records" autocomplete="off" maxlength="300">
+      <div class="tw"><table>
+        <thead><tr><th>Head</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th><th>Line note</th><th></th></tr></thead>
+        <tbody id="vLineRows">${lines.map(l => voucherLineRow(l, accounts)).join("")}</tbody>
+      </table></div>
+      <div class="actions" style="justify-content:flex-start">
+        <button class="btn ghost sm" type="button" data-act="voucher-add-line">Add a line</button>
+      </div>
+      <label><input type="checkbox" id="v-post" name="post"${voucher ? "" : " checked"}> Post it now</label>
+      <div class="note">A posted voucher is never edited or deleted. A mistake is corrected with a reversing mirror dated today.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">${voucher ? "Save draft" : "Save voucher"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+function addVoucherLine() {
+  const tb = $("#vLineRows");
+  if (!tb) return;
+  const accounts = (lgState().heads || []).filter(h => h.active);
+  tb.insertAdjacentHTML("beforeend", voucherLineRow({}, accounts));
+}
+
+function removeVoucherLine(btn) {
+  const tb = $("#vLineRows");
+  if (!tb) return;
+  const rows = $$("tr[data-vline]", tb);
+  if (rows.length <= 2) return toast({ok: false, status: "—",
+    body: {detail: "A voucher needs at least two lines."}}, "Two lines are needed");
+  btn.closest("tr").remove();
+}
+
+async function saveVoucher(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const f = form.elements;
+  const rows = $$("tr[data-vline]", form);
+  if (rows.length < 2) { err.textContent = "A voucher needs at least two lines."; return; }
+  const lines = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const tr = rows[i];
+    const account = tr.querySelector("[data-vl-account]").value;
+    const debit = Number(tr.querySelector("[data-vl-debit]").value || 0);
+    const credit = Number(tr.querySelector("[data-vl-credit]").value || 0);
+    const narration = tr.querySelector("[data-vl-narration]").value.trim();
+    if (!account) { err.textContent = `Line ${i + 1}: choose a ledger head.`; return; }
+    if (debit < 0 || credit < 0) { err.textContent = `Line ${i + 1}: debit and credit cannot be negative.`; return; }
+    if ((debit > 0) === (credit > 0)) { err.textContent = `Line ${i + 1}: enter either a debit or a credit.`; return; }
+    lines.push({ledger_account_id: Number(account),
+                debit: tr.querySelector("[data-vl-debit]").value || "0",
+                credit: tr.querySelector("[data-vl-credit]").value || "0",
+                narration: narration || null});
+  }
+  if (!f.date.value) { err.textContent = "Choose a date."; return; }
+  const id = form.dataset.id;
+  const body = {date: f.date.value, type: f.type.value,
+                narration: f.narration.value.trim() || null, lines};
+  if (!id) body.post = !!f.post.checked;
+  btn.disabled = true;
+  const res = await api(id ? `/api/accounts/vouchers/${id}` : "/api/accounts/vouchers",
+    {method: id ? "PUT" : "POST", body});
+  if (!res.ok) { btn.disabled = false; err.textContent = detail(res.body); return; }
+  let posted = !id && !!f.post.checked;
+  if (id && f.post.checked) {
+    const post = await api(`/api/accounts/vouchers/${id}/post`, {method: "POST", body: {}});
+    if (!post.ok) {
+      btn.disabled = false;
+      err.textContent = `The draft was saved but not posted: ${detail(post.body)}`;
+      await loadVouchers();
+      return;
+    }
+    posted = true;
+  }
+  btn.disabled = false;
+  toast(res, posted ? "Voucher posted" : "Draft saved");
+  closeDrawer();
+  await loadVouchers();
+  loadDayBook();
+  loadBalanceSheet();
+}
+
+async function postVoucher(id) {
+  const res = await api(`/api/accounts/vouchers/${id}/post`, {method: "POST", body: {}});
+  toast(res, res.ok ? "Voucher posted" : "Not posted");
+  if (res.ok) { await loadVouchers(); loadDayBook(); loadBalanceSheet(); }
+}
+
+async function deleteVoucher(id) {
+  if (!confirm(`Delete draft voucher #${id}? A draft is not in the books, so deleting it leaves no trail.`)) return;
+  const res = await api(`/api/accounts/vouchers/${id}`, {method: "DELETE"});
+  toast(res, res.ok ? "Draft deleted" : "Not deleted");
+  if (res.ok) await loadVouchers();
+}
+
+function reverseVoucherForm(id) {
+  openDrawer("Reverse a posted voucher", "A mirror voucher dated today is posted, and the original is marked reversed. Both stay in the day book.", `
+    <form id="voucherReverseForm" data-id="${id}" novalidate>
+      <label for="vr-reason">Reason</label>
+      <input id="vr-reason" name="reason" autocomplete="off" maxlength="300" placeholder="Why is this voucher being reversed?">
+      <div class="note">A reversal is dated today, so a locked original month does not block it. If today is locked or closed, the reversal is refused.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Reverse voucher</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveVoucherReverse(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const reason = form.elements.reason.value.trim();
+  if (reason.length < 5) { err.textContent = "Give a reason of at least 5 characters."; return; }
+  btn.disabled = true;
+  const res = await api(`/api/accounts/vouchers/${form.dataset.id}/reverse`, {method: "POST", body: {reason}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Voucher reversed");
+  closeDrawer();
+  await loadVouchers();
+  loadDayBook();
+  loadBalanceSheet();
+}
+
+/* ---------------------------------------------------------------- day book */
+function renderDayBook() {
+  const book = lgState().daybook;
+  const rows = book ? book.rows : [];
+  $("#dbrows").innerHTML = rows.map(v => `<tr><td>${esc(v.date)}</td><td class="strong">${esc(v.number)}</td>
+    <td>${esc(VOUCHER_TYPE_LABEL[v.type] || v.type)}</td><td>${esc(v.narration || "–")}</td>
+    <td class="n">${money(v.debit)}</td><td class="n">${money(v.credit)}</td>
+    <td>${v.status === "reversed" ? `<span class="chip bad">Reversed</span>` : `<span class="chip ok">Posted</span>`}</td>
+    <td>${v.reverse_of ? `<span class="gap-note">mirror of #${v.reverse_of}</span>` : ""}</td></tr>`).join("");
+  empty($("#dbempty"), !rows.length, "Nothing is posted in this window.",
+    " Only posted vouchers appear here; a draft is not in the books.");
+  $("#dbNote").innerHTML = book
+    ? `${plural(book.count, "voucher")} · debit ${money(book.debit_total)} · credit ${money(book.credit_total)} · `
+      + (book.balanced ? `<span class="chip ok">Balanced</span>` : `<span class="chip bad">Difference ${money(Number(book.debit_total) - Number(book.credit_total))}</span>`)
+    : "";
+}
+
+async function loadDayBook() {
+  const qs = new URLSearchParams();
+  const from = $("#dbFrom").value, to = $("#dbTo").value;
+  if (from) qs.set("date_from", from);
+  if (to) qs.set("date_to", to);
+  const res = await api(`/api/accounts/day-book${qs.toString() ? "?" + qs : ""}`);
+  if (!res.ok) return toast(res, "Day book could not be built");
+  lgState().daybook = res.body;
+  renderDayBook();
+}
+
+/* --------------------------------------------------------- bank statements */
+function renderBankStatements() {
+  const rows = lgState().statements || [];
+  const selected = lgState().selected;
+  $("#bankStatements").innerHTML = rows.map(s => {
+    const on = String(s.id) === String(selected);
+    return `<tr${on ? ` class="on"` : ""}><td>${esc(s.account || "–")}</td>
+      <td>${esc(s.period_from)} to ${esc(s.period_to)}${s.note ? `<small>${esc(s.note)}</small>` : ""}</td>
+      <td class="n">${money(s.opening_balance)}</td><td class="n">${money(s.closing_balance)}</td>
+      <td class="n">${s.lines}</td><td class="n">${s.matched} of ${s.lines}</td>
+      <td><button class="btn ghost sm" type="button" data-act="open-bank-statement" data-id="${s.id}">Open</button></td></tr>`;
+  }).join("");
+  empty($("#bankEmpty"), !rows.length, "No bank statement is captured.",
+    can("accounts:write") ? " Select “New statement” after the month's statement arrives." : "");
+  $("#bankNote").textContent = rows.length ? `${plural(rows.length, "statement")} on file.` : "";
+}
+
+async function loadBankStatements() {
+  const res = await api("/api/accounts/bank-statements");
+  if (!res.ok) return toast(res, "Bank statements could not be loaded");
+  lgState().statements = Array.isArray(res.body) ? res.body : [];
+  renderBankStatements();
+}
+
+function renderBankDetail() {
+  const box = $("#bankDetail");
+  const lg = lgState();
+  const d = lg.detail, rec = lg.rec;
+  if (!lg.selected) {
+    box.innerHTML = `<p class="muted panel-note">Open a statement to see its lines and the reconciliation proof.</p>`;
+    return;
+  }
+  if (!d) {
+    box.innerHTML = `<p class="muted panel-note">Loading the statement…</p>`;
+    return;
+  }
+  const write = can("accounts:write");
+  const actions = [];
+  if (write) {
+    actions.push(`<button class="btn ghost sm" type="button" data-act="bank-line-add">Add line</button>`);
+    actions.push(`<button class="btn ghost sm" type="button" data-act="bank-edit-statement">Correct balances</button>`);
+    actions.push(`<button class="btn ghost sm" type="button" data-act="bank-delete-statement">Delete statement</button>`);
+  }
+  let proof = "";
+  if (rec) {
+    const p = rec.proof;
+    proof = `<div class="tw"><table>
+        <thead><tr><th>Reconciliation proof</th><th class="n">Amount (₹)</th></tr></thead><tbody>
+        <tr><td>Book closing balance</td><td class="n">${money(p.book_closing)}</td></tr>
+        <tr><td>Less unmatched book entries</td><td class="n">${money(p.unmatched_book_net)}</td></tr>
+        <tr><td class="strong">Adjusted book balance</td><td class="n strong">${money(p.adjusted_book)}</td></tr>
+        <tr><td>Statement closing balance</td><td class="n">${money(p.statement_closing)}</td></tr>
+        <tr><td>Less unmatched statement lines</td><td class="n">${money(p.unmatched_statement_net)}</td></tr>
+        <tr><td class="strong">Adjusted statement balance</td><td class="n strong">${money(p.adjusted_statement)}</td></tr>
+        <tr><td class="strong">Difference</td><td class="n strong">${money(p.difference)} ${p.balanced ? `<span class="chip ok">Balanced</span>` : `<span class="chip bad">Open</span>`}</td></tr>
+        <tr><td>Opening difference <small>printed opening less book at ${esc(d.period_from)}</small></td><td class="n">${money(p.opening_difference)}</td></tr>
+        <tr><td>Lines check <small>opening plus lines less printed closing</small></td><td class="n">${money(p.lines_check)}</td></tr>
+        </tbody></table></div>
+      <p class="muted panel-note">${plural(rec.matched.count, "line")} matched · matched debit ${money(rec.matched.debit)} · matched credit ${money(rec.matched.credit)}</p>
+      <div class="panel-note"><b>What the proof says</b><ul class="gaps">${(rec.warnings || []).map(w => `<li>${esc(w)}</li>`).join("") || "<li>No warning is raised for this statement.</li>"}</ul></div>`;
+  }
+  const lines = (d.lines || []).map(line => {
+    const acts = [];
+    if (write) {
+      if (line.matched) acts.push(`<button class="btn ghost sm" type="button" data-act="bank-line-unmatch" data-id="${line.id}">Unmatch</button>`);
+      else {
+        acts.push(`<button class="btn ghost sm" type="button" data-act="bank-line-match" data-id="${line.id}">Match</button>`);
+        acts.push(`<button class="btn ghost sm" type="button" data-act="bank-line-delete" data-id="${line.id}">Delete</button>`);
+      }
+    }
+    return `<tr><td>${esc(line.date)}</td><td class="strong">${esc(line.description)}</td>
+      <td>${esc(line.reference || "–")}</td><td class="n strong">${money(line.amount)}</td>
+      <td>${line.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip warn">Unmatched</span>`}</td>
+      <td class="rowacts">${acts.join(" ")}</td></tr>`;
+  }).join("");
+  const book = rec ? rec.unmatched_book : null;
+  const bookRows = book ? [
+    ...(book.receipts || []).map(x => ({label: x.party || "Receipt", date: x.date, amount: x.amount,
+                                        note: `${esc(x.mode)} ${esc(x.reference || "")}`})),
+    ...(book.payments || []).map(x => ({label: x.party || "Payment", date: x.date, amount: -Math.abs(Number(x.amount)),
+                                        note: `${esc(x.mode)} ${esc(x.reference || "")}`})),
+    ...(book.vouchers || []).map(x => ({label: x.voucher || "Voucher", date: x.date, amount: x.amount,
+                                        note: esc(x.narration || "")})),
+  ] : [];
+  const bookTable = bookRows.length ? `<div class="tw"><table>
+      <thead><tr><th>Unmatched in the books</th><th>Date</th><th class="n">Amount (₹)</th><th>Reference</th></tr></thead>
+      <tbody>${bookRows.map(x => `<tr><td>${esc(x.label)}</td><td>${esc(x.date)}</td>
+        <td class="n">${money(x.amount)}</td><td>${x.note}</td></tr>`).join("")}</tbody></table></div>`
+    : `<p class="muted panel-note">Every book entry inside this statement is matched, or none is in reach.</p>`;
+
+  box.innerHTML = `<div class="toolbar" style="padding:12px 18px 0">
+      <span class="muted">${esc(d.account || "")} · ${esc(d.period_from)} to ${esc(d.period_to)} · printed opening ${money(d.opening_balance)} and closing ${money(d.closing_balance)}${d.note ? ` · ${esc(d.note)}` : ""}</span>
+      ${actions.join(" ")}
+    </div>
+    ${proof}
+    <div class="tw"><table>
+      <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th class="n">Amount (₹)</th><th>State</th><th></th></tr></thead>
+      <tbody>${lines || `<tr><td colspan="6" class="muted">No statement line is captured.</td></tr>`}</tbody>
+    </table></div>
+    ${bookTable}`;
+}
+
+async function loadBankSelected() {
+  const lg = lgState();
+  if (!lg.selected) { renderBankDetail(); return; }
+  const id = lg.selected;
+  const [detail, cands, rec] = await Promise.all([
+    api(`/api/accounts/bank-statements/${id}`),
+    api(`/api/accounts/bank-statements/${id}/candidates`),
+    api(`/api/accounts/bank-statements/${id}/reconciliation`),
+  ]);
+  if (String(lg.selected) !== String(id)) return;
+  lg.detail = detail.ok ? detail.body : null;
+  lg.candidates = cands.ok ? cands.body : null;
+  lg.rec = rec.ok ? rec.body : null;
+  renderBankDetail();
+  if (!detail.ok) toast(detail, "Statement could not be loaded");
+}
+
+function openBankStatement(id) {
+  lgState().selected = Number(id);
+  lgState().detail = null;
+  lgState().rec = null;
+  renderBankStatements();
+  renderBankDetail();
+  loadBankSelected();
+}
+
+function newBankStatement() {
+  const heads = (lgState().heads || []).filter(h => h.role === "bank" && h.active);
+  if (!heads.length) {
+    return toast({ok: false, status: "—",
+      body: {detail: "Create an active ledger head with the bank role first; a statement is captured against one bank head."}}, "No bank head");
+  }
+  openDrawer("Capture a bank statement", "What the bank printed for a period, plus its lines. Each line is matched later to one book entry; nothing is posted from here.", `
+    <form id="bankStatementForm" novalidate>
+      <label for="bs-account">Bank head</label>
+      <select id="bs-account" name="account_id">${heads.map(h => `<option value="${h.id}">${esc(h.code)} · ${esc(h.name)}</option>`).join("")}</select>
+      <div class="row2">
+        <div><label for="bs-from">Period from</label><input id="bs-from" name="period_from" type="date" value="${isoDay(0).slice(0, 8)}01"></div>
+        <div><label for="bs-to">Period to</label><input id="bs-to" name="period_to" type="date" value="${isoDay(0)}"></div>
+      </div>
+      <div class="row2">
+        <div><label for="bs-opening">Printed opening (₹)</label><input id="bs-opening" name="opening_balance" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="bs-closing">Printed closing (₹)</label><input id="bs-closing" name="closing_balance" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <label for="bs-note">Note</label><input id="bs-note" name="note" maxlength="300" placeholder="Optional" autocomplete="off">
+      <div class="note">Two statements may not overlap for the same bank head. The printed closing is compared with the book, never forced onto it.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save statement</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+async function saveBankStatement(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  if (!f.period_from.value || !f.period_to.value) { err.textContent = "Choose the statement period."; return; }
+  if (!f.opening_balance.value || !f.closing_balance.value) { err.textContent = "Enter both printed balances."; return; }
+  btn.disabled = true;
+  const res = await api("/api/accounts/bank-statements", {method: "POST", body: {
+    account_id: Number(f.account_id.value), period_from: f.period_from.value,
+    period_to: f.period_to.value, opening_balance: f.opening_balance.value,
+    closing_balance: f.closing_balance.value, note: f.note.value.trim() || null,
+  }});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Bank statement saved");
+  closeDrawer();
+  lgState().selected = res.body.id;
+  await loadBankStatements();
+  renderBankStatements();
+  await loadBankSelected();
+}
+
+function addBankLineForm() {
+  const lg = lgState();
+  if (!lg.selected || !lg.detail) return;
+  const d = lg.detail;
+  openDrawer("Add a statement line", `Inside ${d.period_from} to ${d.period_to}. A positive amount is money in; a negative amount is money out.`, `
+    <form id="bankLineForm" data-statement="${d.id}" novalidate>
+      <div class="row2">
+        <div><label for="bl-date">Date</label><input id="bl-date" name="date" type="date" value="${isoDay(0)}"></div>
+        <div><label for="bl-amount">Amount (₹)</label><input id="bl-amount" name="amount" inputmode="decimal" placeholder="Money in positive, out negative"></div>
+      </div>
+      <label for="bl-desc">Description</label><input id="bl-desc" name="description" maxlength="200" autocomplete="off" placeholder="As printed by the bank">
+      <label for="bl-ref">Reference</label><input id="bl-ref" name="reference" maxlength="60" autocomplete="off" placeholder="Cheque or UTR">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Add line</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveBankLine(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  if (!f.description.value.trim()) { err.textContent = "Enter the description printed by the bank."; return; }
+  if (!f.amount.value || Number(f.amount.value) === 0) { err.textContent = "Enter a non-zero amount."; return; }
+  btn.disabled = true;
+  const res = await api(`/api/accounts/bank-statements/${form.dataset.statement}/lines`, {method: "POST", body: {
+    lines: [{date: f.date.value, description: f.description.value.trim(),
+             reference: f.reference.value.trim() || null, amount: f.amount.value}],
+  }});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Line added");
+  closeDrawer();
+  await loadBankSelected();
+  loadBankStatements();
+}
+
+function editBankStatementForm() {
+  const lg = lgState();
+  if (!lg.selected || !lg.detail) return;
+  const d = lg.detail;
+  openDrawer("Correct a bank statement", "Only the printed balances and note can change. A line is deleted, never edited.", `
+    <form id="bankEditForm" data-id="${d.id}" novalidate>
+      <div class="row2">
+        <div><label for="be-opening">Printed opening (₹)</label><input id="be-opening" name="opening_balance" inputmode="decimal" value="${money(d.opening_balance)}"></div>
+        <div><label for="be-closing">Printed closing (₹)</label><input id="be-closing" name="closing_balance" inputmode="decimal" value="${money(d.closing_balance)}"></div>
+      </div>
+      <label for="be-note">Note</label><input id="be-note" name="note" maxlength="300" value="${esc(d.note || "")}" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save balances</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function saveBankEdit(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  btn.disabled = true;
+  const res = await api(`/api/accounts/bank-statements/${form.dataset.id}`, {method: "PATCH", body: {
+    opening_balance: f.opening_balance.value, closing_balance: f.closing_balance.value,
+    note: f.note.value.trim() || null,
+  }});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, "Balances saved");
+  closeDrawer();
+  await loadBankSelected();
+  loadBankStatements();
+}
+
+async function deleteBankStatement() {
+  const lg = lgState();
+  if (!lg.selected) return;
+  if (!confirm("Delete this bank statement and every line on it? A matched line must be unmatched first.")) return;
+  const res = await api(`/api/accounts/bank-statements/${lg.selected}`, {method: "DELETE"});
+  toast(res, res.ok ? "Statement deleted" : "Not deleted");
+  if (!res.ok) return;
+  lg.selected = null; lg.detail = null; lg.candidates = null; lg.rec = null;
+  await loadBankStatements();
+  renderBankDetail();
+}
+
+function bankMatchDrawer(lineId) {
+  const lg = lgState();
+  const d = lg.detail, c = lg.candidates;
+  const line = d && (d.lines || []).find(x => String(x.id) === String(lineId));
+  if (!line) return toast({ok: false, status: "—", body: {detail: "Reload the statement first"}}, "Line not found");
+  if (!c) return toast({ok: false, status: "—", body: {detail: "The book entries could not be loaded"}}, "No candidates");
+  const target = Number(line.amount);
+  const items = [
+    ...(c.receipts || []).map(x => ({...x, kind: "payment", label: x.party || "Receipt",
+                                     note: `${x.mode} ${x.reference || ""}`, amount: Number(x.amount), dir: "in"})),
+    ...(c.payments || []).map(x => ({...x, kind: "payment", label: x.party || "Payment",
+                                     note: `${x.mode} ${x.reference || ""}`, amount: -Math.abs(Number(x.amount)), dir: "out"})),
+    ...(c.vouchers || []).map(x => ({...x, kind: "voucher_line", label: x.voucher || "Voucher",
+                                     note: x.narration || "", amount: Number(x.amount), dir: Number(x.amount) >= 0 ? "in" : "out"})),
+  ].sort((a, b) => (Math.abs(b.amount - target) < 0.005 ? 1 : 0) - (Math.abs(a.amount - target) < 0.005 ? 1 : 0));
+  const rows = items.map(x => {
+    const same = Math.abs(x.amount - target) < 0.005;
+    return `<tr><td>${esc(x.label)}${x.voucher ? "" : `<small>${esc(x.note)}</small>`}</td>
+      <td>${esc(x.date)}</td><td class="n">${money(x.amount)}</td>
+      <td>${same
+        ? `<button class="btn ghost sm" type="button" data-act="bank-match" data-line="${line.id}" data-kind="${x.kind}" data-ref="${x.id}">Match</button>`
+        : `<span class="gap-note">Amount differs</span>`}</td></tr>`;
+  }).join("");
+  openDrawer(`Match line ${money(line.amount)}`, `${line.description}${line.reference ? ` · ${line.reference}` : ""}. The amount must agree exactly, and the entry must not already be matched.`, `
+    ${(c.warnings || []).length ? `<div class="panel-note"><b>Before matching</b><ul class="gaps">${(c.warnings || []).map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    <div class="tw"><table>
+      <thead><tr><th>Book entry</th><th>Date</th><th class="n">Amount (₹)</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="4" class="muted">No book entry in reach carries this amount.</td></tr>`}</tbody>
+    </table></div>
+    <div class="actions"><button class="btn ghost" type="button" data-act="close">Close</button></div>`, true);
+}
+
+async function bankMatch(lineId, kind, refId) {
+  const res = await api(`/api/accounts/bank-lines/${lineId}/match`, {method: "POST", body: {kind, ref_id: Number(refId)}});
+  toast(res, res.ok ? "Line matched" : "Not matched");
+  if (!res.ok) return;
+  closeDrawer();
+  await loadBankSelected();
+  loadBankStatements();
+}
+
+async function bankUnmatch(lineId) {
+  const res = await api(`/api/accounts/bank-lines/${lineId}/unmatch`, {method: "POST", body: {}});
+  toast(res, res.ok ? "Line unmatched" : "Not unmatched");
+  if (res.ok) { await loadBankSelected(); loadBankStatements(); }
+}
+
+async function deleteBankLine(lineId) {
+  if (!confirm("Delete this statement line? A matched line must be unmatched first.")) return;
+  const res = await api(`/api/accounts/bank-lines/${lineId}`, {method: "DELETE"});
+  toast(res, res.ok ? "Line deleted" : "Not deleted");
+  if (res.ok) { await loadBankSelected(); loadBankStatements(); }
 }
 
 function renderGstRegister() {
@@ -2145,6 +3190,393 @@ async function loadTrialBalance() {
   state.accounts.tb = res.body; renderTrialBalance();
 }
 
+/* ---------- input GST, filed returns and statutory dues ----------
+   The input register is the only source of purchase-side tax, so net payable
+   says "No data yet" until a supplier bill is captured instead of reporting
+   zero. Filed figures are what the practitioner reported; the screen compares
+   them with the registers and never decides which side is right. */
+const GST_HEADS = ["cgst", "sgst", "igst", "cess"];
+
+function renderInputGst() {
+  const reg = state.accounts.inputGst, net = state.accounts.netGst;
+  const rows = reg ? reg.rows : [];
+  $("#igrows").innerHTML = rows.map(r => {
+    const status = r.status === "reversed"
+      ? `<span class="bad">Reversed</span><small>${esc(r.reversal_reason || "")}</small>`
+      : "Posted";
+    const act = can("accounts:write") && r.status === "posted"
+      ? `<button class="btn ghost sm" type="button" data-act="reverse-purchase-invoice" data-id="${r.id}">Reverse</button>` : "";
+    return `<tr><td class="strong">${esc(r.number)}</td><td>${esc(r.invoice_date)}</td>
+      <td>${esc(r.supplier || "")}</td><td>${esc(r.supplier_invoice_number)}</td>
+      <td class="n">${money(r.taxable)}</td><td class="n">${money(r.cgst)}</td>
+      <td class="n">${money(r.sgst)}</td><td class="n">${money(r.igst)}</td>
+      <td class="n">${money(r.cess)}</td><td class="n strong">${money(r.total)}</td>
+      <td>${r.itc_eligible ? "Eligible" : `<span class="bad">Blocked</span>`}</td>
+      <td>${status}</td><td>${act}</td></tr>`;
+  }).join("");
+  empty($("#igempty"), !rows.length,
+    reg ? "No supplier bill is captured for that period." : "The input register could not be loaded.",
+    reg ? " Capture the tax the supplier charged to claim input credit." : " Use “Build input register” to try again.");
+  if (reg) {
+    const t = reg.totals;
+    $("#igTot").textContent = `${plural(reg.posted_count, "posted bill")} · taxable ${money(t.taxable)} · tax ${money(t.tax)} · blocked ${money(reg.blocked.tax)}`;
+  }
+  $("#igNet").textContent = !net ? "" : (net.available
+    ? `Net GST payable ${money(net.net_total)}: output ${money(net.output_total)} less eligible input ${money(net.input_total)}`
+      + ` (${GST_HEADS.map(h => `${h.toUpperCase()} ${money(net.net[h])}`).join(" · ")}).`
+      + ` Blocked input ${money(net.blocked_total)} is shown separately and never netted.`
+    : `No data yet: ${net.reason}`);
+}
+
+function renderReconciliation() {
+  const rec = state.accounts.reconciliation;
+  const out = [];
+  if (rec) {
+    rec.forms.forEach(f => {
+      if (!f.filed) {
+        out.push(`<tr><td class="strong">${esc(f.form)}</td><td colspan="5" class="muted">No filed return is recorded for this month.</td></tr>`);
+        return;
+      }
+      f.checks.forEach(c => {
+        const result = c.ok === true ? `<span class="chip ok">Matches</span>`
+          : c.ok === false ? `<span class="chip bad">Difference</span>`
+          : `<span class="muted">${esc(c.reason || "Not comparable")}</span>`;
+        out.push(`<tr><td class="strong">${esc(f.form)}</td><td>${esc(c.label)}</td>
+          <td class="n">${money(c.filed)}</td>
+          <td class="n">${c.computed == null ? "No data yet" : money(c.computed)}</td>
+          <td class="n">${c.difference == null ? "–" : money(c.difference)}</td><td>${result}</td></tr>`);
+      });
+    });
+  }
+  $("#recrows").innerHTML = out.join("");
+  empty($("#recempty"), !out.length,
+    rec ? "No filed return is recorded for this month." : "Reconciliation could not be loaded.",
+    rec ? " Record the figures reported as filed to compare them with the registers." : " Use “Compare” to try again.");
+  if (rec) {
+    $("#recNote").textContent = `${MONTHS[rec.month - 1]} ${rec.year} · computed payable `
+      + (rec.computed.tax_payable == null ? "No data yet" : money(rec.computed.tax_payable));
+    const filed = state.accounts.filedReturns || [];
+    const line = filed.length
+      ? `Recorded filings: ${filed.map(r => `${r.form} ${MONTHS[r.month - 1]} ${r.year}${r.reference ? " (" + r.reference + ")" : ""}`).join(" · ")}. `
+      : "";
+    $("#recGap").textContent = line + (rec.reason
+      || "Filed figures are what the practitioner reported; a difference is shown, not resolved.");
+  }
+}
+
+function renderStatutory() {
+  const dues = state.accounts.dues;
+  const rows = dues ? dues.summary : [];
+  $("#sdrows").innerHTML = rows.map(h => `<tr><td class="strong">${esc(h.label)}</td>
+    <td class="n">${h.withheld_to_date == null ? "No data yet" : money(h.withheld_to_date)}</td>
+    <td class="n">${money(h.deposited_to_date)}</td>
+    <td class="n">${money(h.deposited_in_window)}</td>
+    <td class="n strong">${h.outstanding == null ? "No data yet" : money(h.outstanding)}</td>
+    <td>${h.reason ? `<span class="muted">${esc(h.reason)}</span>` : `<span class="chip ok">Available</span>`}</td></tr>`).join("");
+  empty($("#sdempty"), !rows.length,
+    dues ? "Statutory dues could not be built." : "TDS and statutory dues could not be loaded.",
+    dues ? (dues.reason || " No deduction is recorded up to the window end.") : " Use “Build dues” to try again.");
+  if (dues) {
+    $("#sdNote").textContent = `${fmtDate(dues.from)} to ${fmtDate(dues.to)} · withheld and deposited are cumulative to the window end`;
+    const bits = [];
+    if (dues.vendor_tds.count) {
+      bits.push(`Vendor TDS ${money(dues.vendor_tds.total)} across ${plural(dues.vendor_tds.count, "bill")}`);
+    }
+    if (dues.payroll.available) {
+      bits.push(`Payroll ${plural(dues.payroll.periods.length, "approved period")}`);
+    }
+    if (dues.payroll.unmapped_reason) bits.push(dues.payroll.unmapped_reason);
+    $("#sdDetail").textContent = bits.join(" · ") || dues.note;
+  }
+  const challans = state.accounts.challans || [];
+  $("#chrows").innerHTML = challans.map(c => `<tr><td class="strong">${esc(c.challan_number)}</td>
+    <td>${esc(c.label)}</td><td>${esc(c.paid_on)}</td>
+    <td>${MONTHS[c.period_month - 1]} ${c.period_year}</td><td>${esc(c.section || "–")}</td>
+    <td class="n strong">${money(c.amount)}</td></tr>`).join("");
+  empty($("#chempty"), !challans.length, "No challan is recorded.",
+    " A challan reduces the outstanding balance it settles.");
+}
+
+async function loadInputGst() {
+  const from = $("#igFrom").value, to = $("#igTo").value;
+  const qs = new URLSearchParams();
+  if (from) qs.set("date_from", from);
+  if (to) qs.set("date_to", to);
+  const query = qs.toString() ? "?" + qs : "";
+  const [reg, net] = await Promise.all([
+    api(`/api/accounts/input-gst${query}`), api(`/api/accounts/gst-net${query}`)]);
+  if (!reg.ok) return toast(reg, "Input register could not be built");
+  state.accounts.inputGst = reg.body;
+  state.accounts.netGst = net.ok ? net.body : null;
+  renderInputGst();
+}
+
+async function loadReconciliation() {
+  const year = Number($("#recYear").value) || new Date().getFullYear();
+  const month = Number($("#recMonth").value) || new Date().getMonth() + 1;
+  const [rec, rets] = await Promise.all([
+    api(`/api/accounts/gst-reconciliation?year=${year}&month=${month}`),
+    api(`/api/accounts/gst-returns?year=${year}`)]);
+  if (!rec.ok) return toast(rec, "Reconciliation could not be built");
+  state.accounts.reconciliation = rec.body;
+  state.accounts.filedReturns = rets.ok ? rets.body.rows : [];
+  renderReconciliation();
+}
+
+async function loadStatutory() {
+  const from = $("#sdFrom").value, to = $("#sdTo").value;
+  const qs = new URLSearchParams();
+  if (from) qs.set("date_from", from);
+  if (to) qs.set("date_to", to);
+  const query = qs.toString() ? "?" + qs : "";
+  const [dues, challans] = await Promise.all([
+    api(`/api/accounts/statutory-dues${query}`), api("/api/accounts/statutory-challans")]);
+  if (!dues.ok) return toast(dues, "Statutory dues could not be built");
+  state.accounts.dues = dues.body;
+  state.accounts.challans = challans.ok ? challans.body.rows : [];
+  renderStatutory();
+}
+
+function openAccountsStatements() {
+  if (!can("accounts:read")) return;
+  ["piNewBtn", "grNewBtn", "chNewBtn", "lhNewBtn", "vNewBtn", "bankNewBtn"].forEach(id => {
+    const el = $("#" + id);
+    if (el) el.classList.toggle("hide", !can("accounts:write"));
+  });
+  const today = new Date();
+  if ($("#recYear") && !$("#recYear").value) $("#recYear").value = today.getFullYear();
+  const sel = $("#recMonth");
+  if (sel && !sel.value) {
+    sel.innerHTML = MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join("");
+    sel.value = today.getMonth() + 1;
+  }
+  if ($("#sdFrom") && !$("#sdFrom").value) $("#sdFrom").value = isoDay(0).slice(0, 8) + "01";
+  if ($("#sdTo") && !$("#sdTo").value) $("#sdTo").value = isoDay(0);
+  if ($("#bsAsOf") && !$("#bsAsOf").value) $("#bsAsOf").value = isoDay(0);
+  if ($("#obFy") && !$("#obFy").value) $("#obFy").value = currentFyLabel();
+  if ($("#vFrom") && !$("#vFrom").value) $("#vFrom").value = isoDay(0).slice(0, 8) + "01";
+  if ($("#vTo") && !$("#vTo").value) $("#vTo").value = isoDay(0);
+  if ($("#dbFrom") && !$("#dbFrom").value) $("#dbFrom").value = isoDay(0).slice(0, 8) + "01";
+  if ($("#dbTo") && !$("#dbTo").value) $("#dbTo").value = isoDay(0);
+  prepareRbdInputs();
+  if (!state.accounts.inputGst) loadInputGst();
+  if (!state.accounts.reconciliation) loadReconciliation();
+  if (!state.accounts.dues) loadStatutory();
+  if (!state.accounts.years) loadPeriods();
+  const lg = state.accounts.ledger;
+  if (!lg.heads) loadLedgerHeads();
+  if (!lg.openings) loadOpenings();
+  if (!lg.sheet) loadBalanceSheet();
+  if (!lg.vouchers) loadVouchers();
+  if (!lg.daybook) loadDayBook();
+  if (!lg.statements) loadBankStatements();
+  renderBankDetail();
+}
+
+function newPurchaseInvoice() {
+  const suppliers = (state.suppliers || []).filter(s => s.status !== "inactive");
+  if (!suppliers.length) return toast({ok: false, status: "—",
+    body: {detail: "Add an active supplier first."}}, "No supplier to bill");
+  openDrawer("Capture a supplier bill",
+    "The tax the supplier charged, head by head. This records input credit and does not change payables.", `
+    <form id="piForm" novalidate>
+      <label for="pi-supplier">Supplier</label>
+      <select id="pi-supplier" name="supplier_id">${suppliers.map(s =>
+        `<option value="${s.id}">${esc(s.code)} · ${esc(s.name)}</option>`).join("")}</select>
+      <div class="row2">
+        <div><label for="pi-number">Supplier invoice number</label><input id="pi-number" name="supplier_invoice_number" autocomplete="off"></div>
+        <div><label for="pi-date">Invoice date</label><input id="pi-date" name="invoice_date" type="date" value="${isoDay(0)}"></div>
+      </div>
+      <div class="row2">
+        <div><label for="pi-taxable">Taxable value (₹)</label><input id="pi-taxable" name="taxable_value" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="pi-cgst">CGST (₹)</label><input id="pi-cgst" name="cgst_amount" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <div class="row2">
+        <div><label for="pi-sgst">SGST (₹)</label><input id="pi-sgst" name="sgst_amount" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="pi-igst">IGST (₹)</label><input id="pi-igst" name="igst_amount" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <div class="row2">
+        <div><label for="pi-cess">Cess (₹)</label><input id="pi-cess" name="cess_amount" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="pi-round">Round off (₹)</label><input id="pi-round" name="round_off" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <label><input type="checkbox" id="pi-itc" name="itc_eligible" checked> Input credit is eligible</label>
+      <div class="row2">
+        <div><label for="pi-tds-section">TDS section</label><input id="pi-tds-section" name="tds_section" placeholder="194C, optional" autocomplete="off"></div>
+        <div><label for="pi-tds-amount">TDS amount (₹)</label><input id="pi-tds-amount" name="tds_amount" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <label for="pi-note">Note</label><input id="pi-note" name="note" placeholder="Optional" autocomplete="off">
+      <div class="note">A bill is never edited. A wrong one is reversed with a reason and kept on file.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save bill</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+async function savePurchaseInvoice(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const number = f.supplier_invoice_number.value.trim();
+  if (!number) { err.textContent = "Enter the supplier's invoice number."; return; }
+  if (!(Number(f.taxable_value.value) >= 0)) { err.textContent = "Enter the taxable value."; return; }
+  const body = {
+    supplier_id: Number(f.supplier_id.value),
+    supplier_invoice_number: number,
+    invoice_date: f.invoice_date.value,
+    taxable_value: f.taxable_value.value || "0",
+    cgst_amount: f.cgst_amount.value || "0",
+    sgst_amount: f.sgst_amount.value || "0",
+    igst_amount: f.igst_amount.value || "0",
+    cess_amount: f.cess_amount.value || "0",
+    round_off: f.round_off.value || "0",
+    itc_eligible: f.itc_eligible.checked,
+    tds_amount: f.tds_amount.value || "0",
+    note: f.note.value.trim() || null
+  };
+  if (f.tds_section.value.trim()) body.tds_section = f.tds_section.value.trim();
+  btn.disabled = true;
+  const res = await api("/api/accounts/purchase-invoices", {method: "POST", body});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); toast(res, "Supplier bill captured");
+  await Promise.all([loadInputGst(), loadReconciliation()]);
+}
+
+function reversePurchaseInvoice(id) {
+  openDrawer("Reverse a supplier bill",
+    "The bill stays on file and leaves the input register.", `
+    <form id="piReverseForm" data-id="${id}" novalidate>
+      <label for="pir-reason">Reason</label><input id="pir-reason" name="reason" autocomplete="off">
+      <div class="note">The original row stays; its status becomes Reversed and it no longer counts as input credit.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Reverse bill</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`);
+}
+
+async function savePurchaseInvoiceReverse(form) {
+  const err = $(".err", form);
+  const reason = form.elements.reason.value.trim();
+  if (reason.length < 5) { err.textContent = "Give a reason of at least 5 characters."; return; }
+  const res = await api(`/api/accounts/purchase-invoices/${form.dataset.id}/reverse`,
+                        {method: "POST", body: {reason}});
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); toast(res, "Supplier bill reversed");
+  await Promise.all([loadInputGst(), loadReconciliation()]);
+}
+
+function newGstReturn() {
+  const year = Number($("#recYear").value) || new Date().getFullYear();
+  const month = Number($("#recMonth").value) || new Date().getMonth() + 1;
+  openDrawer("Record filed GST figures",
+    "What the practitioner reported as filed. The application compares it with the registers; it never files.", `
+    <form id="grForm" novalidate>
+      <div class="row2">
+        <div><label for="gr-form">Form</label><select id="gr-form" name="form"><option>GSTR-3B</option><option>GSTR-1</option></select></div>
+        <div><label for="gr-filed">Filed on</label><input id="gr-filed" name="filed_on" type="date" value="${isoDay(0)}"></div>
+      </div>
+      <div class="row2">
+        <div><label for="gr-year">Year</label><input id="gr-year" name="year" type="number" min="2000" max="2100" value="${year}"></div>
+        <div><label for="gr-month">Month</label><select id="gr-month" name="month">${MONTHS.map((m, i) =>
+          `<option value="${i + 1}"${i + 1 === month ? " selected" : ""}>${m}</option>`).join("")}</select></div>
+      </div>
+      <label for="gr-ref">Portal reference</label><input id="gr-ref" name="reference" placeholder="ARN, optional" autocomplete="off">
+      <div class="note">Outward supplies as reported</div>
+      <div class="row2">
+        <div><label for="gr-taxable">Taxable value (₹)</label><input id="gr-taxable" name="outward_taxable" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="gr-cgst">CGST (₹)</label><input id="gr-cgst" name="outward_cgst" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <div class="row2">
+        <div><label for="gr-sgst">SGST (₹)</label><input id="gr-sgst" name="outward_sgst" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="gr-igst">IGST (₹)</label><input id="gr-igst" name="outward_igst" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <div class="row2">
+        <div><label for="gr-cess">Cess (₹)</label><input id="gr-cess" name="outward_cess" inputmode="decimal" placeholder="0.00"></div>
+        <div></div>
+      </div>
+      <div class="note">Input credit as reported — GSTR-3B only</div>
+      <div class="row2">
+        <div><label for="gr-itc-cgst">ITC CGST (₹)</label><input id="gr-itc-cgst" name="itc_cgst" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="gr-itc-sgst">ITC SGST (₹)</label><input id="gr-itc-sgst" name="itc_sgst" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <div class="row2">
+        <div><label for="gr-itc-igst">ITC IGST (₹)</label><input id="gr-itc-igst" name="itc_igst" inputmode="decimal" placeholder="0.00"></div>
+        <div><label for="gr-itc-cess">ITC cess (₹)</label><input id="gr-itc-cess" name="itc_cess" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <label for="gr-note">Note</label><input id="gr-note" name="note" placeholder="Optional" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save filed figures</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+async function saveGstReturn(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const body = {form: f.form.value, year: Number(f.year.value), month: Number(f.month.value),
+                filed_on: f.filed_on.value, reference: f.reference.value.trim() || null,
+                note: f.note.value.trim() || null};
+  ["outward_taxable", "outward_cgst", "outward_sgst", "outward_igst", "outward_cess",
+   "itc_cgst", "itc_sgst", "itc_igst", "itc_cess"].forEach(key => {
+    body[key] = f[key].value || "0";
+  });
+  btn.disabled = true;
+  const res = await api("/api/accounts/gst-returns", {method: "POST", body});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); toast(res, "Filed figures recorded");
+  $("#recYear").value = body.year;
+  $("#recMonth").value = String(body.month);
+  await loadReconciliation();
+}
+
+function newChallan() {
+  const year = Number($("#recYear").value) || new Date().getFullYear();
+  const month = Number($("#recMonth").value) || new Date().getMonth() + 1;
+  openDrawer("Record a statutory challan",
+    "Money paid to the government. It reduces the outstanding balance it settles.", `
+    <form id="chForm" novalidate>
+      <div class="row2">
+        <div><label for="ch-kind">Head</label><select id="ch-kind" name="kind">
+          <option value="pf">Provident fund</option><option value="esi">Employee state insurance</option>
+          <option value="pt">Professional tax</option><option value="tds">Tax deducted at source</option></select></div>
+        <div><label for="ch-amount">Amount (₹)</label><input id="ch-amount" name="amount" inputmode="decimal" placeholder="0.00"></div>
+      </div>
+      <div class="row2">
+        <div><label for="ch-number">Challan number</label><input id="ch-number" name="challan_number" autocomplete="off"></div>
+        <div><label for="ch-bsr">BSR code</label><input id="ch-bsr" name="bsr_code" placeholder="Optional" autocomplete="off"></div>
+      </div>
+      <div class="row2">
+        <div><label for="ch-paid">Paid on</label><input id="ch-paid" name="paid_on" type="date" value="${isoDay(0)}"></div>
+        <div><label for="ch-section">Section</label><input id="ch-section" name="section" placeholder="Optional" autocomplete="off"></div>
+      </div>
+      <div class="row2">
+        <div><label for="ch-year">Period year</label><input id="ch-year" name="period_year" type="number" min="2000" max="2100" value="${year}"></div>
+        <div><label for="ch-month">Period month</label><select id="ch-month" name="period_month">${MONTHS.map((m, i) =>
+          `<option value="${i + 1}"${i + 1 === month ? " selected" : ""}>${m}</option>`).join("")}</select></div>
+      </div>
+      <label for="ch-note">Note</label><input id="ch-note" name="note" placeholder="Optional" autocomplete="off">
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save challan</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+
+async function saveChallan(form) {
+  const f = form.elements, err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  if (!f.challan_number.value.trim()) { err.textContent = "Enter the challan number."; return; }
+  if (!(Number(f.amount.value) > 0)) { err.textContent = "Enter an amount greater than zero."; return; }
+  const body = {kind: f.kind.value, challan_number: f.challan_number.value.trim(),
+                bsr_code: f.bsr_code.value.trim() || null, paid_on: f.paid_on.value,
+                amount: f.amount.value, period_year: Number(f.period_year.value),
+                period_month: Number(f.period_month.value),
+                section: f.section.value.trim() || null,
+                note: f.note.value.trim() || null};
+  btn.disabled = true;
+  const res = await api("/api/accounts/statutory-challans", {method: "POST", body});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer(); toast(res, "Challan recorded");
+  await loadStatutory();
+}
+
+
 /* ---------- accounts performance (accounts:reports) ----------
    The statements above need accounts:read. This section is the narrower
    accounts:reports right: the Administrator, the MD or an Accounts head the
@@ -2156,7 +3588,73 @@ const accQuery = () => {
   return p.toString();
 };
 const ACC_PANELS = ["#accPerfPanel", "#accPnlPanel", "#accCmpPanel", "#accTrendPanel",
-                    "#accStatePanel", "#accDrillPanel", "#accGapPanel"];
+                    "#accStatePanel", "#accGapPanel"];
+/* Each Accounts subsection is its own address, so a view can be bookmarked,
+   opened from a dashboard tile or refreshed without the whole page of panels. */
+const ACC_SECTIONS = [
+  {key: "reports", label: "Performance and P&L", reports: true},
+  {key: "receivables", label: "Receivables"},
+  {key: "receivables-by-distributor", label: "Receivables by distributor"},
+  {key: "ageing", label: "Ageing"},
+  {key: "payables", label: "Payables"},
+  {key: "cash", label: "Receipts and payments"},
+  {key: "gst-out", label: "GST outward"},
+  {key: "gst-in", label: "Input GST"},
+  {key: "gst-returns", label: "GST returns"},
+  {key: "statutory", label: "TDS and statutory"},
+  {key: "trial-balance", label: "Trial balance"},
+  {key: "ledger-heads", label: "Ledger heads"},
+  {key: "openings", label: "Opening balances"},
+  {key: "balance-sheet", label: "Balance sheet"},
+  {key: "vouchers", label: "Vouchers"},
+  {key: "day-book", label: "Day book"},
+  {key: "bank", label: "Bank reconciliation"},
+  {key: "years", label: "Financial years"},
+  {key: "locks", label: "Month locks"},
+];
+const accSectionAllowed = s => s.reports ? accAllowed() : can("accounts:read");
+const defaultAccountsSection = () => accAllowed() ? "reports" : "receivables";
+
+function renderAccountsNav() {
+  const nav = $("#accNav");
+  if (!nav) return;
+  const visible = ACC_SECTIONS.filter(accSectionAllowed);
+  if (nav.dataset.count !== String(visible.length)) {
+    nav.innerHTML = visible.map(s =>
+      `<a href="#/accounts/${esc(s.key)}" data-acc-section="${esc(s.key)}">${esc(s.label)}</a>`).join("");
+    nav.dataset.count = String(visible.length);
+  }
+  $$("a", nav).forEach(a => {
+    const on = a.dataset.accSection === state.acc.section;
+    a.classList.toggle("on", on);
+    if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  });
+}
+
+function applyAccountsSection() {
+  const sec = (() => {
+    const current = ACC_SECTIONS.find(s => s.key === state.acc.section && accSectionAllowed(s));
+    return current ? current.key : defaultAccountsSection();
+  })();
+  state.acc.section = sec;
+  renderAccountsNav();
+  ACC_PANELS.forEach(sel => {
+    const el = $(sel);
+    if (el) el.classList.toggle("hide", !(accAllowed() && sec === "reports"));
+  });
+  const scope = $("#v-accounts") || document;
+  $$("[data-acc-sec]", scope).forEach(el => {
+    el.classList.toggle("hide", !(can("accounts:read") && el.dataset.accSec === sec));
+  });
+}
+
+function openAccountsSectionData() {
+  if (!can("accounts:read")) return;
+  if (state.acc.section === "gst-out" && !state.accounts.gst) loadGstRegister();
+  if (state.acc.section === "trial-balance" && !state.accounts.tb) loadTrialBalance();
+  if (state.acc.section === "receivables-by-distributor" && !state.acc.rbd.data
+      && !state.acc.rbd.loading) loadReceivablesByDistributor();
+}
 
 function renderDashAccounts(a) {
   const panel = $("#accOverviewPanel"), el = $("#accOverview");
@@ -2179,14 +3677,14 @@ function renderDashAccounts(a) {
        ? `${a.invoices_costed} of ${a.invoices_total} invoices fully costed; the rest are named in the gaps.`
        : "Net revenue less cost of goods sold.", null, a.gross_profit_label],
     ["Expenses", a.expenses, "#/expenses",
-     "Approved entries in the window; non-creditable GST is part of the cost.",
-     a.expenses_gap],
+     a.expenses_note || "Approved entries in the window; non-creditable GST is part of the cost.",
+     a.expenses_gap, null, a.expenses_partial ? "Partial" : null],
     ["Net profit", a.net_profit, "#/accounts", a.net_profit_note || "Cost, expenses and payroll are not all complete.",
      a.net_profit_gap],
   ];
-  el.innerHTML = tiles.map(([label, value, href, note, gap, shown]) => gap
+  el.innerHTML = tiles.map(([label, value, href, note, gap, shown, partial]) => gap
     ? `<a class="kpi cmp-card-gap" href="${esc(href)}"><span class="kpi-label">${esc(label)}<span class="chip off">Gap ${esc(gap)}</span></span><span class="kpi-value">No data yet</span><span class="kpi-note">${esc(note)}</span></a>`
-    : `<a class="kpi" href="${esc(href)}"><span class="kpi-label">${esc(shown || label)}</span><span class="kpi-value">${esc(accMoney(value))}</span><span class="kpi-note">${esc(note)}</span></a>`).join("");
+    : `<a class="kpi" href="${esc(href)}"><span class="kpi-label">${esc(shown || label)}${partial ? ` <span class="chip off">Partial</span>` : ""}</span><span class="kpi-value">${esc(accMoney(value))}</span><span class="kpi-note">${esc(note)}</span></a>`).join("");
 }
 
 function openAccountsReports() {
@@ -2226,7 +3724,7 @@ async function loadAccountsCompare() {
 
 function renderAccountsReport() {
   const allowed = accAllowed();
-  ACC_PANELS.forEach(sel => { const el = $(sel); if (el) el.classList.toggle("hide", !allowed); });
+  applyAccountsSection();
   if (!allowed) return;
   const s = state.acc, r = s.report, cmp = s.cmp;
   const fromEl = $("#accFrom"), toEl = $("#accTo"), monthEl = $("#accMonth");
@@ -2254,7 +3752,7 @@ function renderAccountsReport() {
 
   if (!r) {
     $("#accKpis").innerHTML = "";
-    ["#accPnl", "#accCmp", "#accTrend", "#accStates", "#accDrill", "#accGaps"].forEach(sel => {
+    ["#accPnl", "#accCmp", "#accTrend", "#accStates", "#accGaps"].forEach(sel => {
       const el = $(sel); if (el) el.innerHTML = `<p class="gap-note">No figures loaded yet.</p>`;
     });
     return;
@@ -2274,7 +3772,6 @@ function renderAccountsReport() {
   renderAccPnl(r.profit_and_loss);
   renderAccTrend(r);
   renderAccStates(r);
-  renderAccDrill(r.receivables_by_distributor);
   renderAccGaps(r.gaps);
   renderAccountsCompare(cmp);
 }
@@ -2287,7 +3784,10 @@ function renderAccPnl(pnl) {
       return `<tr><td class="strong">${esc(row.label)}</td><td class="n"><span class="chip off">Gap ${esc(row.gap)}</span> <span class="gap-note">No data yet. ${esc(row.note || "")}</span>${fix}</td></tr>`;
     }
     const note = row.note ? ` <small>${esc(row.note)}</small>` : "";
-    return `<tr><td class="strong">${esc(row.label)}</td><td class="n strong">${esc(accMoney(row.value))}${note}</td></tr>`;
+    const partial = row.partial ? ` <span class="chip off">Partial</span>` : "";
+    const fix = row.partial && row.fix
+      ? ` <a class="link-btn" href="${esc(row.fix)}">Fix this</a>` : "";
+    return `<tr><td class="strong">${esc(row.label)}</td><td class="n strong">${esc(accMoney(row.value))}${partial}${note}${fix}</td></tr>`;
   }).join("");
   const notes = (pnl.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
   $("#accPnl").innerHTML = `<div class="tw"><table>
@@ -2314,7 +3814,7 @@ function renderAccTrend(r) {
           + `<td class="n">${esc(accMoney(m.payments))}</td><td class="n">${esc(accMoney(m.net_cash))}</td>`
           + `<td class="n">${esc(accMoney(m.output_gst))}</td><td class="n">${esc(accMoney(m.returns))}</td></tr>`;
       }).join("")
-    + `</tbody></table></div><p class="muted panel-note">Net cash is receipts minus supplier payments. Output GST only; input tax is not captured (GAP-A05).</p>`;
+    + `</tbody></table></div><p class="muted panel-note">Net cash is receipts minus supplier payments. GST here is output tax on issued documents; input tax and net payable come from captured supplier bills in the input register.</p>`;
 }
 
 function renderAccStates(r) {
@@ -2338,19 +3838,127 @@ function renderAccStates(r) {
     + `</tbody></table></div><p class="muted panel-note">Outstanding is grouped by the distributor's current state, because an invoice stores no distributor state snapshot apart from the buyer state used for revenue.</p>`;
 }
 
-function renderAccDrill(drill) {
-  if (!drill) return;
+/* ---------- receivables by distributor (accounts:read) ----------
+   Its own navigation section with one From - To date range. Moving the dates
+   does not reload anything; the report changes only when Apply is pressed.
+   The server builds every figure from the documents; this screen only shows
+   the answer and exports the same rows. */
+function prepareRbdInputs() {
+  const s = state.acc.rbd, today = isoDay(0);
+  if (!s.from) { s.from = today.slice(0, 8) + "01"; s.to = today; }
+  const from = $("#rbdFrom"), to = $("#rbdTo");
+  if (from) { from.max = today; if (!from.value) from.value = s.from; }
+  if (to) { to.max = today; if (!to.value) to.value = s.to; }
+}
+
+async function loadReceivablesByDistributor() {
+  if (!can("accounts:read")) return;
+  prepareRbdInputs();
+  const s = state.acc.rbd, seq = ++s.seq;
+  s.loading = true; s.error = null;
+  renderRbd();
+  const params = new URLSearchParams({from_date: s.from, to_date: s.to});
+  const res = await api(`/api/accounts/receivables-by-distributor?${params.toString()}`);
+  if (seq !== s.seq || !state.user) return;
+  s.loading = false;
+  if (res.ok && res.body && !Array.isArray(res.body)) {
+    s.data = res.body; s.error = null;
+    s.from = res.body.from; s.to = res.body.to;
+    syncRbdInputs(s.from, s.to);
+  } else {
+    s.error = detail(res.body);
+  }
+  renderRbd();
+}
+
+function renderRbd() {
+  const s = state.acc.rbd, d = s.data;
+  if (!$("#rbdRows")) return;
+  $("#rbdErr").classList.toggle("hide", !s.error);
+  $("#rbdErr").textContent = s.error
+    ? `The receivables report could not be loaded. Last good figures are kept. ${s.error}` : "";
+  $("#rbdNote").textContent = d
+    ? `${fmtDate(d.from)} to ${fmtDate(d.to)} · opening, movements and closing at ${fmtDate(d.to)}${s.loading ? " · refreshing…" : ""}`
+    : s.loading ? "Loading from the server…" : "Choose a From – To date range and click Apply.";
+  if (!d) {
+    $("#rbdRows").innerHTML = "";
+    $("#rbdFoot").innerHTML = "";
+    empty($("#rbdEmpty"), !s.loading, "No figures loaded yet.", " Choose a window to build the report.");
+    $("#rbdFootnote").textContent = "";
+    return;
+  }
   const canLedger = can("accounts:read");
-  $("#accDrillNote").textContent = `${drill.count} distributors · ${drill.note}`;
-  const rows = drill.rows || [];
-  $("#accDrill").innerHTML = rows.length ? `<div class="tw"><table>
-      <thead><tr><th>Distributor</th><th>State</th><th class="n">Invoices</th><th class="n">Outstanding</th><th></th></tr></thead><tbody>`
-    + rows.map(x => `<tr><td class="strong">${esc(x.name)}</td><td>${esc(x.state || "–")}</td>`
-        + `<td class="n">${esc(qty(x.invoices))}</td><td class="n strong">${esc(accMoney(x.outstanding))}</td>`
-        + `<td>${canLedger ? `<button class="rowbtn" type="button" data-act="acc-ledger" data-id="${x.distributor_id}">Open ledger</button>`
-                            : `<span class="gap-note">Needs accounts:read for the party ledger.</span>`}</td></tr>`).join("")
-    + `</tbody></table></div>`
-    : `<p class="gap-note">Nothing is outstanding.</p>`;
+  $("#rbdRows").innerHTML = d.rows.map(x => `<tr>
+    <td class="strong">${esc(x.name)}${x.code ? `<br><small>${esc(x.code)}</small>` : ""}</td>
+    <td>${esc(x.state || "–")}</td>
+    <td class="n">${esc(accMoney(x.opening))}</td>
+    <td class="n">${esc(accMoney(x.invoiced))}</td>
+    <td class="n">${esc(accMoney(x.credited))}</td>
+    <td class="n">${esc(accMoney(x.debited))}</td>
+    <td class="n">${esc(accMoney(x.received))}</td>
+    <td class="n strong">${esc(accMoney(x.closing))}</td>
+    <td class="n">${Number(x.overdue) > 0 ? `<span class="bad">${esc(accMoney(x.overdue))}</span>` : esc(accMoney(x.overdue))}</td>
+    <td class="n">${esc(qty(x.open_invoices))}</td>
+    <td>${canLedger ? `<button class="rowbtn" type="button" data-act="acc-ledger" data-id="${esc(x.distributor_id)}">Open ledger</button>` : ""}</td>
+  </tr>`).join("");
+  const t = d.totals;
+  $("#rbdFoot").innerHTML = `<tr><td class="strong">Total</td><td></td>
+    <td class="n strong">${esc(accMoney(t.opening))}</td>
+    <td class="n strong">${esc(accMoney(t.invoiced))}</td>
+    <td class="n strong">${esc(accMoney(t.credited))}</td>
+    <td class="n strong">${esc(accMoney(t.debited))}</td>
+    <td class="n strong">${esc(accMoney(t.received))}</td>
+    <td class="n strong">${esc(accMoney(t.closing))}</td>
+    <td class="n strong">${esc(accMoney(t.overdue))}</td>
+    <td class="n strong">${esc(qty(t.open_invoices))}</td><td></td></tr>`;
+  empty($("#rbdEmpty"), !d.rows.length, "Nothing is owed or has moved in this window.",
+    " Every distributor balance and every movement in the window is zero.");
+  $("#rbdFootnote").textContent = d.note || "";
+}
+
+function syncRbdInputs(from, to) {
+  if ($("#rbdFrom")) $("#rbdFrom").value = from;
+  if ($("#rbdTo")) $("#rbdTo").value = to;
+}
+
+function applyRbdFilter() {
+  const from = $("#rbdFrom") ? $("#rbdFrom").value : "";
+  const to = $("#rbdTo") ? $("#rbdTo").value : "";
+  const s = state.acc.rbd;
+  if (!from || !to) {
+    s.error = "Choose both a From date and a To date before applying.";
+    renderRbd();
+    return;
+  }
+  if (from > to) {
+    s.error = "The From date is after the To date.";
+    renderRbd();
+    return;
+  }
+  s.error = null; s.from = from; s.to = to;
+  syncRbdInputs(from, to);
+  loadReceivablesByDistributor();
+}
+
+function exportRbdCsv() {
+  const d = state.acc.rbd.data;
+  if (!d) {
+    return toast({ok: false, status: "—",
+      body: {detail: "Choose a window so the report is loaded before exporting it."}},
+      "Nothing to export");
+  }
+  const rows = [["HERBANOVA receivables by distributor"], ["From", d.from], ["To", d.to],
+    ["Distributor", "Code", "State", "Opening (INR)", "Invoiced (INR)",
+     "Credit notes (INR)", "Debit notes (INR)", "Received (INR)", "Closing (INR)",
+     "Overdue (INR)", "Invoices issued", "Open invoices", "Overdue invoices"]];
+  (d.rows || []).forEach(x => rows.push([x.name, x.code || "", x.state || "",
+    x.opening, x.invoiced, x.credited, x.debited, x.received, x.closing, x.overdue,
+    x.invoices, x.open_invoices, x.overdue_invoices]));
+  const t = d.totals || {};
+  rows.push(["Total", "", "", t.opening, t.invoiced, t.credited, t.debited, t.received,
+    t.closing, t.overdue, t.invoices, t.open_invoices, t.overdue_invoices]);
+  rows.push([], ["Note", d.note || ""]);
+  downloadCsv(`HERBANOVA_Receivables_by_distributor_${d.from}_${d.to}.csv`, rows);
 }
 
 function renderAccGaps(gaps) {
@@ -2412,6 +4020,80 @@ function setAccWindow(from, to) {
   loadAccountsCompare();
 }
 
+/* A KPI card carries its own window into the section that proves it. The
+   parameter is applied after the section has rendered, so the visible filters
+   and the report agree; nothing is guessed when a parameter is missing. */
+function applyAccountsQuery(params) {
+  if (!params || !params.size) return;
+  const sec = state.acc.section;
+  const from = params.get("from"), to = params.get("to");
+  const asOf = params.get("as_of"), focus = params.get("focus");
+  if (focus === "pnl") {
+    const panel = $("#accPnlPanel");
+    if (panel) {
+      panel.scrollIntoView({behavior: "smooth", block: "start"});
+      panel.classList.add("focus-flash");
+      setTimeout(() => panel.classList.remove("focus-flash"), 1800);
+    }
+  }
+  if (sec === "gst-out" && (from || to)) {
+    if (from) $("#gstFrom").value = from;
+    if (to) $("#gstTo").value = to;
+    loadGstRegister();
+  } else if (sec === "ageing" && asOf) {
+    $("#ageAsOf").value = asOf;
+    loadAgeing();
+  } else if (sec === "receivables-by-distributor" && (from || to)) {
+    state.acc.rbd.from = from || state.acc.rbd.from;
+    state.acc.rbd.to = to || state.acc.rbd.to;
+    syncRbdInputs(state.acc.rbd.from, state.acc.rbd.to);
+    loadReceivablesByDistributor();
+  } else if (sec === "cash" && (from || to)) {
+    if (from) $("#enFrom").value = from;
+    if (to) $("#enTo").value = to;
+    loadEntriesWindow();
+  }
+}
+
+function applyExpensesQuery(params) {
+  if (!params || !params.size) return;
+  const from = params.get("from"), to = params.get("to");
+  if (from) $("#expFrom").value = from;
+  if (to) $("#expTo").value = to;
+  if (from || to) loadExpenses();
+}
+
+/* Receipts and payments can be narrowed to a window. Empty dates keep the
+   previous all-time list, so opening the section directly changes nothing. */
+async function loadEntriesWindow() {
+  if (!can("accounts:read")) return;
+  const from = $("#enFrom") ? $("#enFrom").value : "";
+  const to = $("#enTo") ? $("#enTo").value : "";
+  if (from && to && from > to) {
+    return toast({ok: false, status: "—",
+      body: {detail: "The start date is after the end date."}}, "Check the dates");
+  }
+  const p = new URLSearchParams();
+  if (from) p.set("date_from", from);
+  if (to) p.set("date_to", to);
+  const res = await api(`/api/accounts/payments${p.toString() ? "?" + p : ""}`);
+  if (!res.ok) return toast(res, "Entries could not be loaded");
+  state.accounts.entries = res.body;
+  renderAccounts();
+}
+
+/* The payables list behind the two payables cards. `due=week` narrows it to
+   the same seven-day estimate the card uses; the full list is unchanged. */
+function payablesForView() {
+  const out = state.accounts.outstanding;
+  if (!out) return null;
+  const rows = out.payables.filter(p => Number(p.outstanding) > 0);
+  if (state.acc.payDue !== "week") return rows;
+  const today = isoDay(0);
+  const end = isoDay(new Date(Date.now() + 7 * 86400000));
+  return rows.filter(p => p.due_on && p.due_on >= today && p.due_on <= end);
+}
+
 function exportAccCsv() {
   const r = state.acc.report;
   if (!r) return;
@@ -2428,6 +4110,386 @@ function exportAccCsv() {
     [], ["State", "Invoices", "Revenue", "Output GST", "Returns", "Outstanding"],
     ...(r.states || []).map(x => [x.name, x.invoices, x.revenue, x.output_gst, x.returns, x.outstanding]));
   downloadCsv(`HERBANOVA_Accounts_${r.from}_${r.to}.csv`, rows);
+}
+
+/* ---------- CSV exports for Accounts and FOC ----------
+   Every export reads the same state the screen renders, so the file matches the
+   displayed report and the filters that produced it. Amounts are written as
+   plain decimals so a spreadsheet can add them; a total is the sum of the rows
+   above it, never a second calculation the screen does not show. */
+function csvNotLoaded(label) {
+  toast({ok: false, status: "—",
+    body: {detail: `Load ${label} before exporting it.`}}, "Nothing to export");
+}
+function csvSum(rows, pick) {
+  const paise = rows.reduce((sum, row) => sum + Math.round(Number(pick(row) || 0) * 100), 0);
+  return (paise / 100).toFixed(2);
+}
+function csvRange(from, to) {
+  return [["From", from || "All dates"], ["To", to || "All dates"]];
+}
+
+function exportReceivablesCsv() {
+  const out = state.accounts.outstanding;
+  if (!out) return csvNotLoaded("the receivables list");
+  const rows = out.receivables.filter(r => Number(r.outstanding) > 0);
+  const csv = [["HERBANOVA receivables"], ["As at", isoDay(0)],
+    ["Invoice", "Date", "Distributor", "Payment terms (days)", "Due date",
+     "Value (INR)", "Adjusted by notes (INR)", "Received (INR)", "Outstanding (INR)"]];
+  rows.forEach(r => csv.push([r.number, r.date, r.distributor || "",
+    r.payment_terms_days ?? "", r.due_date || "", r.grand_total, r.adjusted ?? "0.00",
+    r.received, r.outstanding]));
+  csv.push(["Total", "", "", "", "", csvSum(rows, r => r.grand_total),
+    csvSum(rows, r => r.adjusted), csvSum(rows, r => r.received),
+    csvSum(rows, r => r.outstanding)]);
+  csv.push([], ["Note", "Only invoices with an outstanding balance are listed."]);
+  downloadCsv(`HERBANOVA_Receivables_${isoDay(0)}.csv`, csv);
+}
+
+function exportAgeingCsv() {
+  const age = state.accounts.ageing;
+  if (!age) return csvNotLoaded("the ageing report");
+  const rows = [];
+  age.buckets.forEach(b => b.rows.forEach(r => rows.push({...r, bucket: b.label})));
+  const csv = [["HERBANOVA ageing of outstanding invoices"], ["As at", age.as_of],
+    ["Invoice", "Date", "Distributor", "Days", "Bucket", "Due date",
+     "Days overdue", "Outstanding (INR)"]];
+  rows.forEach(r => csv.push([r.number, r.date, r.distributor || "", r.days, r.bucket,
+    r.due_date || "No due date", r.days_overdue, r.outstanding]));
+  age.buckets.forEach(b => csv.push([`Bucket total · ${b.label}`, "", "", "", "",
+    "", `${b.count} invoices`, b.total]));
+  csv.push(["Total", "", "", "", "", "", `${age.count} invoices`, age.total]);
+  csv.push([], ["Due at the as-at day", "Invoices", "Outstanding (INR)"]);
+  [["overdue", "Overdue"], ["due_this_week", "Due within 7 days"],
+   ["not_yet_due", "Due later"], ["no_due_date", "No due date"]].forEach(([key, label]) => {
+    const x = (age.due || {})[key] || {count: 0, total: "0.00"};
+    csv.push([label, x.count, x.total]);
+  });
+  downloadCsv(`HERBANOVA_Ageing_${age.as_of}.csv`, csv);
+}
+
+function exportPayablesCsv() {
+  const rows = payablesForView();
+  if (!rows) return csvNotLoaded("the payables list");
+  const weekly = state.acc.payDue === "week";
+  const csv = [["HERBANOVA payables"], ["As at", isoDay(0)],
+    ["Filter", weekly ? "Estimated to fall due within 7 days" : "All outstanding orders"],
+    ["Purchase order", "Supplier", "Last received", "Payment terms (days)", "Due (estimated)",
+     "Received value (INR)", "Paid (INR)", "Outstanding (INR)"]];
+  rows.forEach(p => csv.push([p.number, p.supplier || "", p.received_on || "",
+    p.terms_days ?? "", p.due_on || "",
+    p.received_value, p.paid, p.outstanding]));
+  csv.push(["Total", "", "", "", "", csvSum(rows, p => p.received_value),
+    csvSum(rows, p => p.paid), csvSum(rows, p => p.outstanding)]);
+  csv.push([], ["Note", weekly
+    ? "Due dates are estimated from each supplier's current payment terms and the latest receipt."
+    : "Only orders with an outstanding balance are listed; due dates are estimated from current terms."]);
+  downloadCsv(`HERBANOVA_Payables_${isoDay(0)}.csv`, csv);
+}
+
+function exportEntriesCsv() {
+  if (!state.accounts.outstanding) return csvNotLoaded("the receipts and payments list");
+  const rows = state.accounts.entries || [];
+  const csv = [["HERBANOVA receipts and payments"], ["As at", isoDay(0)],
+    ["Entry", "Date", "Kind", "Purpose", "Party", "Against", "Allocated (INR)",
+     "Advance (INR)", "Amount (INR)", "Mode", "Reference", "Notes"]];
+  rows.forEach(e => {
+    const against = (e.allocations || []).map(a =>
+      `${a.number || "—"} ${a.amount}`).join("; ")
+      || e.invoice_number || e.purchase_order_number || "Advance";
+    csv.push([e.number, e.paid_on, e.kind === "receipt" ? "Receipt" : "Payment",
+      e.purpose || "", e.party || "", against, e.allocated ?? "", e.advance ?? "",
+      e.amount, e.mode, e.reference || "", e.notes || ""]);
+  });
+  const receipts = rows.filter(e => e.kind === "receipt");
+  const payments = rows.filter(e => e.kind === "payment");
+  csv.push(["Total receipts", "", "", "", "", "", csvSum(receipts, e => e.allocated),
+    csvSum(receipts, e => e.advance), csvSum(receipts, e => e.amount), "", "", ""]);
+  csv.push(["Total payments", "", "", "", "", "", csvSum(payments, e => e.allocated),
+    csvSum(payments, e => e.advance), csvSum(payments, e => e.amount), "", "", ""]);
+  csv.push(["Net receipts less payments", "", "", "", "", "", "", "",
+    (Math.round((Number(csvSum(receipts, e => e.amount)) - Number(csvSum(payments, e => e.amount))) * 100) / 100).toFixed(2),
+    "", "", ""]);
+  csv.push([], ["Note", "An entry is never edited; a mistake is corrected by recording the opposite one."]);
+  downloadCsv(`HERBANOVA_Receipts_and_payments_${isoDay(0)}.csv`, csv);
+}
+
+function exportGstRegisterCsv() {
+  const reg = state.accounts.gst;
+  if (!reg) return csvNotLoaded("the GST register");
+  const cols = ["Document", "Date", "Buyer", "GSTIN", "Place of supply", "Supply kind",
+    "Taxable (INR)", "CGST (INR)", "SGST (INR)", "IGST (INR)", "Cess (INR)", "Total (INR)"];
+  const csv = [["HERBANOVA GST register · outward supplies"], ...csvRange(reg.from, reg.to),
+    ["B2B invoices", ...cols.slice(1)]];
+  (reg.b2b || []).forEach(r => csv.push([r.number, r.date, r.party || "", r.gstin || "",
+    r.place_of_supply, r.kind || "", r.taxable, r.cgst, r.sgst, r.igst, r.cess, r.total]));
+  csv.push([], ["Credit notes", ...cols.slice(1)]);
+  (reg.credit_notes || []).forEach(r => csv.push([r.number, r.date, "", "", "", "",
+    r.taxable, r.cgst, r.sgst, r.igst, r.cess, r.total]));
+  csv.push([], ["Debit notes", ...cols.slice(1)]);
+  (reg.debit_notes || []).forEach(r => csv.push([r.number, r.date, "", "", "", "",
+    r.taxable, r.cgst, r.sgst, r.igst, r.cess, r.total]));
+  const t = reg.totals || {};
+  csv.push([], ["Total · invoices plus debit notes less credit notes", "", "", "", "", "",
+    t.taxable, t.cgst, t.sgst, t.igst, t.cess, t.total]);
+  csv.push(["Note", reg.note || ""]);
+  const tag = `${reg.from || "all"}_${reg.to || "all"}`;
+  downloadCsv(`HERBANOVA_GST_outward_${tag}.csv`, csv);
+}
+
+function exportInputGstCsv() {
+  const reg = state.accounts.inputGst;
+  if (!reg) return csvNotLoaded("the input register");
+  const cols = ["Bill", "Date", "Supplier", "Supplier bill no.", "Taxable (INR)",
+    "CGST (INR)", "SGST (INR)", "IGST (INR)", "Cess (INR)", "Round off (INR)",
+    "Total (INR)", "ITC", "Status", "TDS section", "TDS rate", "TDS amount",
+    "Reversal reason", "Note"];
+  const csv = [["HERBANOVA input GST · supplier bills"], ...csvRange(reg.from, reg.to), cols];
+  (reg.rows || []).forEach(r => csv.push([r.number, r.invoice_date, r.supplier || "",
+    r.supplier_invoice_number, r.taxable, r.cgst, r.sgst, r.igst, r.cess, r.round_off,
+    r.total, r.itc_eligible ? "Eligible" : "Blocked",
+    r.status === "reversed" ? "Reversed" : "Posted", r.tds_section || "",
+    r.tds_rate ?? "", r.tds_amount, r.reversal_reason || "", r.note || ""]));
+  const totalsRow = (label, t) => ["", "", "", "", t.taxable, t.cgst, t.sgst, t.igst,
+    t.cess, t.round_off, t.total, "", "", "", "", "", "", ""].map((v, i) => i === 0 ? label : v);
+  csv.push(totalsRow("Total posted bills", reg.totals || {}));
+  csv.push(totalsRow("Eligible ITC", reg.eligible || {}));
+  csv.push(totalsRow("Blocked ITC", reg.blocked || {}));
+  const net = state.accounts.netGst;
+  csv.push([], ["Net GST payable", net && net.available ? net.net_total : "No data yet",
+    net && net.available ? "" : (net ? net.reason : "The net GST figure could not be loaded.")]);
+  if (net && net.available) {
+    csv.push(["Output GST", net.output_total]);
+    csv.push(["Eligible input", net.input_total]);
+    csv.push(["Blocked input (not netted)", net.blocked_total]);
+  }
+  const tag = `${reg.from || "all"}_${reg.to || "all"}`;
+  downloadCsv(`HERBANOVA_Input_GST_${tag}.csv`, csv);
+}
+
+function exportStatutoryCsv() {
+  const dues = state.accounts.dues;
+  if (!dues) return csvNotLoaded("TDS and statutory dues");
+  const rows = dues.summary || [];
+  const csv = [["HERBANOVA TDS and statutory dues"], ...csvRange(dues.from, dues.to),
+    ["Head", "Withheld to date (INR)", "Deposited to date (INR)",
+     "Deposited in window (INR)", "Outstanding (INR)", "State"]];
+  rows.forEach(h => csv.push([h.label,
+    h.withheld_to_date == null ? "No data yet" : h.withheld_to_date,
+    h.deposited_to_date, h.deposited_in_window,
+    h.outstanding == null ? "No data yet" : h.outstanding,
+    h.reason || "Available"]));
+  const available = rows.filter(h => h.withheld_to_date != null);
+  csv.push(["Total (heads with data)", csvSum(available, h => h.withheld_to_date),
+    csvSum(available, h => h.deposited_to_date),
+    csvSum(available, h => h.deposited_in_window),
+    csvSum(available, h => h.outstanding), `${available.length} of ${rows.length} heads`]);
+  const challans = state.accounts.challans || [];
+  csv.push([], ["Challans in the window"],
+    ["Challan", "Head", "Paid on", "Period", "Section", "Amount (INR)", "BSR code", "Note"]);
+  challans.forEach(c => csv.push([c.challan_number, c.label, c.paid_on,
+    `${MONTHS[c.period_month - 1]} ${c.period_year}`, c.section || "", c.amount,
+    c.bsr_code || "", c.note || ""]));
+  csv.push(["Total challans", "", "", "", "", csvSum(challans, c => c.amount), "", ""]);
+  if (dues.vendor_tds && dues.vendor_tds.count) {
+    csv.push([], ["Vendor TDS", dues.vendor_tds.total,
+      `${dues.vendor_tds.count} source bill(s)`]);
+  }
+  downloadCsv(`HERBANOVA_Statutory_dues_${dues.from}_${dues.to}.csv`, csv);
+}
+
+function exportTrialBalanceCsv() {
+  const tb = state.accounts.tb;
+  if (!tb) return csvNotLoaded("the trial balance");
+  const csv = [["HERBANOVA trial balance"], ["As at", tb.as_of || isoDay(0)],
+    ["Account", "Debit (INR)", "Credit (INR)"]];
+  (tb.rows || []).forEach(r => csv.push([r.account,
+    Number(r.debit) ? r.debit : "", Number(r.credit) ? r.credit : ""]));
+  csv.push(["Total", tb.debit_total, tb.credit_total]);
+  const diff = Math.round((Number(tb.debit_total) - Number(tb.credit_total)) * 100) / 100;
+  csv.push(["Debit less credit", diff.toFixed(2), ""],
+    ["State", tb.balanced ? "Balanced" : "Difference reported", ""]);
+  downloadCsv(`HERBANOVA_Trial_balance_${tb.as_of || isoDay(0)}.csv`, csv);
+}
+
+function exportLedgerHeadsCsv() {
+  const heads = lgState().heads;
+  if (!heads) return csvNotLoaded("the ledger heads");
+  const csv = [["HERBANOVA ledger heads"], ["As at", isoDay(0)],
+    ["Code", "Head", "Type", "Role", "State", "Note"]];
+  heads.forEach(h => csv.push([h.code, h.name, LEDGER_TYPE_LABEL[h.type] || h.type,
+    h.role || "unlinked", h.active ? "Active" : "Inactive", h.note || ""]));
+  const active = heads.filter(h => h.active).length;
+  csv.push([], ["Active heads", active], ["Inactive heads", heads.length - active],
+    ["All heads", heads.length]);
+  downloadCsv(`HERBANOVA_Ledger_heads_${isoDay(0)}.csv`, csv);
+}
+
+function exportOpeningsCsv() {
+  const ob = lgState().openings;
+  if (!ob) return csvNotLoaded("the opening balances");
+  const csv = [["HERBANOVA opening balances"], ["Financial year", ob.financial_year],
+    ["Code", "Head", "Type", "Debit (INR)", "Credit (INR)", "Note"]];
+  (ob.rows || []).forEach(r => csv.push([r.code, r.name,
+    LEDGER_TYPE_LABEL[r.type] || r.type, Number(r.debit) ? r.debit : "",
+    Number(r.credit) ? r.credit : "", r.note || ""]));
+  csv.push(["Total", "", "", ob.debit_total, ob.credit_total, ""]);
+  csv.push([], ["Balance check", ob.balanced ? "Balanced" : `Difference ${ob.difference}`]);
+  downloadCsv(`HERBANOVA_Opening_balances_${ob.financial_year}.csv`, csv);
+}
+
+function exportBalanceSheetCsv() {
+  const sheet = lgState().sheet;
+  if (!sheet) return csvNotLoaded("the balance sheet");
+  const csv = [["HERBANOVA balance sheet"], ["As at", sheet.as_of],
+    ["Section", "Account", "Opening (INR)", "Vouchers (INR)", "Documents (INR)",
+     "Balance (INR)", "Unlinked"]];
+  BS_SECTIONS.forEach(([key, label]) => {
+    const rows = (sheet.sections || {})[key] || [];
+    if (!rows.length) return;
+    csv.push([label]);
+    rows.forEach(r => csv.push([label, r.code ? `${r.code} · ${r.name}` : r.name,
+      r.opening, r.vouchers, r.documents, r.balance, r.unmapped ? "Yes" : "No"]));
+  });
+  const t = sheet.totals || {};
+  csv.push([], ["Totals"], ["Total assets", "", "", "", "", t.asset, ""],
+    ["Total liabilities", "", "", "", "", t.liability, ""],
+    ["Total equity", "", "", "", "", t.equity, ""],
+    ["Retained earnings", "", "", "", "", t.retained_earnings, ""],
+    ["Difference", "", "", "", "", t.difference, ""],
+    ["State", t.balanced ? "Balanced" : "Difference reported", "", "", "", "", ""]);
+  const cb = sheet.cash_bank || {rows: [], total: 0};
+  csv.push([], ["Cash and bank closing"],
+    ["Account", "Balance (INR)"]);
+  (cb.rows || []).forEach(r => csv.push([r.code ? `${r.code} · ${r.name}` : r.name, r.balance]));
+  csv.push(["Cash and bank total", cb.total]);
+  const opening = sheet.opening || {};
+  csv.push([], ["Opening balances", sheet.opening_fy || "not captured"],
+    ["Opening debit", opening.debit_total], ["Opening credit", opening.credit_total],
+    ["Opening state", opening.balanced ? "Balanced" : `Difference ${opening.difference}`]);
+  if ((sheet.warnings || []).length) {
+    csv.push([], ["What this sheet does not claim"]);
+    sheet.warnings.forEach(w => csv.push([w]));
+  }
+  downloadCsv(`HERBANOVA_Balance_sheet_${sheet.as_of}.csv`, csv);
+}
+
+function exportVouchersCsv() {
+  const rows = lgState().vouchers;
+  if (!rows) return csvNotLoaded("the vouchers");
+  const f = lgState().voucherFilters || {};
+  const csv = [["HERBANOVA vouchers and journal"],
+    ...csvRange(f.from, f.to),
+    ["Status", f.status || "All states"],
+    ["Number", "Date", "Type", "Narration", "Debit (INR)", "Credit (INR)", "State",
+     "Mirror of", "Reversal reason"]];
+  rows.forEach(v => csv.push([v.number, v.date, VOUCHER_TYPE_LABEL[v.type] || v.type,
+    v.narration || "", v.debit, v.credit, VOUCHER_STATE_LABEL[v.status] || v.status,
+    v.reverse_of || "", v.reversal_reason || ""]));
+  csv.push(["Total", "", "", "", csvSum(rows, v => v.debit), csvSum(rows, v => v.credit), "", "", ""]);
+  csv.push(["Note", "A draft is not in the books; a posted voucher is corrected by a reversing mirror."]);
+  downloadCsv("HERBANOVA_Vouchers.csv", csv);
+}
+
+function exportDayBookCsv() {
+  const book = lgState().daybook;
+  if (!book) return csvNotLoaded("the day book");
+  const csv = [["HERBANOVA day book"], ...csvRange(book.date_from, book.date_to),
+    ["Date", "Number", "Type", "Narration", "Debit (INR)", "Credit (INR)", "State", "Mirror of"]];
+  (book.rows || []).forEach(v => csv.push([v.date, v.number,
+    VOUCHER_TYPE_LABEL[v.type] || v.type, v.narration || "", v.debit, v.credit,
+    VOUCHER_STATE_LABEL[v.status] || v.status, v.reverse_of || ""]));
+  csv.push(["Total", "", "", "", book.debit_total, book.credit_total, "", ""]);
+  csv.push([], ["Vouchers", book.count],
+    ["Balance", book.balanced ? "Balanced" : "Difference reported"]);
+  downloadCsv(`HERBANOVA_Day_book_${book.date_from}_${book.date_to}.csv`, csv);
+}
+
+function exportBankCsv() {
+  const lg = lgState();
+  const statements = lg.statements;
+  if (!statements) return csvNotLoaded("the bank statements");
+  const csv = [["HERBANOVA bank reconciliation"], ["As at", isoDay(0)],
+    ["Bank statements"],
+    ["Bank head", "Period from", "Period to", "Opening (INR)", "Closing (INR)",
+     "Lines", "Matched", "Note"]];
+  statements.forEach(s => csv.push([s.account || "", s.period_from, s.period_to,
+    s.opening_balance, s.closing_balance, s.lines, `${s.matched} of ${s.lines}`,
+    s.note || ""]));
+  const d = lg.detail, rec = lg.rec;
+  if (d && rec) {
+    csv.push([], ["Selected statement"], ["Bank head", d.account || ""],
+      ["Period", `${d.period_from} to ${d.period_to}`],
+      ["Printed opening (INR)", d.opening_balance],
+      ["Printed closing (INR)", d.closing_balance]);
+    csv.push([], ["Statement lines"], ["Date", "Description", "Reference",
+      "Amount (INR)", "State"]);
+    if (!(d.lines || []).length) csv.push(["No statement line is captured."]);
+    (d.lines || []).forEach(line => csv.push([line.date, line.description,
+      line.reference || "", line.amount, line.matched ? "Matched" : "Unmatched"]));
+    const p = rec.proof || {};
+    csv.push([], ["Reconciliation proof"], ["Check", "Amount (INR)"],
+      ["Book closing balance", p.book_closing],
+      ["Less unmatched book entries", p.unmatched_book_net],
+      ["Adjusted book balance", p.adjusted_book],
+      ["Statement closing balance", p.statement_closing],
+      ["Less unmatched statement lines", p.unmatched_statement_net],
+      ["Adjusted statement balance", p.adjusted_statement],
+      ["Difference", p.difference],
+      ["State", p.balanced ? "Balanced" : "Open"],
+      ["Opening difference", p.opening_difference],
+      ["Lines check", p.lines_check],
+      ["Matched lines", rec.matched ? rec.matched.count : ""],
+      ["Matched debit (INR)", rec.matched ? rec.matched.debit : ""],
+      ["Matched credit (INR)", rec.matched ? rec.matched.credit : ""]);
+    const book = rec.unmatched_book;
+    const bookRows = book ? [
+      ...(book.receipts || []).map(x => ["Receipt", x.party || "", x.date, x.amount,
+        `${x.mode || ""} ${x.reference || ""}`.trim()]),
+      ...(book.payments || []).map(x => ["Payment", x.party || "", x.date,
+        -Math.abs(Number(x.amount)), `${x.mode || ""} ${x.reference || ""}`.trim()]),
+      ...(book.vouchers || []).map(x => ["Voucher", x.voucher || "", x.date, x.amount,
+        x.narration || ""]),
+    ] : [];
+    csv.push([], ["Unmatched in the books"], ["Kind", "Entry", "Date", "Amount (INR)", "Reference"]);
+    if (!bookRows.length)
+      csv.push(["Every book entry inside this statement is matched, or none is in reach."]);
+    bookRows.forEach(r => csv.push(r));
+    csv.push([], ["Warnings"]);
+    if (!(rec.warnings || []).length)
+      csv.push(["No warning is raised for this statement."]);
+    (rec.warnings || []).forEach(w => csv.push([w]));
+  }
+  downloadCsv(`HERBANOVA_Bank_reconciliation_${isoDay(0)}.csv`, csv);
+}
+
+function exportYearsCsv() {
+  const fy = state.accounts.years;
+  if (!fy) return csvNotLoaded("the financial years");
+  const csv = [["HERBANOVA financial years"], ["Current year", fy.current],
+    ["Financial year", "From", "To", "State", "Closed by", "Closed at", "Reason",
+     "Reopened by", "Reopened at", "Reopen reason"]];
+  (fy.years || []).forEach(y => csv.push([y.financial_year, y.first, y.last,
+    y.active ? "Closed" : (y.reopened_at ? "Open (reopened)" : "Open"),
+    y.closed_by || "", y.closed_at || "", y.reason || "", y.reopened_by || "",
+    y.reopened_at || "", y.reopen_reason || ""]));
+  csv.push([], ["Note", "Only completed years can be closed; the Administrator reopens one."]);
+  downloadCsv(`HERBANOVA_Financial_years.csv`, csv);
+}
+
+function exportLocksCsv() {
+  if (!state.accounts.years && !(state.accounts.locks || []).length)
+    return csvNotLoaded("the accounting month locks");
+  const locks = state.accounts.locks || [];
+  const csv = [["HERBANOVA accounting month locks"], ["As at", isoDay(0)],
+    ["Month", "Year", "Period", "State", "Reason", "Locked by", "Locked at",
+     "Unlocked by", "Unlocked at", "Unlock reason"]];
+  locks.forEach(l => csv.push([MONTHS[l.month - 1], l.year, `${MONTHS[l.month - 1]} ${l.year}`,
+    l.active ? "Locked" : "Open", l.reason || "", l.locked_by || "", l.locked_at || "",
+    l.unlocked_by || "", l.unlocked_at || "", l.unlock_reason || ""]));
+  const active = locks.filter(l => l.active).length;
+  csv.push([], ["Locked months", active], ["Open records", locks.length - active]);
+  downloadCsv(`HERBANOVA_Accounting_month_locks_${isoDay(0)}.csv`, csv);
 }
 
 /* ---------- expenses ---------- */
@@ -2450,6 +4512,10 @@ async function loadExpenses() {
   if (s.status) params.set("status", s.status);
   if (s.head) params.set("head_id", s.head);
   if (s.q) params.set("q", s.q);
+  const from = $("#expFrom") ? $("#expFrom").value : "";
+  const to = $("#expTo") ? $("#expTo").value : "";
+  if (from) params.set("date_from", from);
+  if (to) params.set("date_to", to);
   const [rows, heads, settings] = await Promise.all([
     api(`/api/expenses?${params.toString()}`),
     api("/api/expenses/heads"),
@@ -2753,40 +4819,89 @@ async function openDistributorLedger(id) {
 function entryForm(kind) {
   const out = state.accounts.outstanding;
   const receipt = kind === "receipt";
+  const parties = receipt
+    ? activeDists().map(d => `<option value="${d.id}">${esc(d.name)}${d.code ? ` (${esc(d.code)})` : ""}</option>`).join("")
+    : activeSuppliers().map(s => `<option value="${s.id}">${esc(s.name)}${s.code ? ` (${esc(s.code)})` : ""}</option>`).join("");
   const options = receipt
     ? (out ? out.receivables.filter(r => Number(r.outstanding) > 0) : []).map(r =>
-        `<option value="${r.invoice_id}">${esc(r.number)}, ${esc(r.distributor || "")}, ${money(r.outstanding)} due</option>`).join("")
+        `<option value="${r.invoice_id}" data-party="${r.distributor_id}">${esc(r.number)}, ${esc(r.distributor || "")}, ${money(r.outstanding)} due</option>`).join("")
     : (out ? out.payables.filter(p => Number(p.outstanding) > 0) : []).map(p =>
-        `<option value="${p.purchase_order_id}">${esc(p.number)}, ${esc(p.supplier || "")}, ${money(p.outstanding)} due</option>`).join("");
+        `<option value="${p.purchase_order_id}" data-party="${p.supplier_id}">${esc(p.number)}, ${esc(p.supplier || "")}, ${money(p.outstanding)} due</option>`).join("");
   openDrawer(receipt ? "Record a receipt" : "Record a payment",
-    receipt ? "Money received from a distributor, allocated to an invoice." : "Money paid to a supplier for goods received.", `
+    receipt ? "Money received from a distributor: settle what is open, or hold the whole amount as an advance."
+            : "Money paid to a supplier: settle received bills, or hold the whole amount as an advance.", `
     <form id="entryForm" data-kind="${kind}" novalidate>
-      <label for="e-against">${receipt ? "Against invoice" : "Against order"}</label>
-      <select id="e-against" name="against"><option value="">Not allocated yet</option>${options}</select>
+      <label for="e-party">${receipt ? "Distributor" : "Supplier"}</label>
+      <select id="e-party" name="party" required><option value="">Choose a ${receipt ? "distributor" : "supplier"}</option>${parties}</select>
+      <label for="e-purpose">Record as</label>
+      <select id="e-purpose" name="purpose">
+        <option value="outstanding" selected>Existing outstanding ${receipt ? "invoice" : "bill"}</option>
+        <option value="advance">Advance / new payment</option>
+      </select>
+      <label for="e-against" id="e-againstLabel">Settle this ${receipt ? "invoice" : "order"} first (optional)</label>
+      <select id="e-against" name="against"><option value="">Oldest open ${receipt ? "invoices" : "bills"} first</option>${options}</select>
+      <div class="note" id="e-advanceHint">Choose a party to see any advance already available.</div>
       <div class="row2"><div><label for="e-amount">Amount (₹)</label><input id="e-amount" name="amount" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
       <div><label for="e-date">Date</label><input id="e-date" name="paid_on" type="date" value="${isoDay(0)}"></div></div>
       <div class="row2"><div><label for="e-mode">Mode</label><select id="e-mode" name="mode">
         ${["bank", "cash", "upi", "cheque", "neft", "other"].map(m => `<option value="${m}"${m === "bank" ? " selected" : ""}>${m.toUpperCase()}</option>`).join("")}</select></div>
       <div><label for="e-ref">Reference</label><input id="e-ref" name="reference" placeholder="UTR, cheque number" autocomplete="off"></div></div>
       <label for="e-notes">Note</label><input id="e-notes" name="notes" placeholder="Optional" autocomplete="off">
-      <div class="note">An entry is never edited or deleted. If it is wrong, record the opposite one and note why.</div>
+      <div class="note">An entry is never edited or deleted. If it is wrong, record the opposite one and note why. An advance is not revenue or a purchase; it settles a later document automatically.</div>
       <div class="err" role="alert"></div>
       <div class="actions"><button class="btn" type="submit">Save ${receipt ? "receipt" : "payment"}</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
     </form>`, true);
 }
 
+function syncEntryAgainst() {
+  const form = $("#entryForm");
+  if (!form) return;
+  const receipt = form.dataset.kind === "receipt";
+  const party = $("#e-party").value;
+  const purpose = $("#e-purpose").value;
+  const standing = purpose === "outstanding";
+  const against = $("#e-against");
+  $("#e-againstLabel").classList.toggle("hide", !standing);
+  against.classList.toggle("hide", !standing);
+  if (!standing) against.value = "";
+  Array.from(against.options).forEach(o => {
+    if (o.value) o.hidden = !!party && o.dataset.party !== party;
+  });
+  if (against.selectedOptions[0] && against.selectedOptions[0].hidden) against.value = "";
+  const hint = $("#e-advanceHint");
+  hint.textContent = party ? "Checking the advance balance…" : "Choose a party to see any advance already available.";
+  if (!party) return;
+  const kind = receipt ? "receipt" : "payment";
+  api(`/api/accounts/advances?kind=${kind}&party_id=${encodeURIComponent(party)}`).then(res => {
+    if (!res.ok || !res.body || Array.isArray(res.body) || !$("#e-advanceHint")) return;
+    const available = Number(res.body.available || 0);
+    $("#e-advanceHint").textContent = available > 0
+      ? `Available advance: ₹ ${money(available)}. A later ${receipt ? "invoice" : "bill"} for this party draws it down automatically.`
+      : "No advance is available for this party.";
+  });
+}
+
 async function saveEntry(form) {
   const err = $(".err", form), btn = $("button[type=submit]", form); err.textContent = "";
   const f = form.elements, kind = form.dataset.kind, receipt = kind === "receipt";
+  if (!f.party.value) { err.textContent = `Choose a ${receipt ? "distributor" : "supplier"}.`; return; }
   if (!(Number(f.amount.value) > 0)) { err.textContent = "Enter an amount greater than zero."; return; }
-  const body = {kind, amount: f.amount.value, paid_on: f.paid_on.value, mode: f.mode.value,
+  if (!f.paid_on.value) { err.textContent = "Choose the date the money moved."; return; }
+  const purpose = f.purpose.value;
+  const body = {kind, purpose, amount: f.amount.value, paid_on: f.paid_on.value, mode: f.mode.value,
                 reference: f.reference.value.trim() || null, notes: f.notes.value.trim() || null};
-  if (f.against.value) body[receipt ? "invoice_id" : "purchase_order_id"] = Number(f.against.value);
+  body[receipt ? "distributor_id" : "supplier_id"] = Number(f.party.value);
+  if (purpose === "outstanding" && f.against.value)
+    body[receipt ? "invoice_id" : "purchase_order_id"] = Number(f.against.value);
   btn.disabled = true;
   const res = await api("/api/accounts/payments", {method: "POST", body});
   btn.disabled = false;
-  toast(res, res.ok ? (receipt ? "Receipt recorded" : "Payment recorded") : "Not recorded");
-  if (!res.ok) { err.textContent = detail(res.body); return; }
+  if (!res.ok) { err.textContent = detail(res.body); toast(res, "Not recorded"); return; }
+  const b = res.body, applied = (b.allocations || []).length;
+  let label = `${receipt ? "Receipt" : "Payment"} ${b.number}: ₹ ${money(b.amount)} recorded`;
+  if (applied) label += `, ₹ ${money(b.allocated)} settled against ${plural(applied, receipt ? "invoice" : "order")}`;
+  if (Number(b.advance) > 0) label += `, ₹ ${money(b.advance)} held as advance`;
+  toast(res, label);
   closeDrawer(); loadAll();
 }
 
@@ -2933,6 +5048,43 @@ function renderFoc() {
   empty($("#focNoteEmpty"), !notes.length,
     s.loading ? "Loading free-sample notes…" : "No free-sample note has been written yet.",
     can("foc:write") ? " Use “New free-sample note” to record one recipient at a time." : "");
+}
+
+function exportFocStockCsv() {
+  if (!state.foc.loaded) return csvNotLoaded("free stock");
+  const rows = state.foc.stock || [];
+  const csv = [["HERBANOVA free stock (FOC)"], ["As at", isoDay(0)],
+    ["SKU", "Product", "On hand", "FOC", "Costed", "Average cost (INR)"]];
+  rows.forEach(r => csv.push([r.sku || "", r.name || "", r.on_hand, r.foc_qty,
+    r.costed_qty, r.average == null ? "" : r.average]));
+  csv.push(["Total", "", csvSum(rows, r => r.on_hand), csvSum(rows, r => r.foc_qty),
+    csvSum(rows, r => r.costed_qty), ""]);
+  csv.push([], ["Note", "Free stock is held apart from purchased stock and never changes the weighted average."]);
+  downloadCsv(`HERBANOVA_FOC_stock_${isoDay(0)}.csv`, csv);
+}
+
+function exportFocNotesCsv() {
+  if (!state.foc.loaded) return csvNotLoaded("the free-sample notes");
+  const rows = state.foc.notes || [];
+  const csv = [["HERBANOVA free-sample notes"], ["As at", isoDay(0)],
+    ["Number", "Date", "Recipient", "Warehouse", "Reason", "Quantity",
+     "Notional value (INR)", "Status", "Correction", "Rejection reason",
+     "Reversal reason"]];
+  rows.forEach(n => {
+    const qty = (n.lines || []).reduce((sum, l) => sum + Number(l.qty || 0), 0);
+    csv.push([n.note_number, n.note_date, n.recipient_name, n.warehouse || "",
+      FOC_REASONS[n.reason] || n.reason, qty,
+      n.notional_value == null ? "" : n.notional_value,
+      FOC_STATUS[n.status] || n.status, n.correction ? "Yes" : "No",
+      n.rejection_reason || "", n.reversal_reason || ""]);
+  });
+  const notional = rows.filter(n => n.notional_value != null);
+  const qtyTotal = (rows || []).reduce((sum, n) =>
+    sum + (n.lines || []).reduce((q, l) => q + Number(l.qty || 0), 0), 0);
+  csv.push(["Total", "", "", "", "", qtyTotal,
+    notional.length ? csvSum(notional, n => n.notional_value) : "", "", "", "", ""]);
+  csv.push([], ["Note", "A free-sample note carries no invoice, revenue or GST."]);
+  downloadCsv(`HERBANOVA_FOC_notes_${isoDay(0)}.csv`, csv);
 }
 
 function fillFocBatches() {
@@ -3384,7 +5536,7 @@ function renderHr() {
   $$('#v-hr [data-act="hr-payroll"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:payroll_prepare"))));
   // Shift, notices, locks, letter templates and site policy are HR/administrator settings.
-  ["hr-shifts", "hr-notices", "hr-locks", "hr-letters", "hr-sites"].forEach(a =>
+  ["hr-shifts", "hr-notices", "hr-locks", "hr-letters", "hr-sites", "hr-masters"].forEach(a =>
     $$(`#v-hr [data-act="${a}"]`).forEach(b => b.classList.toggle("hide", !(wholeTeam && can("hr:write")))));
   $$('#v-hr [data-act="hr-reports"]').forEach(b =>
     b.classList.toggle("hide", !(wholeTeam && can("hr:reports"))));
@@ -3447,18 +5599,26 @@ function hrAttention(kind) {
 }
 /* ---------- employee profile ---------- */
 async function hrProfile(id) {
-  const [r, bal, br, off, sh, lt] = await Promise.all([
+  const payroll = can("hr:payroll_prepare");
+  const [r, bal, br, off, sh, lt, st, cp] = await Promise.all([
     api(`/api/hr/employees/${id}/profile`),
     api(`/api/hr/leave/balances?employee_id=${id}`),
     api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts"),
-    api("/api/hr/letters/templates")]);
+    api("/api/hr/letters/templates"),
+    payroll ? api(`/api/hr/salary/structures?employee_id=${id}`) : Promise.resolve(null),
+    payroll ? api("/api/hr/salary/components") : Promise.resolve(null)]);
   if (!r.ok) { toast(r, "Employee not loaded"); return; }
   const names = rows => Object.fromEntries((rows && rows.ok ? rows.body : []).map(x => [x.id, x.name]));
   state.hr.profile = {...r.body,
     balances: bal.ok ? bal.body.balances : [],
     balanceYear: bal.ok ? bal.body.year : null,
     branchNames: names(br), officeNames: names(off), shiftNames: names(sh),
-    letterTemplates: lt.ok ? lt.body.templates.filter(t => t.active) : []};
+    letterTemplates: lt.ok ? lt.body.templates.filter(t => t.active) : [],
+    salary: payroll ? {
+      structures: st && st.ok ? st.body : [],
+      components: cp && cp.ok ? cp.body : [],
+      error: st && !st.ok ? detail(st.body) : (cp && !cp.ok ? detail(cp.body) : null)
+    } : null};
   hrProfileDrawer("overview");
 }
 function hrProfileValue(value) {
@@ -3546,14 +5706,33 @@ function hrProfileOutputs(p) {
     <p class="note">Each letter is filled on the server from this record. A date the record does not hold stops the letter instead of printing a blank, and every download is audited.</p>
     <div class="actions hr-wrap">${letters || '<span class="muted">No active letter template.</span>'}</div>`;
 }
+function hrProfileSalary(p) {
+  const s = p.salary;
+  if (!s) return "";
+  const rows = (s.structures || []).map(x => `<tr>
+    <td>${esc(fmtDate(x.effective_from))}${x.effective_to ? `<small>to ${esc(fmtDate(x.effective_to))}</small>` : ""}</td>
+    <td>${esc(x.payment_mode)}</td>
+    <td><span class="chip ${x.status === "active" ? "ok" : "off"}">${esc(x.status)}</span></td>
+    <td>${(x.lines || []).map(l => `${esc(l.component)} ${
+      l.percent != null && l.percent !== "" ? esc(String(l.percent)) + "%" : money(l.amount)}`).join(" · ") || "—"}</td></tr>`).join("");
+  return `<div class="actions" style="margin-top:0">
+      <button class="btn" type="button" data-act="hr-new-structure" data-emp="${p.employee.id}">New salary structure</button></div>
+    ${s.error ? `<p class="gap-note">${esc(s.error)}</p>` : ""}
+    <div class="tw"><table><thead><tr><th>Effective</th><th>Payment</th><th>Status</th><th>Components</th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="4" class="empty-row">No data yet: this employee has no salary structure. Payroll skips them until one is assigned.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">Salary is confidential. It is shown here only because your role holds payroll preparation rights; every change is recorded in the audit trail.</div>`;
+}
 function hrProfileDrawer(tab) {
   const p = state.hr.profile;
   if (!p) return;
   const e = p.employee;
-  const tabs = [["overview", "Overview"], ["documents", `Documents (${(p.documents || []).length})`],
-                ["assets", `Assets (${(p.assets || []).length})`], ["outputs", "Letters & ID"],
-                ["history", "History"]];
+  const tabs = [["overview", "Overview"], ["documents", `Documents (${(p.documents || []).length})`]];
+  if (p.salary) tabs.push(["salary", "Salary"]);
+  tabs.push(["assets", `Assets (${(p.assets || []).length})`], ["outputs", "Letters & ID"],
+            ["history", "History"]);
   const body = tab === "documents" ? hrProfileDocuments(p)
+    : tab === "salary" ? hrProfileSalary(p)
     : tab === "assets" ? hrProfileAssets(p)
     : tab === "outputs" ? hrProfileOutputs(p)
     : tab === "history" ? hrProfileHistory(p) : hrProfileOverview(p);
@@ -4064,6 +6243,434 @@ async function hrRuleDelete(id) {
   toast(res, res.ok ? "Rule deleted" : "Rule not deleted");
   if (res.ok) hrSites();
 }
+
+/* ---------- HR masters: departments, holidays, leave types, salary ---------- */
+const HR_MASTER_TABS = [["departments", "Departments"], ["holidays", "Holidays"],
+  ["leave-types", "Leave types"], ["salary-components", "Salary components"],
+  ["salary-structures", "Salary structures"]];
+const HR_COMPONENT_CALC = {fixed: "Fixed amount", percent_basic: "% of basic",
+                           percent_gross: "% of gross"};
+const HR_STATUTORY_HEADS = [["pf", "Provident fund"], ["esi", "Employee state insurance"],
+  ["pt", "Professional tax"], ["tds", "Tax deducted at source"]];
+const hrHeadLabel = key => (HR_STATUTORY_HEADS.find(h => h[0] === key) || [key, key])[1];
+
+async function hrMasterData() {
+  const payroll = can("hr:payroll_prepare");
+  const denied = {ok: false, status: 403, body: {detail: "Your role cannot read salary data."}};
+  const [d, h, l, c, s, e, b, o] = await Promise.all([
+    api("/api/hr/departments"), api("/api/hr/holidays"), api("/api/hr/leave/types"),
+    payroll ? api("/api/hr/salary/components") : Promise.resolve(denied),
+    payroll ? api("/api/hr/salary/structures") : Promise.resolve(denied),
+    api("/api/hr/employees?page_size=200&sort=name"),
+    api("/api/hr/branches"), api("/api/hr/offices")]);
+  state.hr.masters = {
+    departments: d.ok ? d.body : [],
+    holidays: h.ok ? h.body : [],
+    leaveTypes: l.ok ? l.body : [],
+    components: c.ok ? c.body : [],
+    structures: s.ok ? s.body : [],
+    employees: e.ok ? e.body : [],
+    branches: b.ok ? b.body : [],
+    offices: o.ok ? o.body : [],
+    salaryError: c.ok && s.ok ? null : detail(c.body || s.body),
+    errors: {departments: d.ok ? null : detail(d.body), holidays: h.ok ? null : detail(h.body),
+             leaveTypes: l.ok ? null : detail(l.body)}
+  };
+  return state.hr.masters;
+}
+
+async function hrMasters(tab = "departments") {
+  const m = await hrMasterData();
+  const writable = can("hr:write");
+  const payroll = can("hr:payroll_prepare");
+  const tabs = HR_MASTER_TABS.filter(([k]) =>
+    (k !== "salary-components" && k !== "salary-structures") || payroll);
+  if (!tabs.some(([k]) => k === tab)) tab = "departments";
+  const body = tab === "holidays" ? hrMastersHolidays(m, writable)
+    : tab === "leave-types" ? hrMastersLeaveTypes(m, writable)
+    : tab === "salary-components" ? hrMastersComponents(m, writable && payroll)
+    : tab === "salary-structures" ? hrMastersStructures(m, writable && payroll)
+    : hrMastersDepartments(m, writable);
+  openDrawer("HR masters",
+    "Branches and locations live on their own screen; this screen holds the lists payroll, leave and attendance read from.", `
+    <div class="note">Every change is audited. Codes cannot be changed; entries are retired with a status instead of deleted. No statutory rate is prefilled: enter the rate your payroll policy uses.</div>
+    <div class="actions" style="margin-top:0">
+      <button class="btn ghost" type="button" data-act="hr-sites">Branches &amp; locations</button>
+      <button class="btn ghost" type="button" data-act="hr-masters" data-tab="${tab}">Refresh</button>
+    </div>
+    <div class="seg compact hr-tabs" role="group" aria-label="HR master">
+      ${tabs.map(([k, label]) => `<button type="button" data-act="hr-masters-tab" data-tab="${k}" aria-pressed="${k === tab}">${esc(label)}</button>`).join("")}
+    </div>
+    ${body}`, true);
+  $("#drawer").classList.add("hr-wide");
+}
+
+function hrMastersDepartments(m, writable) {
+  const rows = (m.departments || []).map(d => `<tr>
+    <td class="strong">${esc(d.name)}<small>${esc(d.code)}</small></td>
+    <td><span class="chip ${d.status === "active" ? "ok" : "off"}">${esc(d.status)}</span></td>
+    <td class="rowacts">${writable ? `<button class="btn ghost sm" type="button" data-act="hr-edit-dept" data-id="${d.id}">Edit</button>` : ""}</td></tr>`).join("");
+  return `<div class="actions" style="margin-top:0">
+      ${writable ? `<button class="btn" type="button" data-act="hr-new-dept">New department</button>` : ""}</div>
+    ${m.errors.departments ? `<p class="gap-note">${esc(m.errors.departments)}</p>` : ""}
+    <div class="tw"><table><thead><tr><th>Department</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="3" class="empty-row">No data yet: no departments configured.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">The employee form suggests these names. A name typed exactly as a department is linked to it, so a rename follows through to those employees.</div>`;
+}
+
+function hrMastersHolidays(m, writable) {
+  const branches = Object.fromEntries((m.branches || []).map(b => [b.id, b.name]));
+  const offices = Object.fromEntries((m.offices || []).map(o => [o.id, o.name]));
+  const rows = [...(m.holidays || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .map(h => `<tr>
+      <td>${esc(fmtDate(h.date))}</td><td class="strong">${esc(h.name)}</td>
+      <td>${esc(branches[h.branch_id] || "All branches")}</td>
+      <td>${esc(offices[h.location_id] || "All offices")}</td>
+      <td class="rowacts">${writable ? `<button class="btn ghost sm" type="button" data-act="hr-edit-holiday" data-id="${h.id}">Edit</button>` : ""}</td></tr>`).join("");
+  return `<div class="actions" style="margin-top:0">
+      ${writable ? `<button class="btn" type="button" data-act="hr-new-holiday">New holiday</button>` : ""}</div>
+    ${m.errors.holidays ? `<p class="gap-note">${esc(m.errors.holidays)}</p>` : ""}
+    <div class="tw"><table><thead><tr><th>Date</th><th>Holiday</th><th>Branch</th><th>Office</th><th></th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="5" class="empty-row">No data yet: no holidays configured.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">A holiday with no branch and no office applies to the whole company. Attendance already marked keeps the status it was recorded with.</div>`;
+}
+
+function hrMastersLeaveTypes(m, writable) {
+  const rows = (m.leaveTypes || []).map(t => `<tr>
+    <td class="strong">${esc(t.name)}<small>${esc(t.code)}</small></td>
+    <td><span class="chip ${t.kind === "paid" ? "ok" : "off"}">${t.kind === "paid" ? "Paid" : "Unpaid"}</span></td>
+    <td class="n">${qty(t.default_days)}</td>
+    <td>${t.carry_forward ? `Yes${Number(t.max_carry_forward) > 0 ? ` · up to ${qty(t.max_carry_forward)}` : ""}` : "No"}</td>
+    <td>${t.encashable ? "Yes" : "No"}</td>
+    <td>${t.half_day_allowed ? "Yes" : "No"}</td>
+    <td>${t.requires_document ? "Yes" : "No"}</td>
+    <td><span class="chip ${t.active ? "ok" : "off"}">${t.active ? "active" : "inactive"}</span></td>
+    <td class="rowacts">${writable ? `<button class="btn ghost sm" type="button" data-act="hr-edit-leave-type" data-id="${t.id}">Edit</button>` : ""}</td></tr>`).join("");
+  return `<div class="actions" style="margin-top:0">
+      ${writable ? `<button class="btn" type="button" data-act="hr-new-leave-type">New leave type</button>` : ""}</div>
+    ${m.errors.leaveTypes ? `<p class="gap-note">${esc(m.errors.leaveTypes)}</p>` : ""}
+    <div class="tw"><table><thead><tr><th>Leave type</th><th>Paid</th><th class="n">Days / year</th><th>Carry forward</th><th>Encashable</th><th>Half day</th><th>Document</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="9" class="empty-row">No data yet: no leave types configured.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">A leave type is retired, never deleted, so approved leave keeps its label.</div>`;
+}
+
+function hrMastersComponents(m, writable) {
+  const rows = (m.components || []).map(c => `<tr>
+    <td class="strong">${esc(c.name)}<small>${esc(c.code)}</small></td>
+    <td>${c.kind === "earning" ? "Earning" : "Deduction"}</td>
+    <td>${esc(HR_COMPONENT_CALC[c.calc_type] || c.calc_type)}</td>
+    <td class="n">${c.calc_type === "fixed" ? money(c.default_rate) : qty(c.default_rate) + "%"}</td>
+    <td>${c.taxable ? "Yes" : "No"}</td>
+    <td>${c.statutory ? esc(hrHeadLabel(c.statutory_head || "")) : "—"}</td>
+    <td><span class="chip ${c.active ? "ok" : "off"}">${c.active ? "active" : "inactive"}</span></td>
+    <td class="rowacts">${writable ? `<button class="btn ghost sm" type="button" data-act="hr-edit-component" data-id="${c.id}">Edit</button>` : ""}</td></tr>`).join("");
+  return `<div class="actions" style="margin-top:0">
+      ${writable ? `<button class="btn" type="button" data-act="hr-new-component">New component</button>` : ""}</div>
+    ${m.salaryError ? `<p class="gap-note">${esc(m.salaryError)}</p>` : ""}
+    <div class="tw"><table><thead><tr><th>Component</th><th>Type</th><th>Calculation</th><th class="n">Default rate</th><th>Taxable</th><th>Statutory head</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="8" class="empty-row">No data yet: no salary components configured.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">The default rate is a starting value for a structure line, not a payroll rule by itself. Percent lines are calculated from basic or gross as shown.</div>`;
+}
+
+function hrMastersStructures(m, writable) {
+  const emps = Object.fromEntries((m.employees || []).map(e => [e.id, e]));
+  const rows = (m.structures || []).map(s => {
+    const e = emps[s.employee_id];
+    const lines = (s.lines || []).map(l => `${esc(l.component)} ${
+      l.percent != null && l.percent !== "" ? esc(String(l.percent)) + "%" : money(l.amount)}`).join(" · ");
+    return `<tr>
+      <td class="strong">${esc(e ? e.full_name : `Employee ${s.employee_id}`)}<small>${esc(e ? e.code : "")}</small></td>
+      <td>${esc(fmtDate(s.effective_from))}${s.effective_to ? `<small>to ${esc(fmtDate(s.effective_to))}</small>` : ""}</td>
+      <td>${esc(s.payment_mode)}</td>
+      <td><span class="chip ${s.status === "active" ? "ok" : "off"}">${esc(s.status)}</span></td>
+      <td><small>${lines || "No lines"}</small></td></tr>`;
+  }).join("");
+  return `<div class="actions" style="margin-top:0">
+      ${writable ? `<button class="btn" type="button" data-act="hr-new-structure">New salary structure</button>` : ""}</div>
+    ${m.salaryError ? `<p class="gap-note">${esc(m.salaryError)}</p>` : ""}
+    <div class="tw"><table><thead><tr><th>Employee</th><th>Effective</th><th>Payment</th><th>Status</th><th>Components</th></tr></thead><tbody>
+      ${rows || '<tr><td colspan="5" class="empty-row">No data yet: no salary structure is assigned. Payroll skips every employee without one.</td></tr>'}
+    </tbody></table></div>
+    <div class="note">A new structure starts on the date you choose and closes the previous one the day before. Payroll uses the structure that covers the month.</div>`;
+}
+
+function hrDepartmentForm(id) {
+  const m = state.hr.masters || {};
+  const x = id ? (m.departments || []).find(d => d.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Department not found"}}, "Department not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", status: "active"};
+  openDrawer(x ? `Edit ${x.name}` : "New department",
+    "The code is permanent. Retire a department by making it inactive; employees keep their history.", `
+    <form id="hrDeptForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrd-code">Department code</label><input id="hrd-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hrd-name">Department name</label><input id="hrd-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      ${x ? `<label for="hrd-status">Status</label><select id="hrd-status" name="status"><option value="active"${v.status === "active" ? " selected" : ""}>Active</option><option value="inactive"${v.status !== "active" ? " selected" : ""}>Inactive</option></select>` : ""}
+      <div class="note">Renaming updates employees linked to this department. Free-text names on other employees are left alone.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save department</button><button class="btn ghost" type="button" data-act="hr-masters" data-tab="departments">Cancel</button></div>
+    </form>`);
+}
+async function saveHrDepartment(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const body = {name: f.name.value.trim()};
+  if (!id) body.code = f.code.value.trim().toUpperCase();
+  else body.status = f.status.value;
+  if ((body.name || "").length < 2) { err.textContent = "Enter the department name."; return; }
+  if (!id && (body.code || "").length < 2) { err.textContent = "Enter a department code of at least two characters."; return; }
+  const res = await api(id ? `/api/hr/departments/${id}` : "/api/hr/departments",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Department updated" : "Department created") : "Department not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer();
+  hrMasters("departments");
+}
+
+async function hrHolidayForm(id) {
+  const m = state.hr.masters && state.hr.masters.branches ? state.hr.masters : await hrMasterData();
+  const x = id ? (m.holidays || []).find(h => h.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Holiday not found"}}, "Holiday not loaded"); return; }
+  const v = x || {id: "", date: "", name: "", branch_id: null, location_id: null};
+  const branches = m.branches || [];
+  const offices = (m.offices || []).filter(o => !v.branch_id || o.branch_id === v.branch_id);
+  openDrawer(x ? `Edit ${x.name}` : "New holiday",
+    "Leave the branch and office empty for a company-wide holiday. A branch holiday covers its offices.", `
+    <form id="hrHolidayForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrh-date">Date</label><input id="hrh-date" name="date" type="date" value="${esc(v.date || "")}"></div>
+      <div><label for="hrh-name">Holiday name</label><input id="hrh-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <div class="row2"><div><label for="hrh-branch">Branch</label><select id="hrh-branch" name="branch_id">${hrSiteSelect(branches, v.branch_id, b => b.name)}</select></div>
+      <div><label for="hrh-office">Office</label><select id="hrh-office" name="location_id"><option value="">—</option>${offices.map(o => `<option value="${o.id}" data-branch="${o.branch_id == null ? "" : o.branch_id}"${v.location_id === o.id ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></div></div>
+      <div class="note">Attendance already marked keeps the status it was recorded with; the new date applies to future marking only.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save holiday</button><button class="btn ghost" type="button" data-act="hr-masters" data-tab="holidays">Cancel</button></div>
+    </form>`);
+  const bSel = $("#hrh-branch"), oSel = $("#hrh-office");
+  const syncOffices = () => {
+    const want = bSel.value;
+    $$("option[data-branch]", oSel).forEach(op => {
+      op.hidden = !!(want && op.dataset.branch !== want);
+    });
+    const cur = oSel.selectedOptions[0];
+    if (cur && cur.hidden) oSel.value = "";
+  };
+  bSel.addEventListener("change", syncOffices);
+  oSel.addEventListener("change", () => {
+    const br = oSel.selectedOptions[0] ? oSel.selectedOptions[0].dataset.branch : "";
+    if (br) { bSel.value = br; syncOffices(); }
+  });
+  syncOffices();
+}
+async function saveHrHoliday(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const body = {date: f.date.value, name: f.name.value.trim(),
+                branch_id: f.branch_id.value ? Number(f.branch_id.value) : null,
+                location_id: f.location_id.value ? Number(f.location_id.value) : null};
+  if (!body.date) { err.textContent = "Choose the holiday date."; return; }
+  if (body.name.length < 2) { err.textContent = "Enter the holiday name."; return; }
+  const res = await api(id ? `/api/hr/holidays/${id}` : "/api/hr/holidays",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Holiday updated" : "Holiday created") : "Holiday not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer();
+  hrMasters("holidays");
+}
+
+function hrLeaveTypeForm(id) {
+  const m = state.hr.masters || {};
+  const x = id ? (m.leaveTypes || []).find(t => t.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Leave type not found"}}, "Leave type not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", kind: "paid", requires_document: false,
+                  default_days: 0, carry_forward: false, encashable: false,
+                  max_carry_forward: 0, half_day_allowed: true, active: true};
+  openDrawer(x ? `Edit ${x.name}` : "New leave type",
+    "The days and flags here are the defaults. An application is still scoped and approved on the server.", `
+    <form id="hrLeaveTypeForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrlt-code">Code</label><input id="hrlt-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hrlt-name">Name</label><input id="hrlt-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <div class="row2"><div><label for="hrlt-kind">Paid or unpaid</label><select id="hrlt-kind" name="kind"${x ? " disabled" : ""}><option value="paid"${v.kind === "paid" ? " selected" : ""}>Paid</option><option value="unpaid"${v.kind === "unpaid" ? " selected" : ""}>Unpaid</option></select></div>
+      <div><label for="hrlt-days">Default days per year</label><input id="hrlt-days" name="default_days" type="number" min="0" step="0.5" value="${qty(v.default_days)}"></div></div>
+      <div class="row2"><div><label for="hrlt-carry">Carry forward</label><select id="hrlt-carry" name="carry_forward"><option value="false"${v.carry_forward ? "" : " selected"}>No</option><option value="true"${v.carry_forward ? " selected" : ""}>Yes</option></select></div>
+      <div><label for="hrlt-max">Maximum carried days</label><input id="hrlt-max" name="max_carry_forward" type="number" min="0" step="0.5" value="${qty(v.max_carry_forward)}"></div></div>
+      <div class="row2"><div><label for="hrlt-encash">Encashable</label><select id="hrlt-encash" name="encashable"><option value="false"${v.encashable ? "" : " selected"}>No</option><option value="true"${v.encashable ? " selected" : ""}>Yes</option></select></div>
+      <div><label for="hrlt-half">Half day allowed</label><select id="hrlt-half" name="half_day_allowed"><option value="true"${v.half_day_allowed ? " selected" : ""}>Yes</option><option value="false"${v.half_day_allowed ? "" : " selected"}>No</option></select></div></div>
+      <div class="row2"><div><label for="hrlt-doc">Document required</label><select id="hrlt-doc" name="requires_document"><option value="false"${v.requires_document ? "" : " selected"}>No</option><option value="true"${v.requires_document ? " selected" : ""}>Yes</option></select></div>
+      ${x ? `<div><label for="hrlt-active">Status</label><select id="hrlt-active" name="active"><option value="true"${v.active ? " selected" : ""}>Active</option><option value="false"${v.active ? "" : " selected"}>Inactive</option></select></div>` : `<div></div>`}</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save leave type</button><button class="btn ghost" type="button" data-act="hr-masters" data-tab="leave-types">Cancel</button></div>
+    </form>`);
+}
+async function saveHrLeaveType(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const carry = f.carry_forward.value === "true";
+  const maxCarry = Number(f.max_carry_forward.value || 0);
+  if (!(Number(f.default_days.value) >= 0)) { err.textContent = "Default days cannot be negative."; return; }
+  if (!(maxCarry >= 0)) { err.textContent = "The carry-forward cap cannot be negative."; return; }
+  if (!carry && maxCarry > 0) { err.textContent = "Set carry forward to yes, or the cap back to zero."; return; }
+  const body = {name: f.name.value.trim(), requires_document: f.requires_document.value === "true",
+                default_days: f.default_days.value, carry_forward: carry,
+                encashable: f.encashable.value === "true",
+                max_carry_forward: carry ? maxCarry : 0,
+                half_day_allowed: f.half_day_allowed.value === "true"};
+  if (!id) { body.code = f.code.value.trim().toUpperCase(); body.kind = f.kind.value; }
+  else body.active = f.active.value === "true";
+  if (body.name.length < 2) { err.textContent = "Enter the leave type name."; return; }
+  if (!id && body.code.length < 1) { err.textContent = "Enter a leave type code."; return; }
+  const res = await api(id ? `/api/hr/leave/types/${id}` : "/api/hr/leave/types",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Leave type updated" : "Leave type created") : "Leave type not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer();
+  hrMasters("leave-types");
+}
+
+function hrComponentForm(id) {
+  const m = state.hr.masters || {};
+  const x = id ? (m.components || []).find(c => c.id === Number(id)) : null;
+  if (id && !x) { toast({ok: false, body: {detail: "Salary component not found"}}, "Component not loaded"); return; }
+  const v = x || {id: "", code: "", name: "", kind: "earning", calc_type: "fixed",
+                  default_rate: 0, taxable: true, statutory: false, statutory_head: null,
+                  sort_order: 0, active: true};
+  openDrawer(x ? `Edit ${x.name}` : "New salary component",
+    "A component is a rule, not an amount: the amount or percentage is set on each employee's structure.", `
+    <form id="hrComponentForm" data-id="${v.id || ""}" novalidate>
+      <div class="row2"><div><label for="hrc-code">Code</label><input id="hrc-code" name="code" value="${esc(v.code)}"${x ? " readonly" : ""} autocomplete="off"></div>
+      <div><label for="hrc-name">Name</label><input id="hrc-name" name="name" value="${esc(v.name)}" autocomplete="off"></div></div>
+      <div class="row2"><div><label for="hrc-kind">Type</label><select id="hrc-kind" name="kind"${x ? " disabled" : ""}><option value="earning"${v.kind === "earning" ? " selected" : ""}>Earning</option><option value="deduction"${v.kind === "deduction" ? " selected" : ""}>Deduction</option></select></div>
+      <div><label for="hrc-calc">Calculation</label><select id="hrc-calc" name="calc_type"><option value="fixed"${v.calc_type === "fixed" ? " selected" : ""}>Fixed amount</option><option value="percent_basic"${v.calc_type === "percent_basic" ? " selected" : ""}>Percent of basic</option><option value="percent_gross"${v.calc_type === "percent_gross" ? " selected" : ""}>Percent of gross</option></select></div></div>
+      <div class="row2"><div><label for="hrc-rate">Default rate</label><input id="hrc-rate" name="default_rate" type="number" min="0" step="0.01" value="${esc(String(v.default_rate))}"><div class="note" id="hrc-rate-note"></div></div>
+      <div><label for="hrc-order">Sort order</label><input id="hrc-order" name="sort_order" type="number" min="0" step="1" value="${v.sort_order}"></div></div>
+      <div class="row2"><div><label for="hrc-tax">Taxable</label><select id="hrc-tax" name="taxable"><option value="true"${v.taxable ? " selected" : ""}>Yes</option><option value="false"${v.taxable ? "" : " selected"}>No</option></select></div>
+      <div><label for="hrc-stat">Statutory</label><select id="hrc-stat" name="statutory"><option value="false"${v.statutory ? "" : " selected"}>No</option><option value="true"${v.statutory ? " selected" : ""}>Yes</option></select></div></div>
+      <label for="hrc-head">Statutory head</label><select id="hrc-head" name="statutory_head"><option value="">—</option>${HR_STATUTORY_HEADS.map(([k, label]) => `<option value="${k}"${v.statutory_head === k ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>
+      ${x ? `<label for="hrc-active">Status</label><select id="hrc-active" name="active"><option value="true"${v.active ? " selected" : ""}>Active</option><option value="false"${v.active ? "" : " selected"}>Inactive</option></select>` : ""}
+      <div class="note">A deduction may carry a statutory head (PF, ESI, professional tax, TDS). An earning may not. No rate is inferred from the head.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save component</button><button class="btn ghost" type="button" data-act="hr-masters" data-tab="salary-components">Cancel</button></div>
+    </form>`);
+  const kind = $("#hrc-kind"), stat = $("#hrc-stat"), head = $("#hrc-head"), calc = $("#hrc-calc");
+  const syncStat = () => {
+    const earning = kind.value === "earning";
+    stat.disabled = earning;
+    head.disabled = earning;
+    if (earning) { stat.value = "false"; head.value = ""; }
+  };
+  const syncRate = () => {
+    $("#hrc-rate-note").textContent = calc.value === "fixed"
+      ? "Rupees on a structure line." : "Percent used when a structure line leaves the percent empty.";
+  };
+  kind.addEventListener("change", syncStat);
+  calc.addEventListener("change", syncRate);
+  syncStat(); syncRate();
+}
+async function saveHrComponent(form) {
+  const f = form.elements, err = $(".err", form);
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  err.textContent = "";
+  const kind = f.kind.value;
+  if (kind === "earning" && f.statutory.value === "true") {
+    err.textContent = "Statutory is allowed only on a deduction."; return;
+  }
+  const statutory = kind === "deduction" && f.statutory.value === "true";
+  const head = statutory ? (f.statutory_head.value || null) : null;
+  if (statutory && !head) { err.textContent = "Choose the statutory head, or set statutory to no."; return; }
+  if (!(Number(f.default_rate.value) >= 0)) { err.textContent = "The default rate cannot be negative."; return; }
+  if (!(Number(f.sort_order.value) >= 0)) { err.textContent = "Sort order must be zero or more."; return; }
+  const body = {name: f.name.value.trim(), calc_type: f.calc_type.value,
+                default_rate: f.default_rate.value, taxable: f.taxable.value === "true",
+                statutory, statutory_head: head, sort_order: Number(f.sort_order.value)};
+  if (!id) { body.code = f.code.value.trim().toUpperCase(); body.kind = kind; }
+  else body.active = f.active.value === "true";
+  if (body.name.length < 2) { err.textContent = "Enter the component name."; return; }
+  if (!id && body.code.length < 1) { err.textContent = "Enter a component code."; return; }
+  const res = await api(id ? `/api/hr/salary/components/${id}` : "/api/hr/salary/components",
+                        {method: id ? "PATCH" : "POST", body});
+  toast(res, res.ok ? (id ? "Component updated" : "Component created") : "Component not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  closeDrawer();
+  hrMasters("salary-components");
+}
+
+async function hrSalaryStructureForm(employeeId) {
+  const m = await hrMasterData();
+  const comps = (m.components || []).filter(c => c.active);
+  const employees = m.employees || [];
+  const empId = employeeId ? Number(employeeId) : null;
+  if (!comps.length) {
+    openDrawer("New salary structure",
+      "Payroll reads an employee's active structure; without components there is nothing to put in one.", `
+      <p class="gap-note">No data yet: no active salary components. Add at least one component first.</p>
+      <div class="actions"><button class="btn" type="button" data-act="hr-masters" data-tab="salary-components">Open salary components</button></div>`);
+    return;
+  }
+  const emp = empId ? employees.find(e => e.id === empId) : null;
+  const rows = comps.map(c => {
+    const pct = c.calc_type !== "fixed";
+    return `<tr>
+      <td><label class="chk"><input type="checkbox" name="comp" value="${c.id}" style="width:auto;margin-right:6px"> ${esc(c.name)}</label><small>${esc(c.code)} · ${c.kind === "earning" ? "Earning" : "Deduction"}</small></td>
+      <td>${esc(HR_COMPONENT_CALC[c.calc_type] || c.calc_type)}</td>
+      <td class="n">${pct
+        ? `<input name="pct_${c.id}" type="number" min="0" max="100" step="0.01" value="${esc(String(c.default_rate))}" style="width:90px"> %`
+        : `<input name="amt_${c.id}" type="number" min="0" step="0.01" value="${esc(String(c.default_rate))}" style="width:120px">`}</td></tr>`;
+  }).join("");
+  openDrawer("New salary structure",
+    "A structure covers the month it starts in. Saving a later one closes the current structure the day before.", `
+    <form id="hrStructureForm" data-emp="${empId || ""}" novalidate>
+      ${emp
+        ? `<div class="note">Employee: <b>${esc(emp.full_name)}</b> (${esc(emp.code)})</div>`
+        : `<label for="hrs-emp">Employee</label><select id="hrs-emp" name="employee_id"><option value="">—</option>${employees.filter(e => e.status === "active").map(e => `<option value="${e.id}">${esc(e.full_name)} (${esc(e.code)})</option>`).join("")}</select>`}
+      <div class="row2"><div><label for="hrs-from">Effective from</label><input id="hrs-from" name="effective_from" type="date"></div>
+      <div><label for="hrs-mode">Payment mode</label><select id="hrs-mode" name="payment_mode"><option value="bank">Bank transfer</option><option value="cash">Cash</option><option value="cheque">Cheque</option></select></div></div>
+      <h3>Components</h3>
+      <div class="tw"><table><thead><tr><th>Component</th><th>Calculation</th><th class="n">Amount / percent</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="note">Tick only the components that apply. Amounts are in rupees; a percent line uses the percentage column. The values shown are the component defaults and can be changed for this employee.</div>
+      <div class="err" role="alert"></div>
+      <div class="actions"><button class="btn" type="submit">Save structure</button><button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+    </form>`, true);
+}
+async function saveHrStructure(form) {
+  const f = form.elements, err = $(".err", form);
+  err.textContent = "";
+  const empId = form.dataset.emp ? Number(form.dataset.emp) : Number(f.employee_id.value || 0);
+  if (!empId) { err.textContent = "Choose the employee."; return; }
+  if (!f.effective_from.value) { err.textContent = "Choose the effective date."; return; }
+  const lines = [];
+  for (const cb of form.querySelectorAll('input[name="comp"]:checked')) {
+    const cid = Number(cb.value);
+    const comp = (state.hr.masters.components || []).find(c => c.id === cid);
+    if (!comp) continue;
+    if (comp.calc_type === "fixed") {
+      const input = f[`amt_${cid}`];
+      const amount = Number(input.value);
+      if (!(amount >= 0)) { err.textContent = `Enter the amount for ${comp.name}.`; return; }
+      lines.push({component_id: cid, amount, percent: null});
+    } else {
+      const input = f[`pct_${cid}`];
+      const percent = Number(input.value);
+      if (!(percent >= 0 && percent <= 100)) { err.textContent = `Enter a percentage from 0 to 100 for ${comp.name}.`; return; }
+      lines.push({component_id: cid, amount: 0, percent});
+    }
+  }
+  if (!lines.length) { err.textContent = "Tick at least one component."; return; }
+  const res = await api("/api/hr/salary/structures", {method: "POST",
+    body: {employee_id: empId, effective_from: f.effective_from.value,
+           payment_mode: f.payment_mode.value, lines}});
+  toast(res, res.ok ? "Salary structure saved" : "Salary structure not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  const inProfile = state.hr.profile && state.hr.profile.employee.id === empId;
+  closeDrawer();
+  if (inProfile) { await hrProfile(empId); hrProfileDrawer("salary"); }
+  else hrMasters("salary-structures");
+}
+
 async function hrAttendance() {
   const [a, o, pol] = await Promise.all([api(`/api/hr/attendance?from_date=${isoDay(0)}&to_date=${isoDay(0)}`),
     can("hr:read") ? api("/api/hr/offices") : Promise.resolve({ok: false, body: []}),
@@ -4087,7 +6694,7 @@ async function hrAttendance() {
       <div><label>Date</label><input name="date" type="date" value="${isoDay(0)}"></div></div>
       <label>Status</label><select name="status"><option value="present">Present</option><option value="absent">Absent</option><option value="half_day">Half day</option><option value="paid_leave">Paid leave</option><option value="unpaid_leave">Unpaid leave</option><option value="od">On duty</option><option value="late">Late</option><option value="early_departure">Early departure</option></select>
       <label>Remarks (required)</label><input name="remarks" autocomplete="off">
-      ${exempt ? `<div class="note">${exempt} employee(s) are exempt from attendance by policy and are not listed here. Change the rule under “Branches, offices &amp; attendance policy”.</div>` : ""}
+      ${exempt ? `<div class="note">${exempt} employee(s) are exempt from attendance by policy and are not listed here. Change the rule under “Branches &amp; locations”.</div>` : ""}
       ${!eligible.length ? `<div class="note">No employee must mark attendance. Add an attendance rule before recording it manually.</div>` : ""}
       <div class="note">A manual entry is audited with your name, the old value and the new value.</div>
       <div class="err" role="alert"></div><div class="actions"><button class="btn" type="submit"${eligible.length ? "" : " disabled"}>Save manual attendance</button></div></form>` : ""}
@@ -4208,10 +6815,18 @@ async function hrPayrollOpen(id) {
   const r = await api(`/api/hr/payroll/periods/${id}`);
   if (!r.ok) { toast(r, "Payroll not loaded"); return; }
   const p = r.body;
+  const skipped = p.skipped || [];
+  const skippedBlock = skipped.length ? `
+    <div class="note"><b>${skipped.length} employee(s) have no payroll entry.</b>
+      Payroll cannot pay them until each has an active salary structure for this month.
+      <ul class="gaps">${skipped.map(s => `<li><b>${esc(s.code)}</b> ${esc(s.name)} <span>${esc(s.reason)}</span></li>`).join("")}</ul>
+      <div class="actions"><button class="btn ghost" type="button" data-act="hr-masters" data-tab="salary-structures">Assign salary structures</button></div>
+    </div>` : "";
   openDrawer(`Payroll ${p.year}-${String(p.month).padStart(2, "0")}`, `Status: ${p.status}.`, `
     <div class="tw"><table><thead><tr><th>Employee</th><th>Department</th><th class="n">Payable days</th><th class="n">LOP</th><th class="n">Gross (₹)</th><th class="n">Deductions (₹)</th><th class="n">Net (₹)</th><th></th></tr></thead><tbody>
       ${p.entries.map(e => `<tr><td>${esc(e.employee)}<small>${esc(e.employee_code)}</small></td><td>${esc(e.department || "–")}</td><td class="n">${qty(e.payable_days)}</td><td class="n">${qty(e.lop_days)}</td><td class="n">${money(e.gross)}</td><td class="n">${money(e.deductions)}</td><td class="n strong">${money(e.net)}</td>
         <td>${can("hr:confidential") ? `<a class="link-btn" href="/api/hr/payroll/entries/${e.id}/slip" download>Slip</a>` : ""}</td></tr>`).join("")}</tbody></table></div>
+    ${skippedBlock}
     ${can("hr:reports") && can("report:export") ? `<a class="btn ghost" href="/api/reports/hr_payroll/export?format=xlsx" download>Download salary register (Excel)</a>` : ""}`, true);
 }
 async function saveHrPeriod(form) {
@@ -4225,8 +6840,14 @@ async function saveHrPeriod(form) {
 async function hrPayrollAction(act, id) {
   const map = {prepare: "prepare", submit: "submit", process: "process", paid: "pay"};
   const res = await api(`/api/hr/payroll/periods/${id}/${map[act]}`, {method: "POST", body: {}});
-  toast(res, res.ok ? "Payroll updated" : "Payroll not updated");
-  if (!res.ok) return;
+  if (!res.ok) { toast(res, "Payroll not updated"); return; }
+  if (act === "prepare" && (res.body.skipped || []).length) {
+    // Open the register so the skipped names are in front of the person who prepared it.
+    toast(res, `Payroll prepared; ${res.body.skipped.length} employee(s) skipped`);
+    await hrPayrollOpen(id);
+    return;
+  }
+  toast(res, "Payroll updated");
   await hrPayroll();
 }
 
@@ -5042,10 +7663,14 @@ async function sendEmailTest(f) {
 
 function renderProducts() {
   const q = $("#pq").value.trim().toLowerCase();
-  const list = state.products.filter(x => !q || [x.sku, x.name, x.hsn || ""].some(t => t.toLowerCase().includes(q)));
+  const list = state.products.filter(x => !q || [x.sku, x.name, x.hsn || "", x.category || "", x.brand || ""].some(t => t.toLowerCase().includes(q)));
   $("#prows").innerHTML = list.map(x => `<tr><td>${x.hsn ? esc(x.hsn) : '<span class="chip warn">Missing HSN</span>'}</td>
-    <td class="strong">${esc(x.sku)}</td><td>${esc(x.name)}</td><td>${esc(x.pack_size)}</td>
-    <td class="n">${money(x.mrp)}</td><td><span class="chip ${x.status === "active" ? "ok" : "off"}">${esc(x.status)}</span></td>
+    <td class="strong">${esc(x.sku)}</td><td>${esc(x.name)}</td>
+    <td>${x.category || x.brand ? `${x.category ? esc(x.category) : "—"}${x.brand ? `<small>${esc(x.brand)}</small>` : ""}` : "—"}</td>
+    <td>${esc(x.pack_size)}</td>
+    <td class="n">${money(x.mrp)}</td>
+    <td class="n">${x.reorder_level != null ? esc(qty(x.reorder_level)) : '<span class="muted">Not set</span>'}</td>
+    <td><span class="chip ${x.status === "active" ? "ok" : "off"}">${esc(x.status)}</span></td>
     <td class="rowacts"><button class="btn ghost sm" type="button" data-act="open-product" data-id="${x.id}">Open</button>
       <button class="btn ghost sm" type="button" data-act="edit-product" data-id="${x.id}">Edit</button>
       <button class="btn ghost sm" type="button" data-act="save-product" data-id="${x.id}">Save</button></td></tr>`).join("");
@@ -5065,13 +7690,26 @@ function productDrawer(id, mode) {
       <div class="row2"><div><label for="f-hsn">HSN code</label><input id="f-hsn" name="hsn" value="${val("hsn")}" placeholder="3004" inputmode="numeric" maxlength="8" autocomplete="off"${edit ? "" : " readonly"}></div>
       <div><label for="f-sku">SKU</label><input id="f-sku" name="sku" value="${val("sku")}" placeholder="DEMO-HN-001" autocomplete="off"${edit ? " readonly" : ""}></div></div>
       <label for="f-name">Product name</label><input id="f-name" name="name" value="${val("name")}" placeholder="Herbal Product Alpha" autocomplete="off"${edit ? "" : " readonly"}>
+      <div class="row2"><div><label for="f-cat">Category</label><input id="f-cat" name="category" list="prodCats" value="${val("category")}" placeholder="e.g. Skincare" maxlength="60" autocomplete="off"${edit ? "" : " readonly"}><datalist id="prodCats"></datalist></div>
+      <div><label for="f-brand">Brand</label><input id="f-brand" name="brand" list="prodBrands" value="${val("brand")}" placeholder="e.g. Herbanova" maxlength="60" autocomplete="off"${edit ? "" : " readonly"}><datalist id="prodBrands"></datalist></div></div>
       <div class="row2"><div><label for="f-pack">Pack size</label><input id="f-pack" name="pack" value="${val("pack_size")}" placeholder="100 g" autocomplete="off"${edit ? "" : " readonly"}></div>
       <div><label for="f-mrp">MRP (₹)</label><input id="f-mrp" name="mrp" value="${val("mrp")}" inputmode="decimal" placeholder="199.00" autocomplete="off"${edit ? "" : " readonly"}></div></div>
+      <label for="f-reorder">Reorder level (units, optional)</label><input id="f-reorder" name="reorder_level" value="${x && x.reorder_level != null ? esc(x.reorder_level) : ""}" inputmode="decimal" placeholder="Leave blank if not set" autocomplete="off"${edit ? "" : " readonly"}>
       ${x ? `<label for="f-status">Status</label><select id="f-status" name="status"${edit ? "" : " disabled"}><option value="active"${x.status === "active" ? " selected" : ""}>Active</option><option value="discontinued"${x.status === "discontinued" ? " selected" : ""}>Discontinued</option></select>` : ""}
-      <div class="note">The HSN is stored on the product and copied onto every invoice line. GST is looked up from the rate master, never assumed.</div>
+      <div class="note">The HSN is stored on the product and copied onto every invoice line. GST is looked up from the rate master, never assumed. A blank reorder level means "not set", never zero.</div>
       <div class="err" role="alert"></div>
       <div class="actions">${edit ? `<button class="btn" type="submit">${x ? "Save product" : "Create product"}</button>` : ""}<button class="btn ghost" type="button" data-act="close">${edit ? "Cancel" : "Close"}</button></div>
     </form>`, true);
+  fillProductCatalog();
+}
+
+async function fillProductCatalog() {
+  if (!can("product:read")) return;
+  const res = await api("/api/products/catalog");
+  if (!res.ok) return;
+  const cats = $("#prodCats"), brands = $("#prodBrands");
+  if (cats) cats.innerHTML = (res.body.categories || []).map(v => `<option value="${esc(v)}"></option>`).join("");
+  if (brands) brands.innerHTML = (res.body.brands || []).map(v => `<option value="${esc(v)}"></option>`).join("");
 }
 function productForm(id) { productDrawer(id, id ? "edit" : "new"); }
 
@@ -5085,9 +7723,13 @@ function renderStock() {
   const q = $("#sq").value.trim().toLowerCase(), wh = $("#swh").value, hide = $("#sin").checked;
   const list = state.batches.filter(b => (!hide || Number(b.on_hand) > 0) && (!wh || String(b.warehouse_id) === wh) &&
     (!q || [b.sku, b.product_name, b.batch_no].some(t => t.toLowerCase().includes(q))));
-  $("#srows").innerHTML = list.map(b => `<tr><td><span class="strong">${esc(b.product_name)}</span><small>${esc(b.sku)}, ${esc(b.pack_size)}</small></td>
+  $("#srows").innerHTML = list.map(b => {
+    const low = b.reorder_level != null && Number(b.product_on_hand) < Number(b.reorder_level);
+    return `<tr><td><span class="strong">${esc(b.product_name)}</span><small>${esc(b.sku)}, ${esc(b.pack_size)}</small></td>
     <td>${esc(b.batch_no)}</td><td>${esc(b.warehouse)}</td><td>${shelf(b.expiry)}</td><td>${esc(b.owner)}</td>
-    <td class="n strong">${esc(qty(b.on_hand))}</td></tr>`).join("");
+    <td class="n strong">${esc(qty(b.on_hand))}</td>
+    <td class="n">${b.reorder_level != null ? `${esc(qty(b.reorder_level))}${low ? ' <span class="chip bad">Low</span>' : ""}` : '<span class="muted">Not set</span>'}</td></tr>`;
+  }).join("");
   empty($("#sempty"), !list.length, state.batches.length ? "No batch matches these filters." : "No stock has been received yet.",
     state.batches.length ? "" : " Stock appears here once a purchase order is received.");
 }
@@ -5406,7 +8048,11 @@ async function saveProduct(form) {
   if (!/^[0-9]{4,8}$/.test(hsn)) { err.textContent = "Enter a 4 to 8 digit HSN code."; f.hsn.focus(); return; }
   if (!f.sku.value.trim() || !f.name.value.trim() || !f.pack.value.trim()) { err.textContent = "SKU, name and pack size are required."; return; }
   if (!(Number(f.mrp.value) >= 0)) { err.textContent = "Enter the MRP as zero or more."; return; }
-  const body = {hsn, name: f.name.value.trim(), pack_size: f.pack.value.trim(), mrp: f.mrp.value};
+  const reorder = f.reorder_level.value.trim();
+  if (reorder !== "" && !(Number(reorder) >= 0)) { err.textContent = "The reorder level must be zero or more, or blank."; return; }
+  const body = {hsn, name: f.name.value.trim(), pack_size: f.pack.value.trim(), mrp: f.mrp.value,
+                category: f.category.value.trim() || null, brand: f.brand.value.trim() || null,
+                reorder_level: reorder === "" ? null : reorder};
   if (id) { if (f.status) body.status = f.status.value; }
   else { body.sku = f.sku.value.trim(); }
   btn.disabled = true;
@@ -5748,6 +8394,9 @@ function soForm() {
     <form id="soForm" novalidate>
       <label for="s-d">Distributor</label>
       <select id="s-d" name="dist"><option value="">Select a distributor</option>${ds.map(d => `<option value="${d.id}"${state.soDistPreset === d.id ? " selected" : ""}>${esc(d.code)}, ${esc(d.name)} (₹ ${money(d.available)} credit available)</option>`).join("")}</select>
+      <label for="s-edd">Expected delivery date (optional)</label>
+      <input id="s-edd" name="expected_delivery_date" type="date" min="${new Date().toISOString().slice(0, 10)}">
+      <div class="note">The date promised to the buyer. Leave it blank if no promise was made; lateness is only reported against a promise.</div>
       <h3>Products</h3>
       <div class="lines" id="slines">${soLineRow(false)}</div>
       <button class="btn ghost sm addline" type="button" data-act="add-sline">Add a line</button>
@@ -5782,8 +8431,10 @@ async function saveSO(form) {
   }
   if (!lines.length) { err.textContent = "Add at least one product line."; return; }
   if (new Set(lines.map(l => l.sku)).size !== lines.length) { err.textContent = "Each product can appear on an order only once."; return; }
+  const promised = form.elements.expected_delivery_date.value;
   btn.disabled = true;
-  const res = await api("/api/sales-orders", {method: "POST", body: {distributor_id: Number(dist), lines}});
+  const res = await api("/api/sales-orders", {method: "POST", body: {distributor_id: Number(dist), lines,
+    ...(promised ? {expected_delivery_date: promised} : {})}});
   btn.disabled = false;
   toast(res, res.ok ? `Draft ${res.body.so_number} saved` : "Order not saved");
   if (!res.ok) { err.textContent = detail(res.body); return; }
@@ -5792,11 +8443,47 @@ async function saveSO(form) {
   await loadAll(); soDetail(res.body.id);
 }
 
+async function saveSoPromise(form, ev) {
+  const err = $(".err", form), id = Number(form.dataset.id);
+  const clear = !!(ev && ev.submitter && ev.submitter.value === "clear");
+  const date = clear ? null : form.elements.expected_delivery_date.value;
+  err.textContent = "";
+  if (!clear && !date) { err.textContent = "Choose a date, or use Clear promise."; return; }
+  const res = await api(`/api/sales-orders/${id}/delivery-date`,
+    {method: "PATCH", body: {expected_delivery_date: date}});
+  toast(res, res.ok ? "Promised date saved" : "Promise not saved");
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  await loadAll(); soDetail(id);
+}
+
 /* --- order detail: submit, cancel, dispatch --- */
+function promiseCell(o) {
+  if (!o.expected_delivery_date) return '<span class="muted">Not recorded</span>';
+  let suffix = "";
+  if (o.dispatched_at) {
+    const done = new Date(o.dispatched_at);
+    const iso = `${done.getFullYear()}-${String(done.getMonth() + 1).padStart(2, "0")}-${String(done.getDate()).padStart(2, "0")}`;
+    const diff = Math.round((new Date(iso) - new Date(o.expected_delivery_date)) / 86400000);
+    suffix = diff > 0 ? ` <span class="chip bad">${plural(diff, "day")} late</span>`
+      : diff === 0 ? ' <span class="chip ok">On the promised day</span>'
+      : ` <span class="chip ok">${plural(-diff, "day")} early</span>`;
+  }
+  return `${esc(fmtDate(o.expected_delivery_date))}${suffix}`;
+}
+
+function promiseEditor(o) {
+  if (!can("sales:write") || !["draft", "pending_approval", "approved"].includes(o.status)) return "";
+  const min = new Date().toISOString().slice(0, 10);
+  return `<form id="soPromiseForm" data-id="${o.id}" novalidate><h3>Promised delivery date</h3>
+    <label for="sp-date">Date</label><input id="sp-date" name="expected_delivery_date" type="date" min="${min}" value="${o.expected_delivery_date || ""}">
+    <div class="note">The date given to the buyer. Lateness is measured against it; an order without a promise is not counted. No date is inferred from payment terms.</div>
+    <div class="err" role="alert"></div>
+    <div class="actions"><button class="btn sm" type="submit">Save promise</button>${o.expected_delivery_date ? `<button class="btn ghost sm" type="submit" value="clear">Clear promise</button>` : ""}</div></form>`;
+}
+
 function soDetail(id, result, err) {
   const o = orderOf(id); if (!o) return;
-  const a = o.approval;
-  const lines = o.lines.map(l => `<tr><td><span class="strong">${esc(l.product_name)}</span><small>${esc(l.sku)}</small></td>
+  const a = o.approval;  const lines = o.lines.map(l => `<tr><td><span class="strong">${esc(l.product_name)}</span><small>${esc(l.sku)}</small></td>
     <td class="n">${esc(qty(l.qty))}</td><td class="n">${money(l.unit_price)}${Number(l.discount_pct) > 0 ? `<small>${esc(l.discount_pct)}% below MRP</small>` : ""}</td>
     <td class="n">${money(l.line_total)}</td></tr>`).join("");
   const cancelForm = () => can("sales:write") ? `<form id="cancelForm" data-id="${o.id}" novalidate><h3>Cancel this order</h3>
@@ -5843,7 +8530,10 @@ function soDetail(id, result, err) {
   openDrawer(o.so_number, `Sales order for ${o.distributor_name}`, `
     <dl class="dl"><dt>Status</dt><dd>${chipOf(SO, o.status)}</dd><dt>Distributor</dt><dd>${esc(o.distributor_code)}, ${esc(o.distributor_name)}</dd>
       <dt>Created</dt><dd>${esc(fmtDay(o.created_at))} by ${esc(o.created_by)}</dd>
+      ${o.approved_at ? `<dt>Approved</dt><dd>${esc(fmtStamp(o.approved_at))}</dd>` : ""}
+      <dt>Promised delivery</dt><dd>${promiseCell(o)}</dd>
       ${a ? `<dt>Approval</dt><dd>${chipOf(AP, a.status)} ${reasonChips(a.reasons)}</dd>` : ""}</dl>
+    ${promiseEditor(o)}
     <h3>Products</h3>
     <table class="dtable"><thead><tr><th>Product</th><th class="n">Qty</th><th class="n">Price (₹)</th><th class="n">Line total (₹)</th></tr></thead><tbody>${lines}</tbody>
       <tfoot><tr><td colspan="3">Order value</td><td class="n">${money(o.total)}</td></tr></tfoot></table>
@@ -5942,12 +8632,13 @@ function renderBilling() {
   empty($("#invempty"), !list.length, state.invoices.length ? "No invoice matches this filter." : "No invoices yet.",
     state.invoices.length ? "" : " An invoice is issued automatically when an approved sales order is dispatched.");
 
-  const notes = [...state.creditNotes.map(n => ({...n, kind: "Credit", no: n.credit_note_number})),
-                 ...state.debitNotes.map(n => ({...n, kind: "Debit", no: n.debit_note_number}))]
+  const notes = [...state.creditNotes.map(n => ({...n, kind: "Credit", no: n.credit_note_number, noteKind: "credit_note"})),
+                 ...state.debitNotes.map(n => ({...n, kind: "Debit", no: n.debit_note_number, noteKind: "debit_note"}))]
     .sort((a, b) => b.id - a.id);
   $("#noterows").innerHTML = notes.map(n => `<tr><td class="strong">${esc(n.no)}</td><td>${esc(n.invoice_number || "–")}</td>
     <td>${esc(fmtDate(n.note_date))}</td><td>${esc(n.kind)}<small>${esc(n.reason)}${n.returned_to_stock ? ` · returned to ${esc(n.warehouse || "stock")}` : ""}</small></td>
-    <td class="n">${money(n.grand_total)}</td><td>${chipOf(INV_STATUS, n.status)}</td></tr>`).join("");
+    <td class="n">${money(n.grand_total)}</td><td>${chipOf(INV_STATUS, n.status)}</td>
+    <td><button class="btn ghost sm" data-act="open-note" data-kind="${n.noteKind}" data-id="${n.id}" type="button">Open</button>${can("print:document") ? `<button class="btn ghost sm" data-act="print-note" data-kind="${n.noteKind}" data-id="${n.id}" type="button">Print</button>` : ""}</td></tr>`).join("");
   empty($("#noteempty"), !notes.length, "No credit or debit notes yet.",
     " A note corrects an issued invoice, is linked to it, and cannot exceed it.");
 }
@@ -6012,6 +8703,9 @@ function invDetail(id, err, notice) {
       <dt>Buyer</dt><dd>${esc(inv.buyer_name)}<small>GSTIN ${esc(inv.buyer_gstin || "unregistered")}, state ${esc(inv.buyer_state_code || "–")}</small></dd>
       <dt>Place of supply</dt><dd>${esc(inv.place_of_supply_state_code)} · ${inv.place_of_supply_kind === "intra" ? "CGST + SGST" : "IGST"}</dd>
       <dt>Sales order</dt><dd>${esc(inv.so_number || "–")}</dd>
+      <dt>Payment terms</dt><dd>${inv.payment_terms_days == null
+        ? "Not captured when this invoice was issued, so it has no due date"
+        : `${esc(String(inv.payment_terms_days))} days${inv.due_date ? ` · due ${fmtDate(inv.due_date)}` : ""}`}</dd>
       <dt>Stock dispatched</dt><dd>${esc(inv.lines.reduce((s, l) => s + Number(l.qty), 0))} units</dd>
       <dt>Taxable value</dt><dd>₹ ${money(inv.taxable_value)}</dd>
       <dt>CGST / SGST / IGST / Cess</dt><dd>₹ ${money(inv.cgst_total)} / ${money(inv.sgst_total)} / ${money(inv.igst_total)} / ${money(inv.cess_total)}</dd>
@@ -6026,6 +8720,39 @@ function invDetail(id, err, notice) {
     ${foot}
     ${can("print:document") ? verifyPanel("invoice", inv.id) : ""}`, true);
   if (can("print:document")) loadPrintPanel("invoice", inv.id);
+}
+
+/* A note is immutable, so its drawer is a record, not a form: what was issued,
+   the invoice it corrects, the lines and the tax it reversed, and the print
+   panel that serves the PDF and checks a printed copy. */
+function noteDetail(kind, id) {
+  const list = kind === "credit_note" ? state.creditNotes : state.debitNotes;
+  const n = list.find(x => x.id === Number(id));
+  if (!n) return;
+  const label = kind === "credit_note" ? "Credit note" : "Debit note";
+  const number = kind === "credit_note" ? n.credit_note_number : n.debit_note_number;
+  const inv = state.invoices.find(i => i.id === n.invoice_id);
+  const lines = (n.lines || []).map(l => `<tr><td><span class="strong">${esc(l.product_name)}</span><small>${esc(l.sku)}</small></td>
+    <td class="n">${esc(qty(l.qty))}</td><td class="n">${money(l.taxable_value)}</td>
+    <td class="n">${money(l.cgst_amount)}</td><td class="n">${money(l.sgst_amount)}</td>
+    <td class="n">${money(l.igst_amount)}</td><td class="n">${money(l.cess_amount)}</td>
+    <td class="n">${money(l.line_total)}</td></tr>`).join("");
+  openDrawer(number, `${label} · ${fmtDate(n.note_date)} · ${INV_STATUS[n.status] ? INV_STATUS[n.status][0] : n.status}`, `
+    <dl class="dl"><dt>Document</dt><dd>${esc(number)}<small>${esc(n.financial_year)}</small></dd>
+      <dt>Against invoice</dt><dd>${esc(n.invoice_number || `#${n.invoice_id}`)}</dd>
+      <dt>Buyer</dt><dd>${esc(inv && inv.buyer_name ? inv.buyer_name : "Not shown on the note record")}</dd>
+      <dt>Date</dt><dd>${esc(fmtDate(n.note_date))}</dd>
+      <dt>Reason</dt><dd>${esc(n.reason)}</dd>
+      ${kind === "credit_note" ? `<dt>Goods returned to stock</dt><dd>${n.returned_to_stock
+        ? esc(n.warehouse || "Yes") : "No — money correction only"}</dd>` : ""}
+      <dt>Taxable value</dt><dd>₹ ${money(n.taxable_value)}</dd>
+      <dt>CGST / SGST / IGST / Cess</dt><dd>₹ ${money(n.cgst_total)} / ${money(n.sgst_total)} / ${money(n.igst_total)} / ${money(n.cess_total)}</dd>
+      <dt>Tax total</dt><dd>₹ ${money(n.tax_total)}</dd>
+      <dt>Note total</dt><dd><b>₹ ${money(n.grand_total)}</b></dd></dl>
+    <div class="tw"><table class="dtable"><thead><tr><th>Line</th><th class="n">Qty</th><th class="n">Taxable</th><th class="n">CGST</th><th class="n">SGST</th><th class="n">IGST</th><th class="n">Cess</th><th class="n">Total</th></tr></thead><tbody>${lines || `<tr><td colspan="8">No line detail was recorded.</td></tr>`}</tbody></table></div>
+    <div class="note">A ${label.toLowerCase()} cannot be edited or deleted after issue. It is corrected by issuing another note, which is added to this invoice's record.</div>
+    ${can("print:document") ? verifyPanel(kind, n.id) : ""}`, true);
+  if (can("print:document")) loadPrintPanel(kind, n.id);
 }
 
 /* The panel below the invoice. It reads the print log, shows the real QR symbol
@@ -6846,10 +9573,17 @@ async function employeeForm(empId) {
     const full = await api(`/api/hr/employees/${empId}`);
     if (full.ok) e = full.body;
   }
-  const [b, o, s, prof] = rich
+  const [b, o, s, prof, dept] = rich
     ? await Promise.all([api("/api/hr/branches"), api("/api/hr/offices"), api("/api/hr/shifts"),
-        empId ? api(`/api/hr/employees/${empId}/profile`) : Promise.resolve(null)])
-    : [null, null, null, null];
+        empId ? api(`/api/hr/employees/${empId}/profile`) : Promise.resolve(null),
+        api("/api/hr/departments")])
+    : [null, null, null, null, null];
+  const departments = dept && dept.ok ? dept.body : [];
+  if (dept && dept.ok) state.hr.departments = departments;
+  const deptName = e ? (e.department || (departments.find(d => d.id === e.department_id) || {}).name || "") : "";
+  const deptList = departments.length
+    ? `<datalist id="ne-deptlist">${departments.filter(d => d.status === "active")
+        .map(d => `<option value="${esc(d.name)}"></option>`).join("")}</datalist>` : "";
   const opts = (res, sel, label) => (res && res.ok ? res.body : [])
     .map(v => `<option value="${v.id}"${sel === v.id ? " selected" : ""}>${esc(label(v))}</option>`).join("");
   const req = prof && prof.ok ? prof.body.attendance_requirement : null;
@@ -6870,7 +9604,7 @@ async function employeeForm(empId) {
     <form id="empForm" data-id="${e ? e.id : ""}" novalidate>
       <div class="row2"><div><label for="ne-code">Employee code</label><input id="ne-code" name="code" autocomplete="off" value="${e ? esc(e.code) : ""}" ${e ? "readonly" : ""}></div>
       <div><label for="ne-name">Full name</label><input id="ne-name" name="full_name" autocomplete="off" value="${e ? esc(e.full_name) : ""}"></div></div>
-      <div class="row2"><div><label for="ne-dept">Department</label><input id="ne-dept" name="department" autocomplete="off" value="${e && e.department ? esc(e.department) : ""}"></div>
+      <div class="row2"><div><label for="ne-dept">Department</label><input id="ne-dept" name="department" list="ne-deptlist" autocomplete="off" value="${esc(deptName)}" placeholder="Choose or type a department">${deptList}</div>
       <div><label for="ne-des">Designation</label><input id="ne-des" name="designation" autocomplete="off" value="${e && e.designation ? esc(e.designation) : ""}"></div></div>
       <div class="row2"><div><label for="ne-phone">Phone</label><input id="ne-phone" name="phone" autocomplete="off" value="${e && e.phone ? esc(e.phone) : ""}"></div>
       <div><label for="ne-email">Email</label><input id="ne-email" name="email" autocomplete="off" value="${e && e.email ? esc(e.email) : ""}"></div></div>
@@ -6912,6 +9646,9 @@ async function saveEmployee(form) {
     body.branch_id = f.branch_id.value ? Number(f.branch_id.value) : null;
     body.office_id = f.office_id.value ? Number(f.office_id.value) : null;
     body.shift_id = f.shift_id.value ? Number(f.shift_id.value) : null;
+    // A name typed exactly as a master is linked to it; free text stays text.
+    const dept = (state.hr.departments || []).find(d => d.name === body.department);
+    body.department_id = dept ? dept.id : null;
   }
   const base = rich ? "/api/hr/employees" : "/api/employees";
   const res = await api(id ? `${base}/${id}` : base, {method: id ? "PATCH" : "POST", body});
@@ -7795,11 +10532,72 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "dbreset-cancel") return dbResetCancel();
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
+  if (a && a.dataset.act === "load-entries") return loadEntriesWindow();
   if (a && a.dataset.act === "load-tb") return loadTrialBalance();
+  if (a && a.dataset.act === "load-input-gst") return loadInputGst();
+  if (a && a.dataset.act === "new-purchase-invoice") return newPurchaseInvoice();
+  if (a && a.dataset.act === "reverse-purchase-invoice") return reversePurchaseInvoice(a.dataset.id);
+  if (a && a.dataset.act === "load-reconciliation") return loadReconciliation();
+  if (a && a.dataset.act === "new-gst-return") return newGstReturn();
+  if (a && a.dataset.act === "load-dues") return loadStatutory();
+  if (a && a.dataset.act === "new-challan") return newChallan();
   if (a && a.dataset.act === "load-ageing") return loadAgeing();
+  if (a && a.dataset.act === "load-rbd") return applyRbdFilter();
+  if (a && a.dataset.act === "export-rbd") return exportRbdCsv();
+  if (a && a.dataset.act === "periods-refresh") return loadPeriods();
+  if (a && a.dataset.act === "fy-close") return closeFinancialYear(a.dataset.fy);
+  if (a && a.dataset.act === "fy-reopen") return reopenFinancialYear(a.dataset.fy);
+  if (a && a.dataset.act === "lock-month") return lockAccountingMonth();
+  if (a && a.dataset.act === "lock-unlock") return unlockAccountingMonth(a.dataset.id);
   if (a && a.dataset.act === "load-acc-report") return loadAccountsReport();
   if (a && a.dataset.act === "export-acc") return exportAccCsv();
+  if (a && a.dataset.act === "export-ar") return exportReceivablesCsv();
+  if (a && a.dataset.act === "export-ageing") return exportAgeingCsv();
+  if (a && a.dataset.act === "export-ap") return exportPayablesCsv();
+  if (a && a.dataset.act === "export-entries") return exportEntriesCsv();
+  if (a && a.dataset.act === "export-gst-out") return exportGstRegisterCsv();
+  if (a && a.dataset.act === "export-gst-in") return exportInputGstCsv();
+  if (a && a.dataset.act === "export-statutory") return exportStatutoryCsv();
+  if (a && a.dataset.act === "export-tb") return exportTrialBalanceCsv();
+  if (a && a.dataset.act === "export-ledger-heads") return exportLedgerHeadsCsv();
+  if (a && a.dataset.act === "export-openings") return exportOpeningsCsv();
+  if (a && a.dataset.act === "export-balance-sheet") return exportBalanceSheetCsv();
+  if (a && a.dataset.act === "export-vouchers") return exportVouchersCsv();
+  if (a && a.dataset.act === "export-daybook") return exportDayBookCsv();
+  if (a && a.dataset.act === "export-bank") return exportBankCsv();
+  if (a && a.dataset.act === "export-years") return exportYearsCsv();
+  if (a && a.dataset.act === "export-locks") return exportLocksCsv();
+  if (a && a.dataset.act === "foc-export-stock") return exportFocStockCsv();
+  if (a && a.dataset.act === "foc-export-notes") return exportFocNotesCsv();
   if (a && a.dataset.act === "acc-ledger") return openDistributorLedger(a.dataset.id);
+  if (a && a.dataset.act === "load-ledger-heads") return loadLedgerHeads();
+  if (a && a.dataset.act === "new-ledger-head") return newLedgerHead();
+  if (a && a.dataset.act === "ledger-head-toggle") return toggleLedgerHead(a.dataset.id, a.dataset.on === "1");
+  if (a && a.dataset.act === "load-openings") return loadOpenings();
+  if (a && a.dataset.act === "edit-opening") return editOpening(a.dataset.id);
+  if (a && a.dataset.act === "load-bs") return loadBalanceSheet();
+  if (a && a.dataset.act === "load-vouchers") return loadVouchers();
+  if (a && a.dataset.act === "new-voucher") return voucherForm();
+  if (a && a.dataset.act === "edit-voucher") {
+    const v = (state.accounts.ledger.vouchers || []).find(x => String(x.id) === String(a.dataset.id));
+    return v ? voucherForm(v) : toast({ok: false, status: "—", body: {detail: "Reload the vouchers first"}}, "Voucher not found");
+  }
+  if (a && a.dataset.act === "voucher-add-line") return addVoucherLine();
+  if (a && a.dataset.act === "voucher-remove-line") return removeVoucherLine(a);
+  if (a && a.dataset.act === "post-voucher") return postVoucher(a.dataset.id);
+  if (a && a.dataset.act === "delete-voucher") return deleteVoucher(a.dataset.id);
+  if (a && a.dataset.act === "reverse-voucher") return reverseVoucherForm(a.dataset.id);
+  if (a && a.dataset.act === "load-daybook") return loadDayBook();
+  if (a && a.dataset.act === "load-bank-statements") return loadBankStatements();
+  if (a && a.dataset.act === "new-bank-statement") return newBankStatement();
+  if (a && a.dataset.act === "open-bank-statement") return openBankStatement(a.dataset.id);
+  if (a && a.dataset.act === "bank-line-add") return addBankLineForm();
+  if (a && a.dataset.act === "bank-edit-statement") return editBankStatementForm();
+  if (a && a.dataset.act === "bank-delete-statement") return deleteBankStatement();
+  if (a && a.dataset.act === "bank-line-match") return bankMatchDrawer(a.dataset.id);
+  if (a && a.dataset.act === "bank-match") return bankMatch(a.dataset.line, a.dataset.kind, a.dataset.ref);
+  if (a && a.dataset.act === "bank-line-unmatch") return bankUnmatch(a.dataset.id);
+  if (a && a.dataset.act === "bank-line-delete") return deleteBankLine(a.dataset.id);
   if (a && a.dataset.act === "exp-refresh") return loadExpenses();
   if (a && a.dataset.act === "new-expense") return openExpenseForm();
   if (a && a.dataset.act === "exp-heads") return openExpenseHeads();
@@ -7887,6 +10685,17 @@ document.addEventListener("click", e => {
     else if (act === "hr-new-shift") hrShiftForm();
     else if (act === "hr-edit-shift") hrShiftForm(a.dataset.id);
     else if (act === "hr-sites") hrSites();
+    else if (act === "hr-masters") hrMasters(a.dataset.tab);
+    else if (act === "hr-masters-tab") hrMasters(a.dataset.tab);
+    else if (act === "hr-new-dept") hrDepartmentForm();
+    else if (act === "hr-edit-dept") hrDepartmentForm(a.dataset.id);
+    else if (act === "hr-new-holiday") hrHolidayForm();
+    else if (act === "hr-edit-holiday") hrHolidayForm(a.dataset.id);
+    else if (act === "hr-new-leave-type") hrLeaveTypeForm();
+    else if (act === "hr-edit-leave-type") hrLeaveTypeForm(a.dataset.id);
+    else if (act === "hr-new-component") hrComponentForm();
+    else if (act === "hr-edit-component") hrComponentForm(a.dataset.id);
+    else if (act === "hr-new-structure") hrSalaryStructureForm(a.dataset.emp || null);
     else if (act === "hr-new-branch") hrBranchForm();
     else if (act === "hr-edit-branch") hrBranchForm(a.dataset.id);
     else if (act === "hr-new-office") hrOfficeForm();
@@ -7948,6 +10757,9 @@ document.addEventListener("click", e => {
     else if (act === "edit-slab") editSlabForm(a.dataset.id);
     else if (act === "open-inv") invDetail(a.dataset.id);
     else if (act === "print-inv") printDocument("invoice", Number(a.dataset.id), "ORIGINAL");
+    else if (act === "open-note") noteDetail(a.dataset.kind, Number(a.dataset.id));
+    else if (act === "print-note" && can("print:document"))
+      printDocument(a.dataset.kind, Number(a.dataset.id), "ORIGINAL");
     else if (act === "print-copy") {
       const chosen = $("#printCopy");
       printDocument(a.dataset.kind, Number(a.dataset.id), chosen ? chosen.value : "ORIGINAL");
@@ -8014,6 +10826,7 @@ document.addEventListener("submit", e => {
   const f = e.target;
   if (f.id === "loginForm") login(e);
   else if (f.id === "changePwForm") changePassword(f);
+  else if (f.id === "totpForm") totpSubmit(e);
   else if (f.id === "prodForm") saveProduct(f);
   else if (f.id === "whForm") saveWarehouse(f);
   else if (f.id === "capForm") saveCapacity(f);
@@ -8024,6 +10837,7 @@ document.addEventListener("submit", e => {
   else if (f.id === "bankForm") requestBankChange(f);
   else if (f.id === "bankDecide") decideBank(f, (e.submitter && e.submitter.dataset.decide) || "approve");
   else if (f.id === "soForm") saveSO(f);
+  else if (f.id === "soPromiseForm") saveSoPromise(f, e);
   else if (f.id === "cancelForm") cancelSO(f);
   else if (f.id === "dispForm") postDispatch(f);
   else if (f.id === "decideForm") decide(f, (e.submitter && e.submitter.value) || "approve");
@@ -8037,6 +10851,17 @@ document.addEventListener("submit", e => {
   else if (f.id === "limitForm") saveLimit(f);
   else if (f.id === "verifyForm") submitVerification(f);
   else if (f.id === "entryForm") saveEntry(f);
+  else if (f.id === "piForm") savePurchaseInvoice(f);
+  else if (f.id === "piReverseForm") savePurchaseInvoiceReverse(f);
+  else if (f.id === "obForm") saveOpening(f);
+  else if (f.id === "ledgerHeadForm") saveLedgerHead(f);
+  else if (f.id === "voucherForm") saveVoucher(f);
+  else if (f.id === "voucherReverseForm") saveVoucherReverse(f);
+  else if (f.id === "bankStatementForm") saveBankStatement(f);
+  else if (f.id === "bankLineForm") saveBankLine(f);
+  else if (f.id === "bankEditForm") saveBankEdit(f);
+  else if (f.id === "grForm") saveGstReturn(f);
+  else if (f.id === "chForm") saveChallan(f);
   else if (f.id === "expForm") saveExpense(f);
   else if (f.id === "expReceiptForm") saveExpenseReceipt(f);
   else if (f.id === "expReverseForm") saveExpenseReverse(f);
@@ -8062,6 +10887,11 @@ document.addEventListener("submit", e => {
   else if (f.id === "slabPatchForm") saveSlabPatch(f);
   else if (f.id === "quoteForm") doQuote(f);
   else if (f.id === "hrShiftForm") saveHrShift(f);
+  else if (f.id === "hrDeptForm") saveHrDepartment(f);
+  else if (f.id === "hrHolidayForm") saveHrHoliday(f);
+  else if (f.id === "hrLeaveTypeForm") saveHrLeaveType(f);
+  else if (f.id === "hrComponentForm") saveHrComponent(f);
+  else if (f.id === "hrStructureForm") saveHrStructure(f);
   else if (f.id === "hrBranchForm") saveHrBranch(f);
   else if (f.id === "hrOfficeForm") saveHrOffice(f);
   else if (f.id === "hrRuleForm") saveHrRule(f);
@@ -8115,6 +10945,7 @@ document.addEventListener("change", e => {
   }
   if (e.target.id === "hrStatus" || e.target.id === "hrDept") renderHrDirectory();
   if (e.target.id === "expHead") setExpenseHead(e.target.value);
+  if (e.target.id === "expFrom" || e.target.id === "expTo") loadExpenses();
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
@@ -8163,9 +10994,16 @@ document.addEventListener("keydown", e => {
 const bind = (sel, event, fn) => { const el = typeof sel === "string" ? $(sel) : sel; if (el) el.addEventListener(event, fn); return el; };
 bind("#scrim", "click", closeDrawer);
 bind("#dclose", "click", closeDrawer);
+window.addEventListener("resize", fitDrawerTables);
 const signOut = async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); };
 bind("#out", "click", signOut);
 bind("#mcOut", "click", signOut);
+bind("#totpOut", "click", signOut);
+bind("#totpRecoveryToggle", "click", totpToggleRecovery);
+bind("#totpDone", "click", async () => {
+  const me = await api("/api/auth/me");
+  enter(me.ok ? me.body : (totpPending || {}));
+});
 bind("#themeToggle", "click", toggleTheme);
 bind("#dashTheme", "click", toggleTheme);
 bind("#paletteQ", "input", e => {
@@ -8293,6 +11131,7 @@ document.addEventListener("change", e => {
 document.addEventListener("change", e => {
   if (e.target.id === "accFrom") return setAccWindow(e.target.value, null);
   if (e.target.id === "accTo") return setAccWindow(null, e.target.value);
+  if (e.target.id === "e-party" || e.target.id === "e-purpose") return syncEntryAgainst();
   if (e.target.id === "accState") return setAccStateFilter(e.target.value);
   if (e.target.id === "accMonth") return setAccMonth(e.target.value);
 });

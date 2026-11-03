@@ -44,6 +44,32 @@ def _structure(db: Session, employee_id: int, start: date, end: date) -> SalaryS
     return None
 
 
+def skipped_employees(db: Session, period, entries=None) -> list[dict]:
+    """Active employees for the period who have no payroll entry.
+
+    A payroll run used to drop these employees without saying so (M-06). The
+    caller shows the list; the reason is one of the two conditions the run
+    itself tests, so the screen cannot disagree with the register.
+    """
+    start, end = _month_bounds(period.year, period.month)
+    have = {e.employee_id for e in (period.entries if entries is None else entries)}
+    out = []
+    for emp in db.scalars(select(Employee).where(Employee.status == "active")
+                          .order_by(Employee.code)).all():
+        if emp.id in have:
+            continue
+        if emp.joining_date and emp.joining_date > end:
+            continue
+        if emp.date_of_exit and emp.date_of_exit < start:
+            continue
+        reason = ("No active salary structure covers this month"
+                  if _structure(db, emp.id, start, end) is None
+                  else "Not in the prepared entries")
+        out.append({"employee_id": emp.id, "code": emp.code, "name": emp.full_name,
+                    "reason": reason})
+    return out
+
+
 def run_payroll(db: Session, period) -> list[PayrollEntry]:
     start, end = _month_bounds(period.year, period.month)
     employees = db.scalars(select(Employee).where(Employee.status == "active")).all()

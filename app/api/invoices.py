@@ -19,6 +19,7 @@ from ..core.pagination import page_params, paginate
 from ..core.rbac import require, require_admin
 from ..models.core import (Batch, CreditNote, DebitNote, Invoice, InvoiceLine, SalesOrder,
                            StockMovement)
+from ..services import periods
 from ..services.audit import audit
 
 router = APIRouter(prefix="/api/invoices", tags=["invoices"])
@@ -86,6 +87,8 @@ class InvoiceOut(BaseModel):
     transporter_name: str | None = None
     eway_bill_number: str | None = None
     eway_bill_date: date | None = None
+    payment_terms_days: int | None = None
+    due_date: date | None = None
     cancel_reason: str | None = None
     cancelled_at: datetime | None = None
     credit_note_total: Decimal = Decimal(0)
@@ -131,6 +134,8 @@ def _build_invoice(inv: Invoice, so_map: dict[int, str]) -> InvoiceOut:
         transporter_name=inv.transporter_name,
         eway_bill_number=inv.eway_bill_number,
         eway_bill_date=inv.eway_bill_date,
+        payment_terms_days=inv.payment_terms_days,
+        due_date=inv.due_date,
         cancel_reason=inv.cancel_reason,
         cancelled_at=inv.cancelled_at,
         lines=[
@@ -290,6 +295,13 @@ def cancel_invoice(invoice_id: int, body: CancelIn, db: Session = Depends(get_db
     if noted:
         raise HTTPException(409, "Credit or debit notes are linked to this invoice; "
                                  "reverse them before cancelling it")
+    # Cancelling removes the invoice from the year's receivable and sales, so it
+    # is a change to a closed year like any other.
+    try:
+        periods.refuse_if_closed(db, inv.invoice_date,
+                                 f"invoice {inv.invoice_number}'s cancellation")
+    except periods.PeriodClosed as exc:
+        raise HTTPException(423, str(exc))
     inv.status = "cancelled"
     inv.cancel_reason = body.reason.strip()
     inv.cancelled_by = user.id

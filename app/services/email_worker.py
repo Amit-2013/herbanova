@@ -97,6 +97,10 @@ def enqueue_due(db: Session, now: datetime | None = None) -> int:
     ).all()
     for found in fresh:             # backfill after an import or an upgrade
         found.next_run_at = schedule_service.next_run(found, now)
+    if fresh:
+        # Commit the backfill even when no slot is due yet, otherwise the next
+        # cycle repeats it and a schedule can stay unscheduled for ever.
+        db.commit()
 
     due = db.scalars(select(EmailSchedule).where(
         EmailSchedule.enabled.is_(True), EmailSchedule.next_run_at.is_not(None),
@@ -274,8 +278,27 @@ def process_one(db: Session, delivery_id: int, now: datetime | None = None) -> s
         return "sent"
     except Exception as exc:        # report generation, rendering or SMTP
         log.warning("Delivery %s failed: %s", delivery.run_key, type(exc).__name__)
+        # A database error leaves the session in a failed transaction. Roll it
+        # back and re-read the row before recording the failure; otherwise the
+        # failure itself raises PendingRollbackError and the delivery stays
+        # "sending" until the stale-claim sweep, or is never recorded at all.
+        db.rollback()
+        delivery = db.get(EmailDelivery, delivery_id)
+        if delivery is None:
+            return "missing"
+        schedule = delivery.schedule
+        if schedule is None:
+            delivery.status = "skipped"
+            delivery.error = "The schedule was deleted; nothing was sent."
+            delivery.finished_at = now
+            db.commit()
+            return "skipped"
         _record_failure(db, delivery, schedule, exc, now)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("Could not record the failure of delivery %s", delivery.run_key)
         return "failed" if delivery.status == "failed" else "retry"
 
 

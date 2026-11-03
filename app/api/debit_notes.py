@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..core.db import get_db
 from ..core.rbac import require
 from ..models.core import DebitNote, Invoice
+from ..services import periods
 from ..services.audit import audit
 from ..services.notes import NoteError, create_debit_note
 
@@ -127,6 +128,10 @@ def get_debit_note(dn_id: int, db: Session = Depends(get_db), _=Depends(require(
 @router.post("", response_model=DebitNoteOut, status_code=201)
 def issue_debit_note(body: DebitNoteIn, db: Session = Depends(get_db),
                      user=Depends(require("note:write"))):
+    try:
+        periods.refuse_if_closed(db, body.note_date or date.today(), "a debit note")
+    except periods.PeriodClosed as exc:
+        raise HTTPException(423, str(exc))
     try:
         note = create_debit_note(db, invoice_id=body.invoice_id, lines=body.lines,
                                  reason=body.reason, issued_by=user.id,
