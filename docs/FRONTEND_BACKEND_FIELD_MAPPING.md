@@ -72,7 +72,7 @@ The SPA is a single page with hash routes. Visibility of a view is decided in th
 
 | UI element | API | Permission | Content |
 |---|---|---|---|
-| Period 7D/30D/90D, all tiles and panels | `GET /api/dashboard?range=` | `require_login`, then per section | Payload as at §2.1; `range` outside 7/30/90 → 422. Sections the role cannot read are `null`, never `0`. |
+| Period strip (From/To dates; presets 7D, 30D, 90D, This month, Last month, This FY), all tiles and panels | `GET /api/dashboard?from_date=&to_date=` | `require_login`, then per section | Payload as at §2.1; the browser sends dates, and the legacy `range=` parameter is still accepted for older callers but limited to 7/30/90 (422 otherwise). `to_date` in the future or `from_date` after `to_date` → **422**. Sections the role cannot read are `null`, never `0`. |
 | Stock KPIs, expiry watch, warehouses, open POs | same payload | `stock:read` | `stock`, `purchase_orders`, `stock_by_warehouse`, `expiry_watch`, `open_pos`, stock KPI tiles |
 | Sales KPIs, top products, category panel | same payload | `sales:read` | `orders_ready`, `top_products`, `category_sales`; sales side of `sales_vs_purchases` is masked server-side without it |
 | Receivables ageing | same payload | `accounts:read` | `receivables_ageing`, from `ledger.ageing_rows` (same function as the report) |

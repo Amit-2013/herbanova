@@ -562,6 +562,7 @@ larger decision.
 | Document | What it answers |
 |---|---|
 | [`FEATURE_INVENTORY.md`](FEATURE_INVENTORY.md) | Row-level feature, gate, evidence and status |
+| [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | Type scale, palette with measured contrast, spacing, components, states, motion and breakpoints |
 | [`VERIFICATION_REPORT.md`](VERIFICATION_REPORT.md) | What was run, when, and what was not |
 | [`REQUIREMENTS_TRACEABILITY_MATRIX.md`](REQUIREMENTS_TRACEABILITY_MATRIX.md) | Requirement → route → test |
 | [`permissions-matrix.md`](permissions-matrix.md) | Every key, every role, every guarded route group |

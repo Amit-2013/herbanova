@@ -2209,11 +2209,6 @@ function applyTheme(theme) {
     b.setAttribute("aria-pressed", String(dark));
     b.textContent = dark ? "Light theme" : "Dark theme";
   }
-  const d = $("#dashTheme");
-  if (d) {
-    d.setAttribute("aria-pressed", String(dark));
-    d.textContent = dark ? "Light theme" : "Dark theme";
-  }
 }
 
 function toggleTheme() {
@@ -7665,7 +7660,7 @@ function renderProducts() {
   const q = $("#pq").value.trim().toLowerCase();
   const list = state.products.filter(x => !q || [x.sku, x.name, x.hsn || "", x.category || "", x.brand || ""].some(t => t.toLowerCase().includes(q)));
   $("#prows").innerHTML = list.map(x => `<tr><td>${x.hsn ? esc(x.hsn) : '<span class="chip warn">Missing HSN</span>'}</td>
-    <td class="strong">${esc(x.sku)}</td><td>${esc(x.name)}</td>
+    <td class="strong sku">${esc(x.sku)}</td><td>${esc(x.name)}</td>
     <td>${x.category || x.brand ? `${x.category ? esc(x.category) : "—"}${x.brand ? `<small>${esc(x.brand)}</small>` : ""}` : "—"}</td>
     <td>${esc(x.pack_size)}</td>
     <td class="n">${money(x.mrp)}</td>
@@ -8761,10 +8756,10 @@ function noteDetail(kind, id) {
 function verifyPanel(kind, id) {
   const copies = ["ORIGINAL", "DUPLICATE", "TRIPLICATE"]
     .map(c => `<option value="${c}">${c}</option>`).join("");
-  return `<div class="qr-panel" style="margin-top:16px; padding:12px; background:#f8f9fa; border-radius:4px;">
+  return `<div class="qr-panel" style="margin-top:16px; padding:12px; background:var(--wash); border:1px solid var(--line); border-radius:4px;">
     <h3>Print and verification</h3>
     <div style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
-      <img id="qrImg" class="hide" width="128" height="128" alt="QR code carrying the latest print's short code" style="background:#fff">
+      <img id="qrImg" class="hide" width="128" height="128" alt="QR code carrying the latest print's short code" style="background:var(--surface)">
       <div style="flex:1; min-width:220px;">
         <p class="note" id="verifyState" role="status">Checking the print log…</p>
         <p class="note">Document: <b id="verifyDoc">–</b><br>Printed: <b id="verifyBy">–</b><br>
@@ -11005,7 +11000,6 @@ bind("#totpDone", "click", async () => {
   enter(me.ok ? me.body : (totpPending || {}));
 });
 bind("#themeToggle", "click", toggleTheme);
-bind("#dashTheme", "click", toggleTheme);
 bind("#paletteQ", "input", e => {
   clearTimeout(state.palette.timer);
   const term = e.target.value.trim();

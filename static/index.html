@@ -74,8 +74,8 @@
     <input id="totpCode" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" spellcheck="false">
     <button class="btn block" id="totpBtn" type="submit">Verify and continue</button>
     <div class="err" id="totpErr" role="alert"></div>
-    <p class="sub"><button class="link-btn" id="totpRecoveryToggle" type="button">Use a recovery code instead</button></p>
-    <p class="sub"><button class="link-btn" id="totpOut" type="button">Sign out</button></p>
+    <p class="sub totp-alt"><button class="link-btn" id="totpRecoveryToggle" type="button">Use a recovery code instead</button></p>
+    <p class="sub totp-alt"><button class="link-btn" id="totpOut" type="button">Sign out</button></p>
   </form>
   <form class="formbox hide" id="totpRecoveryBox" novalidate>
     <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
@@ -88,8 +88,20 @@
 
 <!-- App shell -->
 <div id="shell" class="hide">
+  <header class="appbar">
+    <a class="appbar-brand" href="#/dash" aria-label="Herbanova, go to Overview">
+      <span class="logo" aria-hidden="true">H</span><span class="appbar-name">HERBANOVA</span>
+    </a>
+    <button class="appbar-search" type="button" data-act="open-search" aria-label="Search pages and records, keyboard shortcut Control or Command and K">
+      <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
+      <span>Search pages and records</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+    <div class="appbar-tools">
+      <button class="appbar-btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
+    </div>
+  </header>
   <aside class="side">
-    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
     <nav aria-label="Modules">
       <div class="nav-group">
         <a class="nav on" href="#/dash" data-v="dash">Overview</a>
@@ -130,10 +142,8 @@
     <div class="who">
       <div class="who-id"><b id="who"></b><span class="pill" id="role"></span></div>
       <div class="who-actions">
-        <button class="link-btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
         <button class="link-btn" id="out" type="button">Sign out</button>
       </div>
-      <div class="env" id="env">Demo build</div>
     </div>
   </aside>
 
@@ -153,28 +163,24 @@
           <h1 class="dash-greet" id="dashGreet">Overview</h1>
           <p class="dash-date" id="dashDate"></p>
         </div>
-        <div class="dash-tools">
-          <button class="dash-search" type="button" data-act="open-search" aria-label="Search everything, keyboard shortcut Control or Command and K">
-            <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
-            <span>Search everything</span>
-            <kbd>Ctrl K</kbd>
-          </button>
-          <div class="dash-dates" role="group" aria-label="Date range">
-            <label for="dashFrom">From <input id="dashFrom" type="date" aria-label="From date"></label>
-            <label for="dashTo">To <input id="dashTo" type="date" aria-label="To date"></label>
-          </div>
-          <div class="seg compact" role="group" aria-label="Date presets">
-            <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
-            <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
-            <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
-            <button type="button" data-dash-preset="month" aria-pressed="true">This month</button>
-            <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
-            <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
-          </div>
-          <button class="btn ghost hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
-          <button class="btn ghost" id="dashTheme" type="button" aria-pressed="false">Dark theme</button>
+        <div class="dash-actions">
           <a class="btn" id="dashCompare" href="#/compare">MoM &amp; YoY dashboard</a>
         </div>
+      </div>
+      <div class="dash-filters" role="group" aria-label="Dashboard period">
+        <div class="dash-dates">
+          <label for="dashFrom">From <input id="dashFrom" type="date" aria-label="From date"></label>
+          <label for="dashTo">To <input id="dashTo" type="date" aria-label="To date"></label>
+        </div>
+        <div class="seg compact" role="group" aria-label="Date presets">
+          <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
+          <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
+          <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
+          <button type="button" data-dash-preset="month" aria-pressed="true">This month</button>
+          <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
+          <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
+        </div>
+        <button class="btn ghost sm hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
       </div>
       <p class="dash-updated" id="dashUpdated">Loading figures…</p>
       <p class="dash-dateerr hide" id="dashDateErr" role="alert"></p>
@@ -204,7 +210,7 @@
 
         <div class="kpis" id="stats"></div>
 
-        <div class="panel flush hide" id="accOverviewPanel">
+        <div class="panel hide" id="accOverviewPanel">
           <div class="panel-h"><h2>Accounts</h2><span class="muted" id="accOverviewNote"></span></div>
           <div class="kpis" id="accOverview"></div>
         </div>
@@ -1530,6 +1536,13 @@
       </section>
     </section>
   </main>
+
+  <footer class="statusbar">
+    <span class="statusbar-mark" aria-hidden="true"></span>
+    <span>Every figure is counted by the server</span>
+    <span class="statusbar-sp"></span>
+    <span id="env">Demo build</span>
+  </footer>
 </div>
 
 <div id="scrim" class="hide"></div>

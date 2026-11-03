@@ -121,9 +121,10 @@ Both Administrators now enrol at their next sign-in; production remains on
 **First sign-in after the release (Administrator).**
 
 1. Username and password as before.
-2. A **Set up two-factor** screen appears. A QR code and the setup key are
-   shown once.
-3. Scan the QR code (or type the key) into Google Authenticator.
+2. A **Set up two-step verification** screen appears. The setup key is shown
+   once; there is no QR symbol on this screen.
+3. In Google Authenticator choose **Add account → Enter a setup key** and type
+   the key.
 4. Type the current 6-digit code and confirm.
 5. Write down the 10 recovery codes shown; they are not shown again.
 6. The application opens. Later sign-ins ask for the 6-digit code after the
@@ -140,6 +141,19 @@ cannot bypass it.
 **Audit rows.** `auth.password_ok` (mode), `auth.totp_enabled`,
 `auth.totp_login` (method `totp` or `recovery`) and `auth.totp_lockout`. No
 secret or code is written to the audit trail or the log.
+
+**Screen layout.** The second-factor screen is a centred card on a soft
+paper-and-moss background (`#totp` in `static/css/styles.css`): 440 px wide,
+brand mark at the top, a moss-to-turmeric accent line, the setup key in a
+monospace block, a large tabular code field, a full-width action button and a
+red alert block when a code is refused. It uses the same design tokens as the
+rest of the application, follows the light and dark themes, and stacks the
+recovery codes into one column below 600 px. Centring uses CSS safe alignment,
+so on a short window the top of the card stays reachable by scrolling instead
+of being clipped above the viewport. The two footer links sit centred beneath
+the button, with **Sign out** muted. Layout verified 3 November 2026 in the
+running application at 830×519 and with headless Chrome at 1280×900 (setup,
+verify with error, and recovery codes in the dark theme).
 
 ## 8. What is not built
 
@@ -159,8 +173,13 @@ secret or code is written to the audit trail or the log.
   sign-in, a recovery code working once, a session without the `otp` claim
   being refused, and five wrong codes locking the second step.
 - Browser walk 3 November 2026 (disposable test database): the enrollment
-  screen appeared after the password, showed the key and QR, and refused to
+  screen appeared after the password, showed the setup key, and refused to
   open the shell without a code. The pre-enrollment session was not created.
+- Screen layout 3 November 2026: setup, verify (with a refused-code alert) and
+  the recovery-code list were rendered from the real page and from the shared
+  stylesheet in headless Chrome; both themes and the 600 px breakpoint were
+  checked. The card is centred and the top remains reachable on a 519 px-high
+  window.
 - **Not verified in the browser:** typing the verify code after enrollment.
   Reading a stored secret or generated code back out of the database is
   blocked by the environment's credential-handling rules, so that one step was

@@ -1348,9 +1348,16 @@ Backend, tests and enrollment were verified; the full design is in
   `APP_ENV=production` makes the cookie `Secure`; without it the client did
   not send the cookie and five tests failed with `KeyError: 'secret'`.
 - Browser walk: after the password an Administrator saw the enrollment screen
-  with the key and QR; no `session` cookie was issued and `/api/auth/me`
-  answered 401. The enrollment was completed in the page; the recovery codes
-  were shown once.
+  with the setup key (the screen has no QR symbol); no `session` cookie was
+  issued and `/api/auth/me` answered 401. The enrollment was completed in the
+  page; the recovery codes were shown once.
+- Screen layout, 3 November 2026: the second-factor screen is a centred card
+  using the shared design tokens (`#totp` in `static/css/styles.css`). It was
+  rendered in the running application at 830×519 and with headless Chrome at
+  1280×900 — setup, verify with a refused-code alert, and recovery codes in
+  the dark theme. Safe centring keeps the card top reachable when it is taller
+  than the window; recovery codes stack below 600 px. Layout only: no
+  endpoint, permission or flow changed.
 - **Not run in the browser:** entering the verify code after enrollment. Read
   access to a stored secret or a generated code is blocked by the
   environment's credential rules, so that one step is covered by the automated
@@ -1408,3 +1415,110 @@ Administrator second-factor endpoints. Module register unchanged at 18 entries,
 | Physical phone, tablet and screen reader | No device or tooling (G-10) |
 | `0029_totp` on the production database | No approved production deployment in this round |
 | A unit test for each KPI card `href` | The addresses are browser-verified only |
+
+---
+
+## 26. Interface redesign pass — 3 November 2026
+
+**Scope.** The whole site was audited screen by screen and restyled to the
+supplied DMS reference: application bar, module rail, page heads, filter bands,
+tables, forms, drawers, command palette, sign-in and two-step cards, light and
+dark themes, at desktop, tablet and phone widths. Herbanova's original palette
+was kept; no route, id, permission, endpoint or report was changed. The rules
+are written down in [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md).
+
+**Environment.** Static front end on `127.0.0.1:3000` proxying the API on
+`127.0.0.1:8000`; reads only, no write action was performed on the development
+database. Screens were driven through headless Chrome over CDP with a minted
+Administrator session. The signed-out and two-step screens were captured
+without typing a password; the two-step card was rendered by toggling the
+existing sections, so that evidence covers layout only and is labelled so below.
+
+### 26.1 What changed, and why
+
+| Area | Change | Reason |
+|---|---|---|
+| Shell | 44 px branded bar with global search (Ctrl/⌘ K) and theme toggle; 232 px grouped rail; 26 px status bar | Put navigation, search and the environment statement where the reference puts them, and remove the theme/search duplicates that were on the dashboard |
+| Dashboard | Title and date on the left, **MoM & YoY dashboard** action on the right; dates and presets moved into one tinted filter strip; duplicate greeting removed | The old three-row header repeated "Overview" and pushed the action onto its own line |
+| HR workspace | Duplicate "HR workspace" heading hidden; toolbar styled as a filter band; attendance bars capped at 34 px | One page title, and one attendance day no longer painted as an enormous block |
+| Accounts | Accounts overview panel restored to standard padding; report picker became a 140 px auto-fill grid; methodology notes capped at 78 ch | Heading and cards were flush to the panel edge; the picker was a ragged eight-across flex row |
+| Tables | Zebra rows, sticky headers in scroll boxes, SKU cells on one line, row actions never wrap | Narrow screens were stretching rows to ~105 px because action buttons stacked vertically |
+| Drawers | Lifted above the application bar (z-index 23, scrim 21) | The bar (z-index 22) covered the drawer title and close button on every screen |
+| Tablet shell | Rows changed to `auto auto minmax(0,1fr) auto` | Auto rows were stretching the application-bar row from 44 to 80 px, leaving a blank band above the nav |
+| Sign-in / 2FA | Single centred card on paper; 3 px brand rule above the headline; turmeric assurance marks | Matches the requested professional, centred treatment without changing the flow |
+| Theme | Dark primary/danger buttons fixed (`#2f7d57` / `#b3261e`), `color-scheme: dark`, dark placeholders | Dark tokens made `--moss` light, so white-on-light-green buttons were unreadable |
+| Accessibility | `--faint` darkened to `#66736b` (light) and `#84968a` (dark); focus ring is moss on light surfaces, turmeric on dark chrome | Placeholders were 3.01:1, and a turmeric ring on white is 2.25:1 |
+
+### 26.2 Screens captured
+
+Evidence is in `var/shots`. Every image was opened and reviewed during the pass;
+the ones that exposed a defect were re-captured after the fix.
+
+| Group | Files |
+|---|---|
+| Dashboard | `dash-1440`, `dash-dark`, `dash-1024`, `dash-360`, `dash-390` |
+| Master data and operations | `products-1440`, `products-768`, `products-360`, `products-390`, `inventory-1440`, `sales-1440`, `billing-1440`, `purchasing-1440`, `suppliers-1440` |
+| Finance | `accounts-1440`, `accounts-390`, `expenses-1440`, `reports-1440` |
+| People and admin | `hr-1440`, `approvals-1440`, `customers-1440`, `settings-1440` |
+| Signed out | `login-1440`, `login-390`, `totp-1440`, `totp-390` |
+| Overlays | `drawer-product-1440`, `drawer-product-390`, `drawer-invoice-1440`, `drawer-invoice-390`, `palette-1440` |
+
+### 26.3 Horizontal-overflow sweep
+
+`var/shots/responsive.py` visited 23 routes at 390×844, 768×1024, 1024×768 and
+1440×900, measured `documentElement.scrollWidth` against the viewport and
+listed any element crossing the right edge outside an intentional scroll
+container. Result: **92 of 92 combinations passed** (`scrollWidth == viewport`
+in every case, no offender reported).
+
+**Regression run.** The full suite was run after the last CSS and script edit:
+**446 passed** in 277 s (`python -m pytest -q`, 3 November 2026, exit 0). The
+pass changes no server code, so this shows the interface edits broke no API,
+permission or reconciliation test.
+
+### 26.4 Defects found and fixed during verification
+
+| Defect | Evidence | Fix |
+|---|---|---|
+| Drawer title and × hidden behind the application bar | `drawer-product-1440`, `drawer-invoice-1440` before the fix | Drawer `z-index: 23`, scrim `21` |
+| 36 px blank band between bar and nav at 768 px | `products-768` | Explicit tablet grid rows |
+| Product rows ~105 px tall, SKU broken as `AYU- / OIL- / 001` | `products-768` | `td.sku{white-space:nowrap}` and `.rowacts{flex-wrap:nowrap}` |
+| Mobile invoice line table clipped at SGST | `drawer-invoice-390` | Measured the scroll wrapper: 361 px viewport against 493 px content, `overflow-x:auto`; the scrollbar is simply not painted in a headless screenshot. No code change. |
+| Over-long methodology paragraph on Accounts | `accounts-1440` | `.panel-note{max-width:78ch}` |
+| Modal dashboard action wrapping alone | `dash-1024` | Hero/filter-band restructure |
+
+### 26.5 Contrast measurements
+
+Computed from the token values with the WCAG relative-luminance formula.
+
+| Pair | Ratio | AA normal text (4.5:1) |
+|---|---|---|
+| `--ink` on `--surface` | 16.57:1 | pass |
+| `--mute` on `--surface` | 6.30:1 | pass |
+| `--mute` on `--head` | 5.32:1 | pass |
+| `--faint` on `--surface` (placeholder) | 4.97:1 | pass |
+| white on `--moss` | 6.44:1 | pass |
+| white on dark primary `#2f7d57` | 5.01:1 | pass |
+| `--ok` / `--warn` / `--bad` on their tinted backgrounds | 4.91 / 5.29 / 5.37:1 | pass |
+| `--moss` focus ring on white | 6.44:1 | pass (3:1 non-text) |
+| `--turmeric` focus ring on forest | 7.62:1 | pass |
+| white on `--turmeric` | 2.25:1 | **not used anywhere** |
+
+**Motion.** `var/shots/motion.py` emulated `prefers-reduced-motion: reduce` over CDP and read the computed styles: the drawer animation and button transitions report `1e-06s` (`reduced: true`), against `0.2s` and `0.15s` with no preference. The rule at `static/css/styles.css:357-359` therefore reaches the browser, not just the file.
+
+### 26.6 What was not verified
+
+| Item | Why |
+|---|---|
+| Physical phone, tablet and touch gestures | No device available |
+| Screen readers and full keyboard tab-order walk | No assistive tooling in this workspace; focus rules are CSS-verified only |
+| Firefox, Safari and Edge | The walk used headless Chrome over CDP |
+| Lighthouse or other performance scoring | Not installed; no score is claimed |
+| The real two-step challenge after a password | Credentials are not typed into scripts; the card was rendered from the existing markup, and the challenge itself is covered by `tests/test_totp.py` |
+| Print stylesheets and generated PDFs | PDF output was covered in §25; the redesign did not touch print CSS |
+| Production data and production deployment | Not touched in this round |
+
+The one content observation to hand to the owner: the status bar reads
+`Environment: production` while the development backend serves the page (the
+value comes from `APP_ENV` on the server). It is pre-existing and was not
+changed.
