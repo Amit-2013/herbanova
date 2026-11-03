@@ -253,6 +253,38 @@ def test_saved_settings_drive_the_scheduler_recipient(client):
         assert email_config.effective(db).enabled is True
 
 
+def test_well_known_smtp_ports_decide_the_transport(client):
+    """465 means implicit TLS and 587 means STARTTLS, whatever was selected.
+
+    A saved account that contradicts the port cannot authenticate; the port
+    wins so a correct password is not rejected by the wrong handshake.
+    """
+    admin = client.as_user("admin")
+    for port, saved, used in ((465, "starttls", "ssl"), (587, "ssl", "starttls"),
+                              (2525, "none", "none")):
+        admin.put(BASE, json=_payload(port=port, security=saved)).raise_for_status()
+        with SessionLocal() as db:
+            assert email_config.effective(db).security == used, (port, saved)
+
+
+def test_an_unreadable_settings_row_rolls_the_session_back():
+    """A failed read must not poison the worker's session."""
+    from sqlalchemy.exc import OperationalError
+
+    class Broken:
+        rolled_back = False
+
+        def get(self, *args):
+            raise OperationalError("SELECT 1", {}, Exception("database is down"))
+
+        def rollback(self):
+            self.rolled_back = True
+
+    db = Broken()
+    assert email_config.load_row(db) is None
+    assert db.rolled_back is True
+
+
 def test_switching_scheduled_off_closes_the_settings_api(client):
     admin = client.as_user("admin")
     try:

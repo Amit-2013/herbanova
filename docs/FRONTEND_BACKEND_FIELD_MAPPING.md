@@ -3,6 +3,7 @@
 **Project:** Herbanova Business Control
 **Stage:** 3 — audit registers
 **Date:** 31 October 2026
+**Appendix A updated:** 2 November 2026 — M-06 partly closed and M-11 closed by the HR masters screens, salary-structure assignment and department/holiday edit routes. **Section 12 updated:** 3 November 2026 — input GST from supplier bills, filed-return reconciliation and statutory dues (Batch 4).
 **Scope:** every write workflow and every read surface reachable from the browser, traced from the HTML/JavaScript control through the HTTP request, the Pydantic schema, the service function, the database column, the permission gate, and the report that consumes it.
 
 **Evidence basis:** `static/index.html`, `static/js/app.js` (3,914 lines), the FastAPI application object (introspected, 161 `/api/` routes), every request schema in `app/api/`, the services in `app/services/`, the models in `app/models/`, and read-only catalogue queries against the development database. **No application code, configuration, or business data was changed to produce this document.**
@@ -28,13 +29,15 @@ The browser talks to the API through one helper, `api()` at `static/js/app.js:36
 
 | Surface | Count | Source |
 |---|---|---|
-| API routes under `/api/` | 161 | introspected from `app.main:app` |
+| API routes under `/api/` | 255 paths / 327 methods (3 Nov 2026, `APIRoute`s excluding HEAD/OPTIONS) | introspected from `app.main:app` |
 | Browser views (`#/…`) | 20 | `static/js/app.js:200-208` |
 | Report catalogue entries | 25 | `app/services/reports.py` `CATALOG` |
 | Request schemas with a JSON body | 64 | `app/api/**` |
-| Database tables | 50 | `docs/DATABASE_TABLE_COLUMN_REGISTER.md` |
+| Database tables | 84 at head `0029_totp` | `docs/DATABASE_TABLE_COLUMN_REGISTER.md`; `db_reset.table_classification()` |
 
 The SPA is a single page with hash routes. Visibility of a view is decided in the browser by `VIEW_PERM` (`static/js/app.js:205-208`), but authorisation is always re-checked on the server by `require(perm)` / `require_admin(perm)` (`app/core/rbac.py:74-100`). Hiding a button is therefore a convenience, never a control.
+
+**Two processes.** The browser talks to the frontend server (`scripts/run_frontend.py`), which serves `static/` and proxies `/api` to the backend (`scripts/run_backend.py`). The relative URLs in this document are unchanged; see [RUNNING_SERVERS.md](RUNNING_SERVERS.md).
 
 ---
 
@@ -46,8 +49,16 @@ The SPA is a single page with hash routes. Visibility of a view is decided in th
 | Session restore on load | `app.js:120-124` | `GET /api/auth/me` | — | Returns user, role, permissions, `must_change_password` | any signed-in user |
 | Sign out | `app.js:3125` | `POST /api/auth/logout` | — | Clears cookie | any signed-in user |
 | Forced change form (`#changePwForm`) | `index.html:43-59`; `app.js:116-146` | `POST /api/auth/change-password` | `ChangePassword{current_password, new_password}` | Blocking screen shown when `me.must_change_password`; on success re-hashes, bumps `token_version`, issues a new cookie, enters the shell | any signed-in user with a temporary password |
+| Administrator second factor — setup | `showTotpSetup` in `app.js`; enrollment screen after the password step | `GET /api/auth/2fa/setup` | — | Returns `secret`, `otpauth_uri`, issuer, account, digits and period once; a short-lived `totp_challenge` cookie is required | password-step ticket, role `admin`/`super_admin` |
+| Administrator second factor — confirm | enrollment screen code box | `POST /api/auth/2fa/confirm` | `TotpCode{code}` | Enables the factor, returns 10 one-time `recovery_codes` once and sets the session cookie | password-step ticket, mode `setup` |
+| Administrator second factor — sign-in | code/recovery screen after the password | `POST /api/auth/2fa/verify` | `TotpVerify{code, recovery_code}` | Accepts a 6-digit code or one recovery code, then sets the session cookie; 5 wrong codes pause entry for 15 minutes | password-step ticket, mode `verify` |
+| Second-factor state | profile/status display | `GET /api/auth/2fa/status` | — | `required`, `enabled`, `confirmed_at`, `recovery_codes_left`; never the secret | any signed-in user |
 
-**What is stored:** `users.username`, `users.password_hash` (Argon2id), `users.role_id`, `users.employee_id`, `users.must_change_password`, `users.token_version`, `users.failed_attempts`, `users.locked_until`, `users.last_login_at` (`app/models/core.py`).
+**Login response for an Administrator.** With the role `admin` or `super_admin`, `POST /api/auth/login` returns `{"status": "otp_required"}` (enrolled) or `{"status": "setup_required"}` (not enrolled) and sets **no** `session` cookie. Every other role receives `{"status": "ok", ...identity}` as before. The session JWT carries an `otp` claim only when issued after an accepted code; `current_user` refuses an enrolled account without it (`app/core/rbac.py`).
+
+**Password policy.** The policy is server-side only: `validate_password` (`app/core/security.py`) runs in the `ChangePassword` field validator and in user create/reset; a temporary password is generated by `generate_temp_password` and returned once (`POST /api/users`, `POST /api/users/{id}/reset-password`). The browser sends the typed password, displays the one-time password the server returned, and mirrors no policy, generator or stored password.
+
+**What is stored:** `users.username`, `users.password_hash` (Argon2id), `users.role_id`, `users.employee_id`, `users.must_change_password`, `users.token_version`, `users.failed_attempts`, `users.locked_until`, `users.last_login_at` (`app/models/core.py`); for the Administrator factor, `users.totp_secret` (sealed), `totp_enabled`, `totp_confirmed_at`, `totp_last_counter`, `totp_failed_attempts`, `totp_locked_until`, `totp_recovery_hashes` (migration `0029_totp`, applied to the test and development databases on 3 November 2026).
 
 **Login behaviour:** case-insensitive usernames, lockout after repeated failures, the per-IP rate limit, the forced change on the next request and session revocation through `token_version` are VERIFIED (code) in `app/api/auth.py` and `app/core/rbac.py`. The forced-change branch, including the block, the policy checks and token revocation, is now covered by `tests/test_authz.py::test_forced_password_change_gates_data_and_revokes_the_old_token`; the basic boot path is covered by `tests/test_smoke.py:1`.
 
@@ -89,9 +100,9 @@ The SPA is a single page with hash routes. Visibility of a view is decided in th
 | `open_pos` | `{count,rows[{po_number,supplier,value,remaining_units,ordered_units,received_units,pct_received,receipt_count}],shown,note}` | `stock:read` |
 | `approvals` | `{count,rows[ApprovalOut],shown,note}` | `approval:read` |
 | `top_products` | `{rows[{product_id,sku,name,qty,revenue,previous_revenue,change}],previous_from,previous_to,note}` | `sales:read` |
-| `category_sales` | `{available:false,gap:"GAP-D01",note}` | `sales:read` |
+| `category_sales` | `{available:true,rows[{category,revenue,qty,invoices}],total,classified_total,uncategorised_total,note}` grouped from issued-invoice taxable value by the product's captured category; blanks are "Uncategorised" | `sales:read` |
 | `recent_activity` | `{rows[{id,at,actor,action,record,changes}],shown,total}` | `audit:read` |
-| `insights.pipeline` | `{sales:{rows[{status,label,count,value}],total,dispatch:{measured,average_days,note}},leads:{rows[{status,label,count}],total}}`; each side `null` without its permission | `sales:read` / `lead:read` |
+| `insights.pipeline` | `{sales:{rows[{status,label,count,value}],total,dispatch:{measured,average_days,approval_measured,approval_average_days,after_approval_measured,after_approval_average_days,delivery:{measured,on_time,late,average_days_late},overdue_open,note}},leads:{rows[{status,label,count}],total}}`; each side `null` without its permission | `sales:read` / `lead:read` |
 | `insights.customers` | `{from,to,top[{distributor_id,name,invoices,revenue}],outstanding[{distributor_id,name,outstanding,invoices}],outstanding_total,credit[{distributor_id,name,credit_limit,exposure,available,pct_used}],note}`; `outstanding` is `null` without `accounts:read` | `sales:read` and/or `accounts:read` |
 | `insights.purchasing` | `{as_of,open_count,no_receipt,partial,rows[{key,label,count,value}],note}` for PO age buckets | `stock:read` |
 | `insights.corrections` | `{from,to,credit_notes{label,count,value,shown,rows[]},debit_notes{…},post_billing{count,pending,shown,rows[]},note}` | `sales:read` |
@@ -191,9 +202,12 @@ API: `PATCH /api/distributors/{id}/credit-limit`. The endpoint changes the limit
 | Pack size | `pack_size` (control name `pack`) | `pack_size` | `pack_size` | |
 | MRP | `mrp` | `Decimal` ≥ 0 | `mrp` | |
 | Status (edit) | `status` | `active` / `discontinued` | `status` | |
+| Category | `category` | `str \| None`, max 60 | `category` | blank is stored as null; suggestions come from `GET /api/products/catalog` |
+| Brand | `brand` | `str \| None`, max 60 | `brand` | blank is stored as null; suggestions from the same endpoint |
+| Reorder level | `reorder_level` | `Decimal \| None` ≥ 0, 3 dp | `reorder_level` | blank is "not set", never zero; drives the low-stock attention rule |
 | **Unit (UQC)** | **never sent** | `uqc: str \| None`, max 3 | `uqc` | **Mismatch M-03** |
 
-API: `POST /api/products` (`product:write`), `PATCH /api/products/{id}` (`product:write`). The server uppercases a supplied UQC and stores null when blank (`app/api/products.py:40-42`); the invoice copies `products.uqc` onto the line at issue time (`app/services/invoice.py:114`).
+API: `POST /api/products` (`product:write`), `PATCH /api/products/{id}` (`product:write`), `GET /api/products/catalog` (`product:read`, distinct non-blank categories and brands for the form's suggestions). The server uppercases a supplied UQC and stores null when blank (`app/api/products.py:40-42`); the invoice copies `products.uqc` onto the line at issue time (`app/services/invoice.py:114`). Category, brand and reorder level were added in migration `0024`; all three are nullable so existing products stay valid, and every change is audited with old and new values.
 
 **Mismatch M-03 (Medium).** The API and the schema accept a three-character UQC, but the browser form has no control and `saveProduct()` never sends it. Issued invoice lines therefore store null and the printed tax invoice shows "—" for the unit (`app/services/document_pdf.py:521`), which is a GST-document defect for goods sold by count or weight.
 
@@ -262,6 +276,7 @@ API: `POST /api/purchase-orders/{id}/receive` (`stock:write`). The service creat
 | Line product | `lines[].sku` | `SOLineIn.sku` | `sales_order_lines.sku` | upper-cased; unique |
 | Line quantity | `lines[].qty` | `Decimal` > 0, 3 dp, **whole number** | `qty` | model validator refuses fractions of a pack |
 | Unit price | `lines[].unit_price` (only if non-blank) | `Decimal \| None` ≥ 0 | `unit_price` | null means "use MRP" at issue |
+| Expected delivery date | `expected_delivery_date` (only if non-blank) | `date \| None` | `expected_delivery_date` | optional promise; a past date is refused; null means no promise and the order contributes nothing to lateness |
 
 API: `POST /api/sales-orders` (`sales:write`). The service freezes the product name, HSN, pack size and MRP on the line, and computes tax through the same `line_tax()` used by invoices (F-05, F-07–F-10). A price above MRP is refused; a discount over the configured threshold creates an approval (section 10).
 
@@ -273,6 +288,7 @@ API: `POST /api/sales-orders` (`sales:write`). The service freezes the product n
 | Submit | `POST /api/sales-orders/{id}/submit` | — | `sales:write` | Draft → pending approval or approved |
 | Cancel | `POST /api/sales-orders/{id}/cancel` | `ReasonIn{reason}` | `sales:write` | Allowed only before dispatch |
 | Dispatch | `POST /api/sales-orders/{id}/dispatch` | `DispatchIn{warehouse_id}` | `dispatch:write` | FEFO issue, invoice issue, stock movements |
+| Set/clear promise | `PATCH /api/sales-orders/{id}/delivery-date` | `DeliveryIn{expected_delivery_date}` | `sales:write` | Allowed on draft, pending-approval and approved orders; null clears; unchanged or past date → 422; after dispatch → 409; audited `so.delivery_date` |
 
 The submit response carries `status` and, when held, `approval{id, reasons[]}`; the UI opens the approval drawer or shows "Awaiting approval" (`app.js:1705-1720`). Dispatch selects a warehouse from `state.warehouses` and is refused when stock is insufficient (F-24, F-30).
 
@@ -289,7 +305,7 @@ An invoice is **issued by the dispatch transaction**, not by a form. The billing
 | UI element | API | Perm | Fields shown |
 |---|---|---|---|
 | Invoice register | `GET /api/invoices` | `sales:read` | number, FY, date, buyer, GSTIN, grand total, credited total, status |
-| Invoice detail | `GET /api/invoices/{id}` | `sales:read` | line product, SKU, HSN, UQC, quantity, price, taxable, CGST/SGST/IGST, total; movement fields |
+| Invoice detail | `GET /api/invoices/{id}` | `sales:read` | line product, SKU, HSN, UQC, quantity, price, taxable, CGST/SGST/IGST, total; movement fields; `payment_terms_days` and `due_date` (both NULL when no terms were captured) |
 | Expiry history | `GET /api/invoices/expiry` | `sales:read` | batch expiry at issue |
 | Print | `POST /api/print/invoice/{id}?copy=ORIGINAL` | `print:document` | server-rendered PDF |
 
@@ -333,6 +349,8 @@ The UI offers `delivery_challan_number` and `vehicle_number` only, posts to `POS
 APIs: `POST /api/credit-notes` (`note:write`), `POST /api/debit-notes` (`note:write`). The service refuses a quantity above what remains creditable on the invoice line, and a return-to-stock credit writes positive `stock_movements` back to the original batches (F-37–F-38).
 
 **Mismatch M-04 (Low).** Both schemas accept `note_date`, but the browser never sends it. A note raised late for an earlier correction is therefore dated the day it is entered, which misplaces it in the GST period. The server has no backdating guard on this field beyond the schema, so the only current control is the absence of a UI control.
+
+**Open and Print.** The notes table in Billing lists credit and debit notes together, newest first, and each row carries **Open** and — with `print:document` — **Print**. `GET /api/credit-notes` and `GET /api/debit-notes` return each note with `invoice_number` and its `lines`, so **Open** needs no extra request; `noteDetail(kind, id)` draws the stored note in the shared drawer (number and financial year, invoice, buyer only when known, date, reason, returned-to-stock quantity for a credit, tax breakdown, lines and the print-log verification). **Print** calls the same route as every other document, `POST /api/print/{credit_note|debit_note}/{id}?copy=ORIGINAL`, which renders the PDF, records the print log and offers the verification page and QR. The browser never builds or edits a note PDF. Covered by `tests/test_file_audit.py::test_a_credit_and_a_debit_note_can_be_opened_and_printed`; see [FEATURE_INVENTORY.md](FEATURE_INVENTORY.md) F-132.
 
 **Reports:** credit and debit notes feed `gst_register`, `trial_balance`, `receivables` and `receivables_ageing`; each carries independent checks.
 
@@ -391,25 +409,138 @@ A bank change is never written directly: it creates an approval request, and onl
 
 **UI:** `#/accounts`, `accounts:read`; writing needs `accounts:write`.
 
+**KPI card links (Performance and P&L).** `GET /api/accounts/report` returns ten `cards[]` entries with `key`, `label`, `value`, `note`, `available`, optional `gap` and an `href`. The tile is an `<a href>`; no click handler chooses the destination, so the server and the report cannot disagree.
+
+| Card (`key`) | `href` | Window carried | Opens |
+|---|---|---|---|
+| Revenue (`revenue`) | `#/accounts/gst-out` | `?from`/`?to` | GST outward, taxable value |
+| Collections (`collections`) | `#/accounts/cash` | `?from`/`?to` | Receipts and payments |
+| Receivables (`outstanding`) | `#/accounts/receivables` | — (as-at list) | Receivables |
+| Over 60 days (`overdue_60`) | `#/accounts/ageing` | `?as_of` | Ageing of outstanding invoices |
+| Payables (`payables`) | `#/accounts/payables` | — | Payables |
+| Payable within 7 days (`payable_week`) | `#/accounts/payables?due=week` | `due=week` | Payables, filtered to the next seven days |
+| Output GST (`gst`) | `#/accounts/gst-out` | `?from`/`?to` | GST outward |
+| Cash and bank (`cash_bank`) | `#/accounts/cash` | `?from`/`?to` | Receipts and payments |
+| Expenses (`expenses`) | `#/expenses` | `?from`/`?to` | Expenses screen |
+| Net profit (`net_profit`) | `#/accounts/reports?focus=pnl` | `focus=pnl` | Performance and P&L, statement focused |
+
+A card with `available: false` still links to the section that explains it (the gap code is shown on the tile). The browser parses the query in `route()` and applies it to the section before drawing, so a refresh, a bookmark or a browser back/forward lands on the same filtered report.
+
 | UI field | Request field | Schema (`EntryIn`) | Store (`payments`) |
 |---|---|---|---|
 | Kind (drawer mode) | `kind` | `receipt` / `payment` | `kind` |
-| Against invoice | `invoice_id` | `int \| None` | `invoice_id` |
-| Against order | `purchase_order_id` | `int \| None` | `purchase_order_id` |
-| Party | **never sent** | `distributor_id` / `supplier_id` | `distributor_id` / `supplier_id` |
+| Record as (`#e-purpose`) | `purpose` | `outstanding` / `advance` | drives allocation; not stored on the payment |
+| Party (`#e-party`) | `distributor_id` / `supplier_id` | `int` | `distributor_id` / `supplier_id` |
+| Settle this first (`#e-against`) | `invoice_id` / `purchase_order_id` | `int \| None` | legacy columns stay NULL; the settlement is a `payment_allocations` row |
 | Amount | `amount` | `Decimal` > 0, 2 dp | `amount` |
 | Date | `paid_on` | `date` | `paid_on` |
 | Mode | `mode` | `bank/cash/upi/cheque/neft/other` | `mode` |
 | Reference | `reference` | `str \| None`, 60 | `reference` |
 | Note | `notes` | `str \| None`, 300 | `notes` |
+| Advance hint | — | — | read from `GET /api/accounts/advances?kind&party_id` (`available`, `entries`) |
 
-API: `POST /api/accounts/payments` (`accounts:write`). Reads: outstanding (`/outstanding`), ageing (`/ageing`), distributor and supplier ledgers, trial balance, GST register, and the last 500 entries (`/payments`).
+Response (`EntryOut`): `number`, `kind`, `amount`, `paid_on`, `mode`, `reference`, `notes`, `purpose`, `allocated`, `advance`, `allocations[]` (`invoice_id` / `purchase_order_id`, `number`, `amount`, `applied_on`). The entry table prints each allocation and any advance held.
 
-**Mismatch M-02 (Medium).** The select offers an empty first option labelled "Not allocated yet" (`app.js:533`), but the server requires an invoice (to derive the distributor) or a purchase order (to derive the supplier): `app/api/accounts.py:124-131` and `:154-160` return 422 otherwise. The browser never sends `distributor_id` or `supplier_id`, so choosing "Not allocated yet" always fails. Either the option should be removed and allocation made mandatory, or the drawer should offer a party selector for unallocated money.
+API: `POST /api/accounts/payments` (`accounts:write`). Reads: outstanding (`/outstanding`), ageing (`/ageing`), advances (`/advances`), distributor and supplier ledgers, trial balance, GST register, and the last 500 entries (`/payments`).
+
+**M-02 closed.** The drawer now has a party selector (`#e-party`, distributors for a receipt, suppliers for a payment) and a two-mode choice. `distributor_id` / `supplier_id` are always sent, so money with nothing to settle is recorded as an advance instead of failing with 422. Naming a settled document still fails, and an advance that names any document is refused.
 
 **Immutability:** no update or delete route exists for a payment. A wrong entry is corrected by recording the opposite entry with a note (`app/api/accounts.py:1-16`). This is deliberate and matches F-43 and F-74.
 
 **Reports:** `receivables`, `receivables_ageing`, `payables`, `trial_balance`, `gst_register` — all five carry independent checks (section 13.2).
+
+**Profit and loss fields (`GET /api/accounts/report` → `profit_and_loss`, and the Overview `accounts` block).** Each row carries `key`, `label`, `value`, `available`, `partial`, `gap` and `fix`; the statement carries `payroll.method`, `payroll.periods[]`, `payroll.missing_months[]`, `payroll.partial_months[]` and `net_profit.available`.
+
+| Server field | Meaning | Browser use |
+|---|---|---|
+| `profit_and_loss.rows[].partial` | The figure covers only part of the window (expenses before `tracked_from`, payroll with an unapproved month) | **Partial** chip beside the amount; `fix` opens `#/expenses` or `#/hr/payroll` |
+| `profit_and_loss.payroll.periods[].prorated` | The window cut this approved month short | Note names the month as allocated |
+| `profit_and_loss.payroll.periods[].allocated` | Approved month gross × (working days inside the window ÷ working days in the month) | Summed into the payroll line |
+| `profit_and_loss.payroll.periods[].included` | Whether the period contributed (`false` for a draft/unapproved month) | Named in the GAP-P03 note |
+| `profit_and_loss.net_profit.available` | Every input for the window is complete | `No data yet` with the first gap when false |
+| Overview `accounts.expenses_known`, `expenses_partial`, `expenses_note`, `expenses_gap` | The same facts for the Overview Expenses tile | Amount with **Partial** chip and the note; gap link when unknown |
+
+### 12.1 Financial years and accounting month locks
+
+**UI:** two panels on `#/accounts` — “Financial years” and “Accounting month locks”.
+
+| UI field | Request field | Endpoint | Store | Notes |
+|---|---|---|---|---|
+| Close year reason | `reason` | `POST /api/accounts/financial-years/{label}/close` | `financial_year_closes.reason` | `accounts:write`; label `YYYY-YY`; at least 5 characters (`min_length=5`), max 300; only a completed year, not before the first document |
+| Reopen reason | `reason` | `POST /api/accounts/financial-years/{label}/reopen` | `financial_year_closes.reopen_reason` | `require_admin`; sets `active=false`, `reopened_by/at` and the reason |
+| Lock month | `year`, `month`, `reason` | `POST /api/accounts/period-locks` | `hr_period_locks` scope `accounting` | `accounts:write`; month `YYYY-MM` typed in the drawer |
+| Unlock month | `reason` | `POST /api/accounts/period-locks/{id}/unlock` | `hr_period_locks.unlock_reason` | Administrator only |
+
+Read: `GET /api/accounts/financial-years` (`accounts:read`) returns `current`, `today` and `years[]` with `financial_year`, `first`, `last`, `active`, `reason`, `closed_by`, `closed_at`, `reopened_by`, `reopened_at`, `reopen_reason`. `GET /api/accounts/period-locks` returns the lock rows. A refused document returns **423** with the year or month in `detail`.
+
+**Ageing due fields (`GET /api/accounts/ageing`).** Each row carries `due_date` and `days_overdue`; the payload carries `due = {overdue, due_this_week, not_yet_due, no_due_date}`, each with `total` and `count`. The table shows “Due date” and “Overdue (days)” columns and prints the four buckets under the table; the buckets sum to `total` and their counts to `count`.
+
+### 12.2 Input GST — supplier bills
+
+**UI:** panel “Input GST — supplier bills” on `#/accounts`; `piForm` drawer, `piReverseForm` drawer.
+
+| UI field | Request field | Schema (`PurchaseInvoiceIn`) | Store (`purchase_invoices`) |
+|---|---|---|---|
+| Supplier | `supplier_id` | `int` | `supplier_id` |
+| Purchase order (optional) | `purchase_order_id` | `int \| None` | `purchase_order_id` |
+| Supplier bill number | `supplier_invoice_number` | `str`, 1–60 | `supplier_invoice_number` (unique per supplier) |
+| Bill date | `invoice_date` | `date` | `invoice_date` |
+| Taxable value | `taxable_value` | `Decimal` ≥ 0 | `taxable_value` |
+| CGST / SGST / IGST / cess | `cgst_amount` … `cess_amount` | `Decimal` ≥ 0 | the four head columns |
+| Round-off | `round_off` | `Decimal` | `round_off` |
+| ITC eligible | `itc_eligible` | `bool` | `itc_eligible` |
+| TDS section / rate / amount | `tds_section`, `tds_rate`, `tds_amount` | `str \| None`, `Decimal`, `Decimal` | the three TDS columns |
+| Note | `note` | `str \| None`, 300 | `note` |
+| Reversal reason | `reason` | `str`, ≥ 5 | `reversal_reason`, `status = reversed`, `reversed_by/at` |
+
+API: `GET/POST /api/accounts/purchase-invoices`, `POST /api/accounts/purchase-invoices/{id}/reverse` (`accounts:read` / `accounts:write`, audit `accounts.purchase_invoice.reverse`). Duplicate live bill number for the same supplier → 409; a date in a locked month or closed year → 423.
+
+Read surface: `GET /api/accounts/input-gst?from=&to=` returns `rows`, `totals`, `eligible`, `blocked`, `blocked_count`, `available`, `note`; `GET /api/accounts/gst-net` returns `output`, `input`, `blocked_input`, `net`, `expense_itc`, `available`, `reason`, `note`. The panel renders the tax columns, the ITC flag, the net line and the expense-ITC memo under the table. All money is a two-decimal string.
+
+### 12.3 Filed GST returns and reconciliation
+
+**UI:** panel “GST returns and reconciliation”; `grForm` drawer with year and month selects.
+
+| UI field | Request field | Schema (`GstReturnIn`) | Store (`gst_returns`) |
+|---|---|---|---|
+| Year / month | `year`, `month` | `int` | `year`, `month` (unique with `form`) |
+| Form | `form` | `GSTR-1` / `GSTR-3B` | `form` |
+| Outward taxable value | `outward_taxable` | `Decimal` | `outward_taxable` |
+| Outward heads | `outward_cgst`, `outward_sgst`, `outward_igst`, `outward_cess` | `Decimal` | the four columns |
+| ITC heads (GSTR-3B only) | `itc_cgst`, `itc_sgst`, `itc_igst`, `itc_cess` | `Decimal` | the four columns (422 on GSTR-1) |
+| Filed on / reference | `filed_on`, `reference` | `date \| None`, `str \| None` | `filed_on`, `reference` |
+| Note | `note` | `str \| None` | `note` |
+
+API: `GET/POST /api/accounts/gst-returns` (`accounts:read` / `accounts:write`, audit `accounts.gst_return.record`), `GET /api/accounts/gst-reconciliation?year=&month=`. The panel prints Form / Check / Filed / Computed / Difference / Result per line; a difference is shown, never corrected. An unknown form or a future month → 422.
+
+### 12.4 TDS and statutory dues
+
+**UI:** panel “TDS and statutory dues”; `chForm` drawer.
+
+| UI field | Request field | Schema (`ChallanIn`) | Store (`statutory_challans`) |
+|---|---|---|---|
+| Head | `kind` | `pf` / `esi` / `pt` / `tds` | `kind` |
+| BSR code | `bsr_code` | `str \| None` | `bsr_code` |
+| Challan number | `challan_number` | `str` | `challan_number` |
+| Paid on | `paid_on` | `date` | `paid_on` |
+| Amount | `amount` | `Decimal` > 0 | `amount` |
+| Period | `period_year`, `period_month` | `int` | `period_year`, `period_month` |
+| Section / note | `section`, `note` | `str \| None` | `section`, `note` |
+
+API: `GET /api/accounts/statutory-dues?from=&to=`, `GET/POST /api/accounts/statutory-challans` (`accounts:read` / `accounts:write`, audit `accounts.challan.record`). The dues payload carries `summary[]` (`kind`, `label`, `withheld_to_date`, `deposited_to_date`, `deposited_in_window`, `outstanding`, `available`, `reason`), `vendor_tds`, `payroll`, `challans`, `available`, `notes`. An unknown kind or a future period → 422. The panel prints the four heads, the challan table and the vendor-TDS / payroll detail lines.
+
+### 12.5 Receivables by distributor
+
+**UI:** its own section, `#/accounts/receivables-by-distributor`; inputs `#rbdFrom` (From date) and `#rbdTo` (To date), buttons `load-rbd` (Apply) and `export-rbd` (Export CSV); table body `#rbdRows`, total `#rbdFoot`. There is no date, month or year shortcut: the two date boxes are the only window controls.
+
+| UI control | Request field | Endpoint | Notes |
+|---|---|---|---|
+| From date | `from_date` | `GET /api/accounts/receivables-by-distributor` | Read only when Apply is pressed; an empty box is refused |
+| To date | `to_date` | same | Capped at today; `from_date` after `to_date` → 422; a future `to_date` → 422 |
+| Apply | — | same | The only trigger that reloads the report, with a sequence guard so a stale response cannot overwrite a newer window. Changing either date makes no request |
+| Export CSV | — | client-side `downloadCsv` | Works on the loaded payload; header row carries `From` / `To`; one row per distributor; `Total` row; filename `HERBANOVA_Receivables_by_distributor_<from>_<to>.csv` |
+
+The payload is `{from, to, rows[], totals, count, note}`. Each row carries `distributor_id`, `name`, `code`, `state`, `opening`, `invoiced`, `credited`, `debited`, `received`, `closing`, `overdue`, `invoices`, `open_invoices`, `overdue_invoices` (money as two-decimal strings). `totals` adds the same amount columns plus `invoices`, `open_invoices`, `overdue_invoices`. Per row and in total, `opening + invoiced + debited − credited − received = closing`; `overdue` is the part of `closing` whose invoice `due_date` is before `to`, so an invoice with no due date is never overdue. Permission `accounts:read`.
 
 ---
 
@@ -482,7 +613,7 @@ Filters are validated per report: a filter a report cannot use is refused with 4
 
 **UI:** `#/hr`. A role with only `hr:attendance_self` sees its own day; a role with `hr:read` sees the team. The server enforces the same distinction inside `/api/hr/attendance` (`app/api/hr.py:542-560`).
 
-The People table shows each employee's office under **Location** and a **No attendance** chip when the attendance policy exempts that employee (`app.js:2740`). The header offers **Branches, offices & attendance policy** (`data-act="hr-sites"`) to `hr:write`, and branch/office filters (`#hrBranchFilter`, `#hrOfficeFilter`) that scope the dashboard, the register and the reports (`setHrSite`, `app.js:2564`).
+The People table shows each employee's office under **Location** and a **No attendance** chip when the attendance policy exempts that employee (`app.js:2740`). The header offers **Branches & locations** (`data-act="hr-sites"`, drawer titled *Branches, offices & attendance policy*) and **HR masters** (`data-act="hr-masters"`, §14.6) to `hr:write`, and branch/office filters (`#hrBranchFilter`, `#hrOfficeFilter`) that scope the dashboard, the register and the reports (`setHrSite`, `app.js:2564`).
 
 ### 14.1 Employee master
 
@@ -558,8 +689,8 @@ The UI sends `employee_id`, `date`, `visit_type`, `purpose`, `destination`. The 
 |---|---|---|---|
 | List periods | `GET /api/hr/payroll/periods` | `hr:payroll_prepare` | `hr_payroll_periods` |
 | Create period | `POST /api/hr/payroll/periods` | `hr:payroll_prepare` | `PeriodIn{year, month}` |
-| Open period | `GET /api/hr/payroll/periods/{id}` | `hr:payroll_prepare` | Entries, days, gross, deductions, net |
-| Prepare / recalculate | `POST /api/hr/payroll/periods/{id}/prepare` | `hr:payroll_prepare` | Builds entries |
+| Open period | `GET /api/hr/payroll/periods/{id}` | `hr:payroll_prepare` | Entries, days, gross, deductions, net; **`skipped[]`** `{employee_id, code, name, reason}` |
+| Prepare / recalculate | `POST /api/hr/payroll/periods/{id}/prepare` | `hr:payroll_prepare` | Builds entries; returns and audits **`skipped[]`** `{employee_id, code, name, reason}` |
 | Submit | `POST /api/hr/payroll/periods/{id}/submit` | `hr:payroll_prepare` | Draft → under review |
 | Process | `POST /api/hr/payroll/periods/{id}/process` | `hr:payroll_approve` | Approved → processed |
 | Mark paid | `POST /api/hr/payroll/periods/{id}/pay` | `hr:payroll_approve` | Processed → paid |
@@ -567,7 +698,7 @@ The UI sends `employee_id`, `date`, `visit_type`, `purpose`, `destination`. The 
 | Salary register | `GET /api/reports/hr_payroll/export?format=xlsx` | `report:export` + `hr:reports` | XLSX |
 | Correction | `POST /api/hr/payroll/periods/{id}/corrections` | `hr:payroll_prepare` | **no UI** |
 
-**Mismatch M-06 (Medium).** There is **no UI for salary components or salary structures** (`grep` for `/api/hr/salary` in `static/js/app.js` finds nothing), and `run_payroll()` silently skips any active employee without an effective structure (`app/services/payroll.py:59-60`). The live database currently holds 11 components and one structure for five employees (read-only count), so a payroll run will produce one entry and look empty to an operator. Components and structures are otherwise complete APIs (`POST /api/hr/salary/components`, `POST /api/hr/salary/structures`).
+**Skipped employees (M-06, closed 3 Nov 2026).** `run_payroll()` still does not pay an active employee with no effective structure, but the period screen and the prepare response now carry `skipped[]`; the browser renders each name with its reason ("No active salary structure covers this month" or "Not in the prepared entries") and an **Assign salary structures** button (`data-act="hr-masters"`, tab `salary-structures`). The prepare audit entry stores the skipped codes. `app/services/payroll.py:skipped_employees`, `app/api/hr.py` (`get_period`, `prepare_payroll`); `tests/test_hr.py` asserts the prepare result and the register agree.
 
 **Formula references:** F-51–F-58 (gross, deductions, net, effective dating, state machine). Payroll is audited and a paid period cannot be paid twice. An employee whose attendance policy exempts them has `payable_days = working_days − recorded unpaid days` and the period note says attendance is not required for them (`app/services/payroll.py`), so an exempt person is never docked for days they were not asked to mark.
 
@@ -575,17 +706,17 @@ The UI sends `employee_id`, `date`, `visit_type`, `purpose`, `destination`. The 
 
 | Master | API | UI |
 |---|---|---|
-| Branches | `GET/POST /api/hr/branches`, `PATCH /api/hr/branches/{id}` | **full UI** — New/Edit on *Branches, offices & attendance policy* (`hrBranchForm`, `app.js:3346`) |
+| Branches | `GET/POST /api/hr/branches`, `PATCH /api/hr/branches/{id}` | **full UI** — New/Edit on *Branches & locations* (`hrBranchForm`, `app.js:3346`) |
 | Offices / work locations | `GET/POST /api/hr/offices`, `PATCH /api/hr/offices/{id}` | **full UI** — New/Edit, branch, mode, geofence (`hrOfficeForm`, `app.js:3380`) |
 | Attendance rules | `GET/POST /api/hr/attendance-rules`, `PATCH`/`DELETE /{id}`, `GET /resolve` | **full UI** — New/Edit/Delete (`hrRuleForm`, `app.js:3436`; `hrRuleDelete`, `app.js:3515`) |
-| Departments | `GET/POST /api/hr/departments` | **no UI at all** |
+| Departments | `GET/POST /api/hr/departments`, `PATCH /api/hr/departments/{id}` | **full UI** — HR masters → Departments (`hrMastersDepartments`, `hrDepartmentForm`) |
 | Shifts | `GET/POST/PATCH /api/hr/shifts` | full UI (`app.js:691-755`) |
-| Holidays | `GET/POST /api/hr/holidays` | **no UI at all** |
-| Leave types | `GET/POST /api/hr/leave/types` | read in the leave form; **no create form** |
-| Salary components | `GET/POST /api/hr/salary/components` | **no UI** |
-| Salary structures | `GET/POST /api/hr/salary/structures` | **no UI** |
+| Holidays | `GET/POST /api/hr/holidays`, `PATCH /api/hr/holidays/{id}` | **full UI** — HR masters → Holidays (`hrMastersHolidays`, `hrHolidayForm`) |
+| Leave types | `GET/POST /api/hr/leave/types`, `PATCH /api/hr/leave/types/{id}` | **full UI** — HR masters → Leave types (`hrMastersLeaveTypes`, `hrLeaveTypeForm`) |
+| Salary components | `GET/POST /api/hr/salary/components`, `PATCH /{id}` | **full UI** — HR masters → Salary components (`hrMastersComponents`, `hrComponentForm`) |
+| Salary structures | `GET/POST /api/hr/salary/structures` | **full UI** — HR masters → Salary structures and the profile Salary tab (`hrMastersStructures`, `hrSalaryStructureForm`, `hrProfileSalary`) |
 
-The development database already contains two branches, two work locations, two departments, one active "General" shift, five leave types and eleven salary components (read-only counts, no amounts read). Those records were not created by `seed.py`, which seeds no HR masters. Branches, offices and attendance rules can now be created in the browser, so a fresh environment is usable for location-based attendance; departments, holidays, leave types and the salary masters still cannot be created from the screen, which is what remains of M-06.
+The development database already contains two branches, two work locations, two departments, one active "General" shift, five leave types and eleven salary components (read-only counts, no amounts read). Those records were not created by `seed.py`, which seeds no HR masters. Every master above can now be created in the browser, so a fresh environment is configurable from the screen; a payroll run that leaves an employee out says so on the period screen (M-06 closed 3 Nov 2026).
 
 **Reports:** twelve HR registers. `hr_attendance`, `hr_leave`, `hr_od`, `hr_payroll` and the other period registers share the `_empty_reconciled` row-count-only check. The register and report screens pass the selected branch/office to the server (`hrReports`, `app.js:3837`; request fields `branch_id`, `office_id`) and repeat the selection in the printed header, so a filtered sheet always says what it was filtered by.
 
@@ -763,16 +894,16 @@ The print code records a SHA-256 fingerprint of the document and a stable print 
 | ID | Severity | Finding | Where | Effect | Recommendation |
 |---|---|---|---|---|---|
 | **M-01** | **Fixed** | Change-password screen added; the server still blocks all data until the temporary password is replaced | `index.html:43-59`; `app.js:90,116-146`; `app/core/rbac.py:27-29,74-100`; test `tests/test_authz.py` | Users created or reset in the UI can now set their own password and continue | Closed; keep the test in place |
-| **M-02** | Medium | "Not allocated yet" is offered but rejected | `app.js:533,556-558`; `app/api/accounts.py:124-131,154-160` | Receipt/payment fails 422 unless an invoice/order is chosen | Add party selectors or remove the empty option and require allocation |
+| **M-02** | **Closed** (3 Nov 2026) | The "Not allocated yet" dead end is gone: the drawer sends the party and offers **Existing outstanding** or **Advance / new payment**, and the server records the excess or the whole amount as an advance | `static/js/app.js` (`entryForm`, `syncEntryAgainst`, `saveEntry`); `app/api/accounts.py` (`record_entry`); `app/services/advances.py`; `tests/test_accounts_advances.py` | Money with nothing to settle is recorded as an advance instead of failing 422 | — |
 | **M-03** | Medium | Product UQC is never captured | `app.js:911-930,1236-1250`; schema accepts it at `app/api/products.py:30` | Printed GST invoices show "—" for the unit | Add a three-character UQC control |
 | **M-04** | Low | Note date is never sent | `app.js:1908-1915`; schemas accept `note_date` | A late note lands in the wrong GST period | Offer an optional, audited note date |
 | **M-05** | Low | Movement fields cannot be cleared | `app.js:1883-1892`; `app/api/invoices.py:329-355` | A wrong challan or e-way bill cannot be erased, only replaced | Send explicit nulls for cleared fields |
-| **M-06** | Medium | No salary-structure or salary-component UI; employees without a structure are silently skipped | `app/services/payroll.py:59-60`; absent in `static/js/app.js` | A payroll run can produce almost no entries and look broken | Add structure/component screens; surface "skipped — no structure" in the run result |
+| **M-06** | **Closed** (3 Nov 2026) | Payroll still does not pay an employee with no active structure, but every skipped employee is now named with the reason in the prepare result, the period screen and the audit entry | `app/services/payroll.py:skipped_employees`; `app/api/hr.py` (`get_period`, `prepare_payroll`); `static/js/app.js` (`hrPayrollOpen`); `tests/test_hr.py` | None: the run and the screen agree, and the screen links to the structure masters | — |
 | **M-07** | Low | HR employee screen exposes 11 of the 27 create fields (12 including `status` on edit) | `app.js:646-685`; `app/api/hr.py:83-139` | Bank, PAN, UAN, ESI, emergency and policy data cannot be entered in the browser | Add the remaining fields or a second tab |
 | **M-08** | Low | OD screen omits end date, duration, party, worksite, document, regularisation | `app.js:828-849`; `ODIn` schema | Multi-day and regularised OD cannot be created from the browser | Extend the form |
 | **M-09** | Low | Manual attendance omits punch times and office | `app.js:766-771`; `ManualAttendanceIn` | A wrong punch cannot be corrected in the browser | Add optional time fields |
 | **M-10** | Low | Report sort and paging are applied in memory | `app/api/reports.py:118-132` | Large registers materialise fully before paging | Push ordering and paging into SQL, or cap period length |
-| **M-11** | Info | HR masters (branches, offices, departments, holidays, leave types, components, structures) have no create UI | `app.js`; `app/api/hr.py` | A fresh environment cannot be configured in the browser | Build the master screens or document a supported seed step |
+| **M-11** | **Fixed** (2 Nov 2026) | HR masters screen added for departments, holidays, leave types, salary components and salary structures; branches and offices already had one | `static/js/app.js` (`hrMasters`, `HR_MASTER_TABS`); `tests/test_hr_masters.py` | A fresh environment can be configured in the browser | Closed; keep the test in place |
 
 Dedicated labels: "Info" means the behaviour is a deliberate scope decision, not a defect; all others are defects to be scheduled.
 
@@ -788,11 +919,11 @@ Counts are from introspection of the live `app` object; the full request/respons
 | `/api/dashboard`, `/api/modules`, `/api/health` | 3 | signed-in |
 | `/api/leads` | 9 | `lead:read`, `lead:write`, `lead:assign` |
 | `/api/distributors` | 4 | `sales:read`, `distributor:write`, `credit:manage` |
-| `/api/products` | 4 | `product:read`, `product:write` |
+| `/api/products` | 5 | `product:read`, `product:write` |
 | `/api/warehouses` | 2 | `stock:read`, `stock:write` |
 | `/api/inventory` | 2 | `stock:read` |
 | `/api/purchase-orders` | 5 | `stock:read`, `stock:write` |
-| `/api/sales-orders` | 7 | `sales:read`, `sales:write`, `dispatch:write` |
+| `/api/sales-orders` | 8 | `sales:read`, `sales:write`, `dispatch:write` |
 | `/api/invoices` | 8 | `sales:read`, `invoice:cancel`, `invoice:write`, `invoice:edit_post_billing` |
 | `/api/credit-notes`, `/api/debit-notes` | 10 | `sales:read`, `note:write` |
 | `/api/approvals` | 3 | `approval:read`; Administrator for sales/post-billing decisions |
@@ -821,6 +952,10 @@ Counts are from introspection of the live `app` object; the full request/respons
 | Distributor create/edit/identity | VERIFIED (code) | schemas and UI read; **no test**; the fixture creates a `Distributor` directly |
 | Distributor credit limit | VERIFIED (code) | Exposure is exercised by `tests/test_approvals.py:30-76`; the `PATCH …/credit-limit` endpoint itself has no test |
 | Product create/edit/pagination/permission | VERIFIED | `tests/test_products.py:1-53` |
+| Product category, brand and reorder level | VERIFIED | `tests/test_catalog_orders.py::test_product_grouping_and_reorder_level_round_trip` |
+| Product catalog facets | VERIFIED | same file; `GET /api/products/catalog` |
+| Sales-order promise date, approval stamp and lateness | VERIFIED | `tests/test_catalog_orders.py` (promise round trip, approval stamp, pipeline reconciliation) |
+| Category sales and low-stock attention | VERIFIED | `tests/test_catalog_orders.py`, `tests/test_dashboard_phase2.py` |
 | Product UQC | PARTIAL | Schema read; fixture inserts `uqc="TAB"` directly, UI never sends it (M-03) |
 | Warehouse | VERIFIED (code) | schema and UI read; **no test** |
 | Purchase order validation and rate remarks | VERIFIED | `tests/test_purchase_orders.py:1-38` |
@@ -835,11 +970,11 @@ Counts are from introspection of the live `app` object; the full request/respons
 | Accounts entry and ledgers | VERIFIED (code) | handler read; M-02 reproduced from source; only `/gst-register` is called by a test |
 | Reports catalogue, filters, exports, reconciliation | VERIFIED | `tests/test_reports.py:1-181`, `tests/test_report_reconciliation.py:36-170` |
 | HR employee permission, leave, payroll, shifts, check-in | VERIFIED | `tests/test_hr.py:1-253` |
-| HR employee extended fields, holidays, leave types, components, structures | VERIFIED (code) / PARTIAL | API read; no UI for most (M-06, M-07) |
+| HR employee extended fields, holidays, leave types, components, structures | VERIFIED / PARTIAL | Masters screens and structure assignment browser-checked 2 Nov 2026, `tests/test_hr_masters.py`; employee extended fields still UI-partial (M-07) |
 | Company profile, tax rates, slabs, quote | VERIFIED (code) | schemas and UI read; fixtures insert directly, no API test |
 | Users, roles, permission catalog | VERIFIED | handlers read; catalogue/role parity and authorisation gates asserted by `tests/test_roles_parity.py` and `tests/test_authz.py` |
 | Audit trail read | VERIFIED (code) | handler read; export audit is asserted in `tests/test_reports.py:163-181` |
 | Print, QR, verification | VERIFIED (code) | handlers read; **no test** |
-| Field-level mismatches | VERIFIED (code) | M-01 fixed and browser-verified; M-02–M-11 remain source-level findings in Appendix A |
+| Field-level mismatches | VERIFIED (code) | M-01 fixed and browser-verified; M-11 closed and M-06 partly closed on 2 Nov 2026; M-02–M-05 and M-07–M-10 remain source-level findings in Appendix A |
 
 **Nothing in this document certifies a workflow that lacks the cited test or source.** Where a field is accepted but unreachable from the browser, the row is marked PARTIAL or the mismatch is listed in Appendix A rather than being described as working. The current suite has 12 test modules; most write workflows outside products, purchase-order validation, approvals, HR and reports are **not** covered by an executable test.

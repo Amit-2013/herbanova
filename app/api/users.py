@@ -139,6 +139,10 @@ def update_user(user_id: int, body: UpdateUserIn, db: Session = Depends(get_db),
             changes["role"] = {"old": u.role, "new": role.name}
             guard_last_admin(db, u, losing_admin=had_admin and "user:manage" not in role.permissions)
             u.role, u.role_id = role.name, role.id
+            # A role change can add the Administrator role, which requires the
+            # authenticator. End the old session so the next sign-in passes the
+            # policy that now applies, instead of carrying the old factor set.
+            u.token_version = (u.token_version or 1) + 1
 
     if body.is_active is not None and body.is_active != u.is_active:
         if u.id == actor.id and not body.is_active:

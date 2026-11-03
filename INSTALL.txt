@@ -34,6 +34,19 @@ Requirements: Python 3.12 or 3.13, PostgreSQL 15+ (running on the server).
      python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
    Open http://SERVER-ADDRESS:8000/ui/
 
+   To run the API and the front end as two processes instead, use the two
+   scripts (options, proxied paths and caveats in docs/RUNNING_SERVERS.md):
+     python scripts/run_backend.py
+     python scripts/run_frontend.py
+   The front end forwards /api, /docs, /openapi.json and /redoc to the API,
+   so the browser still uses one address and the session cookie is unchanged.
+
+   Migration 0029_totp gives Administrator accounts a second sign-in step
+   with Google Authenticator. On a fresh install the Administrator enrolls at
+   the first password sign-in (six-digit code, 30-second step, ten one-time
+   recovery codes). Keep the recovery codes: a password reset does not clear
+   the second factor. See docs/ADMIN_2FA.md.
+
 7. For real use, put it behind HTTPS (Caddy or nginx), start it automatically
    with Windows (Task Scheduler or NSSM), open only the HTTPS port in the
    firewall, and schedule regular pg_dump backups. Test a restore.

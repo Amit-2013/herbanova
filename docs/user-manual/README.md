@@ -1,9 +1,9 @@
 # Herbanova Business Control — User Manual
 
 **Project:** Herbanova Business Control
-**Document:** user-manual index; chapters 1, 19 and 20 written
-**Stage:** 3 — audit deliverables
-**Date:** 31 October 2026; cross-references refreshed 1 November 2026
+**Document:** user-manual index; chapters 1, 3, 7, 8, 11, 19, 20 and 24 written
+**Stage:** 3 — audit deliverables; gap-closure updates applied 3 November 2026
+**Date:** 31 October 2026; cross-references refreshed 1 November 2026 and 3 November 2026
 
 This folder is the operating manual for the application at `/ui`. It is written for the people who use the system — sales desk, stores, accounts, HR, payroll and administrators — not for developers. Developer-level evidence lives in the Stage 3 registers linked from each chapter.
 
@@ -12,9 +12,14 @@ This folder is the operating manual for the application at `/ui`. It is written 
 | File | Contents |
 |---|---|
 | [`README.md`](README.md) | This index: scope, reading paths, chapter plan, end-to-end journeys, known gaps |
-| [`00-quick-start.md`](00-quick-start.md) | Chapter 1, written in full: signing in, temporary passwords, sessions, lockout, navigation, error messages |
+| [`00-quick-start.md`](00-quick-start.md) | Chapter 1, written in full: signing in, temporary passwords, sessions, lockout, Administrator two-step verification (Google Authenticator, recovery codes and their messages), navigation, detail drawers and their responsive widths, error messages, and the two commands that start the API and front-end servers |
+| [`03-overview-dashboard.md`](03-overview-dashboard.md) | Chapter 3, written in full: period selector, KPI tiles, needs attention (including low stock), chart, ageing, expiry, warehouses, top products and category sales, insight cards and their measurement rules |
+| [`07-products.md`](07-products.md) | Chapter 7, written in full: product master, HSN, category, brand, reorder level, GST lookup and the free-text category limitation |
+| [`08-inventory.md`](08-inventory.md) | Chapter 8, written in full: stock on hand, the low chip, ledger, warehouses and capacity, receipts/dispatch/FEFO |
+| [`11-sales-orders.md`](11-sales-orders.md) | Chapter 11, written in full: draft, promise date, submit, approval stamp, dispatch, cancellation and the pipeline figures |
 | [`19-hr-people-attendance.md`](19-hr-people-attendance.md) | Chapter 19, written in full: HR dashboard, employee master, branches, offices and attendance policy, shifts, attendance, monthly register, import, profile outputs, letter templates |
 | [`20-hr-leave-payroll-reports.md`](20-hr-leave-payroll-reports.md) | Chapter 20, written in full: leave and balances, on-duty, approvals, payroll, period locks, HR reports, announcements, notifications, the HR Report Pack |
+| [`24-accounts-dashboard.md`](24-accounts-dashboard.md) | Chapter 24, written in full: the section bar with one address per panel, accounts window and tiles (each tile a link to the report that proves it, carrying the window), profit and loss, ageing with the due-date split, receivables by distributor with date/month/year/from-to windows and a CSV export, invoice payment terms and due dates, financial-year close, accounting month locks, input GST from supplier bills, filed-return reconciliation, TDS and statutory dues, data gaps and permissions |
 
 The remaining chapters are **planned, not yet written**. Each row below states what the chapter will cover, who it is for, the permissions involved, and the source that will be used to write it, so the manual can be completed without re-auditing the system.
 
@@ -33,7 +38,7 @@ The manual marks every statement about current behaviour:
 Cross-references:
 
 - Field-by-field UI/API mapping, including mismatches M-01–M-11: [`../FRONTEND_BACKEND_FIELD_MAPPING.md`](../FRONTEND_BACKEND_FIELD_MAPPING.md)
-- Business rules and formulas F-01–F-79: [`../FORMULA_AND_BUSINESS_RULE_REGISTER.md`](../FORMULA_AND_BUSINESS_RULE_REGISTER.md)
+- Business rules and formulas F-01–F-87: [`../FORMULA_AND_BUSINESS_RULE_REGISTER.md`](../FORMULA_AND_BUSINESS_RULE_REGISTER.md)
 - Tables, columns, keys and indexes: [`../DATABASE_TABLE_COLUMN_REGISTER.md`](../DATABASE_TABLE_COLUMN_REGISTER.md)
 - Reconciliation evidence: [`../FORMULA_RECONCILIATION_TESTS.md`](../FORMULA_RECONCILIATION_TESTS.md)
 - Who may do what: [`../permissions-matrix.md`](../permissions-matrix.md)
@@ -42,6 +47,9 @@ Cross-references:
 - HR features in detail: [`../HR_FEATURES.md`](../HR_FEATURES.md)
 - HR roles and confidentiality: [`../HR_ROLES.md`](../HR_ROLES.md)
 - Executed verification evidence: [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md)
+- Administrator two-step verification, including the operator procedure for a lost phone: [`../ADMIN_2FA.md`](../ADMIN_2FA.md)
+- Starting the API and front-end servers as two processes: [`../RUNNING_SERVERS.md`](../RUNNING_SERVERS.md)
+- Scheduled e-mail reports and the delivery log: [`../EMAIL_REPORTS.md`](../EMAIL_REPORTS.md)
 
 **Limitations of this manual.** No screenshots are stored in the repository. Layout descriptions are based on `static/index.html` and `static/js/app.js`; labels quoted here are the literal on-screen labels. Where the UI lacks a control the server already implements, the chapter says so and points to the mismatch register rather than describing a screen that does not exist.
 
@@ -59,26 +67,26 @@ Cross-references:
 
 ## Chapter plan
 
-The 24 chapters follow the sidebar and the four end-to-end journeys. Status is the state of the chapter **text**, not of the feature: chapters 1, 19 and 20 are written; the rest are planned. Every feature described in a written chapter is implemented and verified, and the executed evidence is in [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md).
+The 24 chapters follow the sidebar and the four end-to-end journeys. Status is the state of the chapter **text**, not of the feature: chapters 1, 3, 7, 8, 11, 19, 20 and 24 are written; the rest are planned. Every feature described in a written chapter is implemented and verified, and the executed evidence is in [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md).
 
 | # | Chapter | Audience | Permissions / views | Status | Evidence source |
 |---|---|---|---|---|---|
-| 1 | Getting started | All | Sign-in only | **Written** — [`00-quick-start.md`](00-quick-start.md) | `app/api/auth.py`; `app/services/lockout.py`; `app.js:109-126` |
+| 1 | Getting started | All | Sign-in only; Administrator adds a second factor | **Written** — [`00-quick-start.md`](00-quick-start.md) | `app/api/auth.py`; `app/services/lockout.py`; `app/services/totp.py`; `scripts/run_backend.py`, `run_frontend.py`; `app.js:109-126` |
 | 2 | Finding your way: navigation, roles and permissions | All | Menu filtered by permission | **PLANNED** | `app.js:86-103`; `docs/permissions-matrix.md` |
-| 3 | Overview dashboard | All | `require_login`; panels vary | **PLANNED** | `app/api/dashboard.py`; `app.js:361-423` |
+| 3 | Overview dashboard | All | `require_login`; panels vary | **Written** — [`03-overview-dashboard.md`](03-overview-dashboard.md) | `app/api/dashboard.py`; `tests/test_dashboard_phase2.py`, `test_dashboard_phase3.py`, `test_catalog_orders.py` |
 | 4 | Leads, follow-ups and lost leads | Sales | `lead:read`, `lead:write`, `lead:assign` | **PLANNED** | `app/api/leads.py`; mapping §3 |
 | 5 | Customers and distributors (one master) | Sales, accounts | `sales:read`; `distributor:write`, `sales:write`, `credit:manage` to act | **PLANNED** | `app/api/distributors.py`; `#/customers` in `app.js`; mapping §4 |
 | 6 | Credit limits and exposure | Sales, admin | `credit:manage`; second-person approval | **PLANNED** | `app/api/distributors.py`; formula register F-20 |
-| 7 | Products and GST rates | Stores, sales | `product:read/write`, `tax:read` | **PLANNED** | `app/api/products.py`; `app/api/tax.py`; mapping §5 |
-| 8 | Inventory and warehouses | Stores | `stock:read`, `stock:write` | **PLANNED** | `app/api/inventory.py`; mapping §6; FEFO rules F-24–F-30 |
+| 7 | Products and GST rates | Stores, sales | `product:read/write`, `tax:read` | **Written** — [`07-products.md`](07-products.md) | `app/api/products.py`; `app/api/tax.py`; `tests/test_products.py`, `test_catalog_orders.py` |
+| 8 | Inventory and warehouses | Stores | `stock:read`, `stock:write` | **Written** — [`08-inventory.md`](08-inventory.md) | `app/api/inventory.py`; `tests/test_capacity.py`, `test_report_reconciliation.py` |
 | 9 | Purchases and goods receipts | Stores, admin | `stock:read/write`, `supplier:read` | **PLANNED** | `app/api/purchase_orders.py`; mapping §7 |
 | 10 | Suppliers and bank-detail changes | Admin, stores | `supplier:read/write/bank`; second-person approval | **PLANNED** | `app/api/suppliers.py`; mapping §8 |
-| 11 | Sales orders | Sales, admin | `sales:read/write`, `approval:decide` | **PLANNED** | `app/api/sales_orders.py`; F-20; mapping §9 |
+| 11 | Sales orders | Sales, admin | `sales:read/write`, `approval:decide` | **Written** — [`11-sales-orders.md`](11-sales-orders.md) | `app/api/sales_orders.py`; `tests/test_approvals.py`, `test_catalog_orders.py` |
 | 12 | Approvals and segregation of duties | Admin, approvers | `approval:read`, `approval:decide`; role check for credit-limit and post-billing | **PLANNED** | `app/api/approvals.py:147-224`; permissions matrix |
 | 13 | Billing and invoices | Sales, stores | `sales:read`, `invoice:write/cancel` | **PLANNED** | `app/api/invoices.py`; mapping §10; immutability rules F-37–F-43 |
 | 14 | Credit and debit notes | Sales, admin | `note:write` | **PLANNED** | `app/api/notes.py`; F-45–F-46; caps recorded as PARTIAL in the formula register |
 | 15 | Printing secure documents | Sales, stores, admin | `print:document` | **PLANNED** | `app/api/printing.py`; `app/services/document_pdf.py`; invoice/CN/DN only — no PO print |
-| 16 | Accounts, outstanding and party ledgers | Accounts | `accounts:read/write` | **PLANNED** | `app/api/accounts.py`; mapping §11; M-02 on unallocated receipts |
+| 16 | Accounts, outstanding and party ledgers | Accounts | `accounts:read/write` | **PLANNED** | `app/api/accounts.py`; mapping §11–12 (in part superseded by chapter 24) |
 | 17 | GST register and trial balance | Accounts, admin | `accounts:read` | **PLANNED** | `app/api/accounts.py`; mapping §12 |
 | 18 | Reports and exports | Sales, accounts, HR | Per-report view permission; `report:export` to download | **PLANNED** | `app/api/reports.py`; `app/services/reports.py`; reconciliation record |
 | 19 | HR: people, shifts and attendance | HR, staff | `hr:read/write`, `hr:attendance_self`, `hr:attendance_manage` | **Written** — [`19-hr-people-attendance.md`](19-hr-people-attendance.md) | [`../HR_FEATURES.md`](../HR_FEATURES.md); `app/api/hr.py`; `tests/test_hr_directory.py`, `test_hr_attendance.py`, `test_hr_sites.py` |
@@ -86,7 +94,7 @@ The 24 chapters follow the sidebar and the four end-to-end journeys. Status is t
 | 21 | Users, roles and the audit trail | Admin | `user:manage`, `employee:read/write`, `audit:read` | **PLANNED** | `app/api/users.py`; `app/api/employees.py`; `app/api/audit.py`; mapping §15–16 |
 | 22 | Settings, company profile and database tools | Admin | `tax:read/write`, `user:manage`, `db:reset` + secondary password | **PLANNED** | `app/api/company.py`, `app/api/admin.py`, `app/api/db_reset.py`; `backup_restore_test.py` |
 | 23 | Scheduled e-mail reports | Admin | `email:manage` | **Not written — feature VERIFIED (test mode)** | [`../EMAIL_REPORTS.md`](../EMAIL_REPORTS.md); `tests/test_email_reports.py`, `test_email_schedules.py`, `test_email_api.py` |
-| 24 | Accounts dashboard, comparison and report pack | Accounts, admin | `accounts:reports` (plus `accounts:read`) | **Not written — feature VERIFIED** | [`../DASHBOARD_FEATURES.md`](../DASHBOARD_FEATURES.md) §14–15; `tests/test_accounts_reports.py` |
+| 24 | Accounts dashboard, comparison, receivables by distributor (windows and CSV), due dates, year close, input GST, return reconciliation, statutory dues, ledger heads, openings, vouchers, day book, balance sheet, bank reconciliation and report pack | Accounts, admin | `accounts:reports` (plus `accounts:read`, `accounts:write` to act) | **Written** — [`24-accounts-dashboard.md`](24-accounts-dashboard.md) | [`../DASHBOARD_FEATURES.md`](../DASHBOARD_FEATURES.md) §14–15; `tests/test_accounts_reports.py`, `tests/test_periods.py`, `tests/test_gst_statutory.py`, `tests/test_ledger_and_bank_rec.py` |
 
 **Appendices**
 
@@ -156,11 +164,11 @@ These are verified limitations, not instructions to work around them silently. E
 
 | Gap | Effect on the manual | Source |
 |---|---|---|
-| **M-02** "Not allocated yet" rejected | The accounts chapter must require an invoice or purchase order for every receipt/payment, despite the empty option in the drawer | `app/api/accounts.py:124-160` |
-| **M-06** No salary-component or salary-structure screen; payroll skips employees without a structure | The payroll chapter must start with a warning about the silent skip. Branches, offices and attendance rules now have a screen; departments, holidays, leave types and the salary masters still do not | `app/services/payroll.py:59-60`; mapping §14.6 |
+| **M-06** Payroll skips an employee with no active structure without naming them; masters and structure assignment now have screens | The payroll chapter must still warn about the silent skip and point to **HR masters** → Salary structures and the profile **Salary** tab. Departments, holidays, leave types, salary components and structures now have screens; opening leave balances do not | `app/services/payroll.py:60-62`; mapping Appendix A |
 | **M-09** Manual attendance cannot record punch times or office | The attendance chapter must say corrections are status-only from the screen | mapping §14 |
 | **In-memory report paging** | A very large register is fully built before the page is sliced; the reports chapter must warn about long-running exports | `app/api/reports.py:118-132` |
 | **17 row-count-only registers** | The reports chapter must not promise independent reconciliation for those reports | `docs/FORMULA_RECONCILIATION_TESTS.md` |
+| **Administrator two-step verification is not yet migrated on production** | The server enforces and tests it, and its columns (`0029_totp`) are on the test and development databases, so an Administrator enrolling there is expected. Production still runs `0028_advances` and needs the same approval before its Administrators see the second-factor screen | `docs/ADMIN_2FA.md`; `VERIFICATION_REPORT.md` §25.5 |
 
 ## Maintaining this manual
 

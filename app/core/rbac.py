@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from ..services.feature_store import disabled_permissions
 from .db import get_db
 from .permissions import BASELINE_ROLE_PERMS, effective_permissions
-from .security import read_token_full
+from .security import read_session_token
 
 # Backwards-compatible name: the frozen baseline sets (also used by seeding).
 ROLE_PERMS: dict[str, set[str]] = BASELINE_ROLE_PERMS
@@ -56,15 +56,19 @@ def role_permissions(db: Session, user) -> set[str]:
 
 def current_user(request: Request, db: Session = Depends(get_db)):
     from ..models.core import User
-    parsed = read_token_full(request.cookies.get("session", ""))
+    parsed = read_session_token(request.cookies.get("session", ""))
     if not parsed:
         raise HTTPException(401, "Not authenticated")
-    uid, token_version = parsed
-    user = db.get(User, uid)
+    user = db.get(User, parsed["user_id"])
     if not user or not user.is_active:
         raise HTTPException(401, "Not authenticated")
-    if token_version != (user.token_version or 1):
+    if parsed["token_version"] != (user.token_version or 1):
         raise HTTPException(401, "Session expired")     # revoked (password change / reset / offboarding)
+    # A session that passed only the password step is not a session for an
+    # account with the authenticator enabled. The claim is set only after the
+    # code is accepted; the login endpoint cannot issue a cookie without it.
+    if getattr(user, "totp_enabled", False) and not parsed["otp"]:
+        raise HTTPException(401, "Two-factor verification required")
     return user
 
 

@@ -281,7 +281,7 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 ### F-40 — Ageing buckets
 - **Formula:** `days = max(0, (as_of − invoice_date).days)`; bucket 0–30, 31–60, 61–90, 90+; only rows with `outstanding > 0`; bucket total sums net outstanding.
 - **Source:** `app/services/ledger.py:152-203`.
-- **Conditions:** an invoice has no due date, so age is measured from the invoice date; the report date can be supplied.
+- **Conditions:** bucket age is measured from the invoice date so historical reports stay comparable; the due-date position is a separate split (F-83). The report date can be supplied.
 - **Tests:** `tests/test_report_reconciliation.py:74-95`.
 - **Status:** VERIFIED.
 
@@ -301,27 +301,42 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 - **Tests:** `tests/test_report_reconciliation.py:136-144` requires a real cross-check for the payables report.
 - **Status:** VERIFIED.
 
-### F-43 — Receipt/payment allocation
-- **Formula:** a receipt (money in) belongs to a distributor and optionally an invoice; a payment (money out) belongs to a supplier and optionally a purchase order. The allocated amount may not exceed the outstanding balance. Dates cannot be in the future or more than ten years old.
-- **Source:** `app/api/accounts.py:121-200`.
-- **Conditions:** cross-party allocation is refused; cancelled invoices cannot receive money; a receipt with no distributor and no invoice is refused.
-- **Status:** VERIFIED (code).
+### F-43 — Receipt/payment allocation and advance
+- **Formula:** a receipt (money in) belongs to a distributor; a payment (money out) belongs to a supplier. With `purpose = outstanding`, the amount settles open documents oldest-first (or a named document first) and `advance = amount − Σ allocations` is held when the money exceeds what is open. With `purpose = advance`, `allocations = []` and `advance = amount`; no invoice or order is named. New entries leave the legacy `invoice_id` / `purchase_order_id` columns null so an allocation is counted once. An existing entry recorded before allocations named its document outright and counts as fully settled. Dates cannot be in the future or more than ten years old.
+- **Source:** `app/services/advances.py:120-185`, `app/api/accounts.py` (`record_entry`).
+- **Conditions:** cross-party allocation is refused; cancelled invoices cannot receive money; an advance that names a document is refused 422; a named settled document keeps the 422 while a general entry with nothing open records the whole amount as an advance.
+- **Tests:** `tests/test_accounts_advances.py::test_receipt_settles_oldest_invoices_and_holds_the_excess`, `::test_an_advance_cannot_name_a_document`.
+- **Status:** VERIFIED.
+
+### F-43A — Settlement date rule
+- **Formula:** a receipt may settle only invoices with `invoice_date <= paid_on`; a supplier payment may settle only orders whose latest goods receipt has `received_on <= paid_on`. Money that cannot settle a document that did not exist on its day stays in the advance.
+- **Source:** `app/services/advances.py:120-185`, `app/services/ledger.py` (`payable_rows`, `received_on`).
+- **Tests:** `tests/test_accounts_advances.py::test_a_receipt_cannot_settle_an_invoice_issued_later`.
+- **Status:** VERIFIED.
+
+### F-43B — Advance draw-down
+- **Formula:** at invoice issue and at goods receipt, take the party's unapplied money paid on or before the document date, oldest first; allocate `min(advance, document value)` to the document, dated on the document day; the remainder stays available. The allocation is audited as `advance_applied` on the dispatch or goods-receipt event.
+- **Source:** `app/services/advances.py:186-210`; called from `app/services/invoice.py` and `app/api/purchase_orders.py`.
+- **Tests:** `tests/test_accounts_advances.py::test_advance_is_drawn_down_by_a_later_invoice`, `::test_supplier_advance_settles_goods_received_later`.
+- **Status:** VERIFIED.
 
 ### F-44 — Distributor ledger
-- **Formula:** invoices debit the distributor; credit notes and receipts credit; debit notes debit. Running balance is the net amount owed.
-- **Source:** `app/services/ledger.py:207-237`.
+- **Formula:** invoices debit the distributor; credit notes and receipts credit; debit notes debit. A receipt credits its full amount once and its note names the invoices it settled and the advance held, because the invoice debit is already in the statement; posting the settlement as a second debit would count the money twice. Running balance is the net amount owed; a negative closing balance is an advance held. `available_advance` reports the unapplied remainder.
+- **Source:** `app/services/ledger.py:301-350`.
+- **Tests:** `tests/test_accounts_advances.py::test_receipt_settles_oldest_invoices_and_holds_the_excess`.
 - **Status:** VERIFIED (code).
 
 ### F-45 — Supplier ledger
-- **Formula:** goods received value debits the supplier account (expense/asset side); payments credit it; running balance is the net amount owed.
-- **Source:** `app/services/ledger.py:239-265`.
+- **Formula:** goods received value credits the supplier account (what the business owes); payments debit it; a payment debits its full amount once and its note names the orders settled and the advance held. Running balance is the net amount owed; a negative closing balance is an advance paid. `available_advance` reports the unapplied remainder.
+- **Source:** `app/services/ledger.py:352-384`.
+- **Tests:** `tests/test_accounts_advances.py::test_supplier_advance_settles_goods_received_later`.
 - **Status:** VERIFIED (code).
 
 ### F-46 — Trial balance
-- **Formula:** post each issued invoice: debit Receivables by grand total; credit Sales by taxable; credit each output-tax head; post round-off to the credit side when positive and the debit side when negative. Credit notes reverse the entries; debit notes repeat them. Payments post Cash/Bank against Receivables or Payables. The report asserts total debits equal total credits.
-- **Source:** `app/services/ledger.py:318-420`.
-- **Tests:** `tests/test_report_reconciliation.py:107-115`.
-- **Status:** VERIFIED. This is a document-derived summary, not a full double-entry ledger; there are no journal entries or chart-of-accounts table.
+- **Formula:** post each issued invoice: debit Receivables by grand total; credit Sales by taxable; credit each output-tax head; post round-off to the credit side when positive and the debit side when negative. Credit notes reverse the entries; debit notes repeat them. For each receipt, debit Cash/Bank by the full amount, credit Receivables by the settled part and **Advances from distributors** by the remainder. For each supplier payment, debit Payables by the settled part and **Advances to suppliers** by the remainder, and credit Cash/Bank by the full amount. A legacy entry that named its document counts as fully settled. The report asserts total debits equal total credits.
+- **Source:** `app/services/ledger.py:446-553`.
+- **Tests:** `tests/test_report_reconciliation.py`; `tests/test_accounts_advances.py::test_advance_is_not_revenue_or_a_purchase`.
+- **Status:** VERIFIED. This is a document-derived summary, not a full double-entry ledger; there are no journal entries attached to a document.
 
 ### F-47 — Report period boundary
 - **Formula:** `from`/`to` are inclusive; `from > to` raises 422.
@@ -398,6 +413,66 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 - **Source:** `app/api/hr.py` payroll endpoints; `app/services/hr_approvals.py:_payroll`.
 - **Tests:** `tests/test_hr.py:49-133`.
 - **Status:** VERIFIED.
+
+### F-80 — Employees skipped by a payroll run
+- **Rule:** an active employee with no entry is listed, never dropped silently (M-06). The list is returned by `POST /api/hr/payroll/periods/{id}/prepare` and by `GET /api/hr/payroll/periods/{id}` with a reason: *No active salary structure covers this month* (no active structure effective over the month) or *Not in the prepared entries*. An employee who joined after the month or left before it is not reported: they were not employed in the period. The skipped codes are written to the payroll audit entry.
+- **Source:** `app/services/payroll.py:skipped_employees`; `app/api/hr.py:prepare_payroll`, `get_period`.
+- **Tests:** `tests/test_hr.py::test_payroll_prepare_submit_approve_process`.
+- **Status:** VERIFIED.
+
+### F-81 — Payroll in the profit and loss
+- **Formula:** a month wholly inside the window counts in full when its period is `approved`, `processed` or `paid`. A month the window cuts short counts that same approved gross allocated by each employee's working-day share of the month:
+  `allocated = Σ_employee gross × (working days of the employee inside the window ÷ working days of the employee in the month)`.
+  A month with no approved payroll is never allocated; it is named in GAP-P03 and excluded. The allocation is marked `prorated: true` on the period item. Net profit stays unavailable while any month in the window is missing or unapproved.
+- **Source:** `app/services/profit_loss.py:_payroll`, `_allocate`.
+- **Tests:** `tests/test_profit_loss.py::test_cut_month_is_allocated_by_working_days_not_guessed`, `::test_payroll_gap_names_absent_and_unapproved_months`.
+- **Status:** VERIFIED against the service and the reconciliation export. The Payroll (gross) line now prints the provable partial total with a *Partial* marker instead of “No data yet”; net profit is still refused until the window is complete.
+
+### F-82 — Financial-year close
+- **Rule:** an Indian financial year runs 1 April to 31 March and is labelled `YYYY-YY` (`2025-26`). Only a year whose last day has passed can be closed, and not one before the earliest document in the book (`min` of invoice, credit-note, debit-note, payment, expense, PO and GRN dates). A close needs a reason of at least five characters. While a year is closed, a document dated inside it is refused with HTTP 423: dispatch and its invoice, receipts and payments, credit and debit notes, invoice cancellation, expense creation/reversal, cost corrections/backfill and free-sample notes. Only the Administrator may reopen, with a reason; both actions are audited on `financial_year:{label}`. An active accounting-month lock is checked first and wins.
+- **Source:** `app/services/periods.py:fy_start`, `fy_end`, `fy_label`, `label_bounds`, `refuse_if_closed`, `close_year`, `reopen_year`; `app/api/periods.py`; `app/models/accounts.py:FinancialYearClose`.
+- **Tests:** `tests/test_periods.py` (FY maths, completed-year rule, refusal, roles, reopen, audit).
+- **Status:** VERIFIED (API and tests). The screen is not browser-verified.
+
+### F-83 — Invoice due date and ageing due split
+- **Formula:** at issue the invoice copies the distributor's `payment_terms_days`; `due_date = invoice_date + terms`. No terms stores both fields NULL. Ageing reads the stored due date, never today's master: `days_overdue = max(0, as_of − due_date)`; a row is `overdue` when `due_date < as_of`, `due_this_week` when `as_of ≤ due_date ≤ as_of + 7`, `not_yet_due` after that, and `no_due_date` when NULL. The four bucket totals sum to outstanding and their counts sum to the invoice count. Supplier payables remain an estimate from current terms.
+- **Source:** `app/services/invoice.py:create_invoice_for_order`; `app/services/ledger.py:ageing_rows`; `app/models/core.py:Invoice`.
+- **Tests:** `tests/test_periods.py::test_invoice_snapshots_terms_and_due_date`, `::test_no_terms_means_no_due_date_not_an_invented_one`, `::test_ageing_splits_outstanding_by_due_date`.
+- **Status:** VERIFIED (API and tests). The screen is not browser-verified.
+
+### F-84 — Supplier bill capture
+- **Rule:** a supplier bill records the tax the supplier charged head by head (`cgst`, `sgst`, `igst`, `cess`), the taxable value, round-off and total, plus the supplier invoice number, the supplier and an optional purchase order. `tax_total = cgst + sgst + igst + cess`; `total = taxable + tax_total + round_off`, each quantised half-up. The bill number is unique per supplier, not globally. A bill is `posted` or `reversed`; a reversal needs a reason of at least five characters, keeps the row, records who and when, and excludes it from every total. Reversing twice is refused (409), as is a duplicate live bill number.
+- **Conditions:** the bill date is refused with HTTP 423 inside a locked accounting month or a closed financial year. Capturing a bill never changes payables: payables stay goods received minus payments.
+- **Source:** `app/models/accounts.py:PurchaseInvoice`; `app/api/gst.py`; migration `0026_gst_and_statutory`.
+- **Tests:** `tests/test_gst_statutory.py::test_a_supplier_bill_records_its_tax_and_a_wrong_one_is_reversed`, `::test_a_bill_number_is_unique_per_supplier_only`, `::test_a_locked_month_and_a_closed_year_refuse_a_supplier_bill`.
+- **Status:** VERIFIED (API, tests and browser probe).
+
+### F-85 — Input register and net GST payable
+- **Formula:** the input register totals only `posted` bills. `eligible` is the subset with `itc_eligible = true`; `blocked = posted − eligible`. Net payable is head by head:
+  `net[h] = output[h] − eligible_input[h]`; `net_total = Σ net[h]`.
+  Blocked input is reported separately and is never subtracted, and creditable expense GST is a memo (`included_in_net: false`) because an expense stores one GST amount with no head split.
+- **Conditions:** with no posted bill at all, input, net and the reason are returned with `available: false`; the figure is never reported as zero, which would overstate the payable. A negative net is a credit and is shown as one.
+- **Source:** `app/services/gst.py:register`, `net`, `expense_itc`; `app/services/accounting.py:window` (`net_gst`).
+- **Tests:** `tests/test_gst_statutory.py::test_net_payable_is_output_less_eligible_input`, `::test_with_no_supplier_bill_input_tax_is_unavailable_not_zero`.
+- **Status:** VERIFIED (API, tests and browser probe).
+
+### F-86 — Filed return reconciliation
+- **Rule:** one captured return per year, month and form (`GSTR-1`, `GSTR-3B`). For each line, `difference = filed − computed`, quantised half-up; `ok` when `|difference| < 0.005`. Compared lines: outward taxable value and the four outward heads on both forms; the four ITC heads and tax payable after ITC on GSTR-3B. A difference is shown with both figures and both forms' `differences` list, never corrected or hidden. Saving the same month and form replaces that row. An ITC figure on GSTR-1, an unknown form or a future month is refused (422).
+- **Conditions:** ITC is compared only when at least one purchase bill exists; before that the line carries the reason and no difference. Filed figures are typed in; the application does not file or read the portal.
+- **Source:** `app/services/gst.py:reconciliation`, `_check`; `app/models/accounts.py:GstReturn`.
+- **Tests:** `tests/test_gst_statutory.py::test_a_filed_return_is_compared_with_the_registers`.
+- **Status:** VERIFIED (API, tests and browser probe).
+
+### F-87 — Statutory dues
+- **Formula:** per head (`pf`, `esi`, `pt`, `tds`):
+  `withheld_to_date` = vendor TDS from posted bills up to the date (TDS head only) plus payroll statutory deductions from periods with status `approved`, `processed` or `paid` up to the month;
+  `deposited_to_date` = sum of challans of that kind paid on or before the window end;
+  `outstanding = withheld_to_date − deposited_to_date`.
+  `deposited_in_window` counts only challans paid inside the window, so the window and the cumulative position are both visible.
+- **Conditions:** a draft payroll is not a liability and contributes nothing. A statutory component with no statutory head is listed with its codes and excluded from every head. A head with no source anywhere reads `available: false` with a reason rather than zero. Challans are not matched to individual deductions; the outstanding line is what no challan covers. An unknown kind or a future period is refused (422).
+- **Source:** `app/services/statutory.py:vendor_tds`, `payroll_dues`, `dues`; `app/models/accounts.py:StatutoryChallan`; `app/models/accounts.py:PurchaseInvoice`.
+- **Tests:** `tests/test_gst_statutory.py::test_statutory_dues_read_vendor_tds_and_approved_payroll_only`, `::test_a_draft_payroll_is_not_a_statutory_liability`.
+- **Status:** VERIFIED (API, tests and browser probe).
 
 ---
 
@@ -541,7 +616,7 @@ Money is held as `Decimal`; percentages and quantities are also `Decimal`. Every
 | Concurrent document numbering | Reasoned from `FOR UPDATE`; no parallel load test. | Two simultaneous dispatches on a fresh database, assert distinct numbers. |
 | Payroll “no attendance = full pay” policy | Deliberate default; not a coding error. | Business sign-off and a test pinning the intended behaviour. |
 | In-memory report sorting/paging | Correct at current volume; unbounded growth. | Move sort/page into SQL or cap the report row set (R-02). |
-| GST input register / ITC | Not implemented; purchase orders carry a cost, not a tax split. | Capture purchase invoices with tax and build an input register. |
+| GST input register / ITC | **Closed 3 Nov 2026.** Supplier bills now capture tax head by head (F-84) and the input register, net payable and blocked-credit split are built (F-85). The remaining limit is judgement: eligibility is recorded, not decided, and expense GST has no head split. | Owner-approved eligibility rules and a head split on expenses. |
 | Round-off distribution across tax heads | Round-off is a single document-level line; no per-head allocation. | Confirm with the tax advisor whether the statutory return expects a different split. |
 
 ## Appendix B — Source map

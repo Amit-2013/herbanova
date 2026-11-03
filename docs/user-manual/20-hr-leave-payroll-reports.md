@@ -35,8 +35,9 @@ The **Balances** table shows **Type**, **Entitled**, **Used**, **Pending** and
 balances — including **Carried** — are on their profile (chapter 19, 19.4).
 
 If no leave type is configured the panel says **No leave types.** Leave types
-and opening balances have no screen in this build (M-06); they are loaded through
-the API by the Administrator. Until they are, the apply form has nothing to
+now have a screen under **HR masters** (chapter 19, 19.6); an HR role with
+`hr:write` creates them there. Opening balances still have no screen and are
+loaded through the API. Until a type exists, the apply form has nothing to
 choose and cannot submit.
 
 ### Applying
@@ -173,12 +174,14 @@ approved period cannot be recalculated.
 | Pro-rating | Earnings are prorated by payable ÷ working days. **INCENTIVE**, **OVERTIME**, **BONUS** and **REIMBURSEMENT** are not prorated |
 | Exempt days | A day the attendance policy exempts is not an absence and is not loss of pay |
 
-**The gap to know about (M-06).** An employee with no active salary structure is
-skipped silently, and the payroll screen does not list who was skipped. Salary
-structures and salary components have no screen in this build. Before you submit
-a period, compare the **Entries** count with the active headcount; if it is
-lower, ask the Administrator which structures are missing. Do not read a short
-run as correct.
+**Who was skipped (M-06).** An employee with no active salary structure is still
+not paid by the run, but the screen now says so. After **Prepare**, and whenever
+you open the period, a **Skipped** block lists each active employee left out with
+the reason — **No active salary structure covers this month** or **Not in the
+prepared entries** — and a **Assign salary structures** button takes you to the
+salary-structure masters (chapter 19, 19.6). The same codes are written to the
+audit entry, so a short run can be traced later. Do not read a short run as
+correct without reading this list first.
 
 ### The register
 
@@ -306,7 +309,7 @@ configured by the Administrator.
 | Missing control | Effect |
 |---|---|
 | Half-day leave, leave document, leave-balance adjustment, carry-forward | API only |
-| Leave types, holidays and salary masters | API only (M-06); payroll skips employees without a structure, silently |
+| Paying an employee who has no salary structure | Not done by the run; the **Skipped** list names them and links to the masters (M-06 closed 3 Nov 2026) |
 | Attendance correction request and bulk marking | API only |
 | OD duration, party, worksite and document | API only |
 | Payroll statutory summary, bank file and reconciliation | API only |
@@ -328,4 +331,12 @@ configured by the Administrator.
 - The leave, OD and payroll **forms were not submitted in a browser** during
   this review; the automated browser refused write actions. The rules above come
   from the source and the tests, not from a recorded click-through.
+- On 2 November 2026 a separate test instance allowed writes: a salary structure
+  was created from **HR masters** and from an employee **Salary** tab, the
+  overlap refusal was shown in the form, and a later structure closed the
+  previous one. `tests/test_hr_masters.py` covers the structure guards.
+- The **Skipped** block on a payroll period is covered by `tests/test_hr.py`
+  (prepare result and register agree; reason text) but was **not** seen in a
+  browser; the markup and the API response were read instead. Mark it
+  **Not verified in the browser** until a write-enabled session is allowed.
 - No salary, bank, statutory or live employee figure appears in this manual.

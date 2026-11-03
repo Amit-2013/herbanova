@@ -201,6 +201,7 @@ def _accounts(data: dict) -> str:
     gross_ok = profit.get("gross_profit") is not None
     expenses_ok = profit.get("expenses") is not None
     net_ok = profit.get("net_profit") is not None
+    net_gst = acc.get("net_gst") or {}
     tiles = [
         {"key": "revenue", "static": True, "label": "Revenue (taxable)", "display": inr(acc["revenue"]["taxable"]),
          "available": True, "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
@@ -214,12 +215,19 @@ def _accounts(data: dict) -> str:
         {"key": "payables", "static": True, "label": "Payables outstanding", "display": inr(acc["payables"]["total"]),
          "available": True, "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
          "gap": None, "note": "As at the window end; due dates estimated."},
-        {"key": "gst", "static": True, "label": "Output GST", "display": inr(acc["output_gst"]["total"]),
-         "available": True, "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
-         "gap": None, "note": "Input tax is not captured (GAP-A05)."},
+        {"key": "gst", "static": True, "label": "Net GST payable",
+         "display": (inr(acc["net_gst"]["net_total"]) if net_gst.get("available")
+                     else "No data yet"),
+         "available": bool(net_gst.get("available")), "change": None,
+         "direction": {"arrow": "", "word": "", "tone": "flat"},
+         "gap": None,
+         "note": ("Output tax on issued invoices less input tax on captured supplier bills."
+                  if net_gst.get("available") else
+                  "No supplier bill with input tax is captured yet.")},
         {"key": "cash", "static": True, "label": "Cash and bank (net movement)", "display": inr(acc["cash_bank_net"]),
          "available": True, "change": None, "direction": {"arrow": "", "word": "", "tone": "flat"},
-         "gap": None, "note": "No opening balance is captured (GAP-A10)."},
+         "gap": None, "note": "Net movement in the window; the closing "
+                  "balance is on the balance sheet."},
         {"key": "gross_profit", "static": True, "label": "Gross profit",
          "display": inr(profit.get("gross_profit")) if gross_ok else "No data yet",
          "available": gross_ok, "change": None,
@@ -251,9 +259,9 @@ def _accounts(data: dict) -> str:
         f'<div style="padding:22px 28px">'
         f'<h2 style="margin:0 0 6px;font-size:16px;color:{INK}">Accounts summary</h2>'
         f'<p style="margin:0 0 12px;font-size:13px;color:{MUTED}">Period {_e(data["period_label"])}. '
-        f'Outstanding and payables are as at {_e(acc["as_of"])}. A locked accounting month '
-        f'refuses cost corrections and expense creation or reversal; invoice changes, '
-        f'credit notes, receipts, payments and year-end close are not covered (GAP-A03).</p>'
+        f'Outstanding and payables are as at {_e(acc["as_of"])}. A closed financial year '
+        f'refuses dated documents until the Administrator reopens it; a locked '
+        f'accounting month stays the narrower gate for corrections.</p>'
         + _tiles(tiles)
         + f'<p style="font-size:12px;color:{"#1F6B4A" if tb["balanced"] else RED};margin:8px 0 0">'
           f'Trial balance: {_e(check)}.</p>'
@@ -493,30 +501,40 @@ def _plain(data: dict, attachments: list[dict], mode: str, test_recipient: str |
         profit = data.get("profit") or {}
         gaps = profit.get("gaps") or []
         first_gap = gaps[0]["code"] if gaps else "GAP-P01"
+        net_gst = acc.get("net_gst") or {}
+        gst_line = (
+            f"- Net GST payable: {inr(net_gst['net_total'])} (output "
+            f"{inr(acc['output_gst']['total'])} less input {inr(net_gst['input_total'])})"
+            if net_gst.get("available") else
+            f"- Net GST payable: No data yet (output {inr(acc['output_gst']['total'])}; "
+            "no supplier bill with input tax is captured)")
         lines += ["", "ACCOUNTS SUMMARY",
                   f"- Revenue (taxable): {inr(acc['revenue']['taxable'])}",
                   f"- Collections: {inr(acc['collections']['total'])}",
                   f"- Returns: {inr(acc['returns']['value'])}",
-                  f"- Output GST: {inr(acc['output_gst']['total'])} (input tax not captured, GAP-A05)",
+                  gst_line,
                   f"- Receivables outstanding: {inr(acc['outstanding']['total'])} as at {acc['as_of']}",
                   f"- Receivables over 60 days: {inr(acc['outstanding']['overdue_60'])}",
                   f"- Payables outstanding: {inr(acc['payables']['total'])} (due dates estimated)",
-                  f"- Cash and bank net movement: {inr(acc['cash_bank_net'])} (no opening balance, GAP-A10)",
+                  f"- Cash and bank net movement: {inr(acc['cash_bank_net'])} (closing balances are on the balance sheet)",
                   f"- {profit.get('gross_profit_label', 'Gross profit')}: "
                   + (inr(profit["gross_profit"]) if profit.get("gross_profit") is not None
                      else "No data yet (GAP-P01)"),
                   f"- Expenses: " + (inr(profit["expenses"])
+                                     + (" (partial, GAP-P02)" if profit.get("expenses_partial") else "")
                                      if profit.get("expenses") is not None
                                      else "No data yet (GAP-P02)"),
                   f"- Payroll (gross): " + (inr(profit["payroll"])
+                                            + (" (partial, GAP-P03)"
+                                               if profit.get("payroll_partial") else "")
                                             if profit.get("payroll") is not None
                                             else "No data yet (GAP-P03)"),
                   f"- Net profit: " + (inr(profit["net_profit"])
                                        if profit.get("net_profit") is not None
                                        else f"No data yet ({first_gap})"),
                   f"- Trial balance: {'debits equal credits' if acc['trial_balance']['balanced'] else 'DOES NOT BALANCE'}",
-                  "- A locked accounting month refuses cost corrections and expense creation or reversal; "
-                  "invoice changes, credit notes, receipts, payments and year-end close are not covered (GAP-A03)"]
+                  "- A closed financial year refuses dated documents until the Administrator "
+                  "reopens it; a locked accounting month stays the narrower gate for corrections"]
     lines += ["", "ATTACHED REPORTS"]
     lines += ([f"- {a['filename']} ({a.get('contains')}, {a.get('rows')} rows, {_size(len(a['bytes']))})"
                for a in attachments] or ["- None"])

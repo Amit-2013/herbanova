@@ -1,17 +1,22 @@
 """Accounts reporting: what the documents can prove, and what they cannot.
 
-There is no chart of accounts, no purchase-side tax, no due date on an invoice
-and no opening balance. This module therefore computes revenue, collections,
-returns, outstanding and ageing, payables, output GST, credit use, cash/bank
-movement and the derived trial balance. Profit and loss is built by
-`profit_loss.statement` from captured costs, approved expenses and payroll.
-Everything else is returned as an unavailable metric with a gap code, so a
-screen or an email can say "No data yet" instead of inventing a figure.
+There is no chart of accounts and no opening balance. Purchase-side tax exists
+only as captured supplier bills (`gst`), so input GST and net payable are
+available once a bill is posted and unavailable before that. This module
+therefore computes revenue, collections, returns, outstanding and ageing,
+payables, output GST, input GST, net GST, credit use, cash/bank movement and the
+derived trial balance. Profit and loss is built by `profit_loss.statement` from
+captured costs, approved expenses and payroll. Everything else is returned as
+an unavailable metric with a gap code, so a screen or an email can say
+"No data yet" instead of inventing a figure.
 
-Payables are measured as at a date: the cost of goods received on or before it,
-minus payments made on or before it. A supplier's `payment_terms_days` is used
-to estimate when an outstanding balance falls due; the terms are today's master
-value, not a snapshot on the purchase order, and the note says so.
+Sales invoices freeze the distributor's payment terms at issue, so the due date
+and the ageing split are read from the invoice, not from today's master. A
+closed financial year (`periods`) and a locked accounting month both refuse
+dated documents. Payables are measured as at a date: the cost of goods received
+on or before it, minus payments made on or before it. A supplier's
+`payment_terms_days` is still used to estimate when an outstanding balance falls
+due; that value is today's master value, and the note says so.
 """
 from __future__ import annotations
 
@@ -23,46 +28,33 @@ from sqlalchemy.orm import Session
 
 from ..core.india_states import state_name
 from ..core.rules import REPORT_TZ
-from ..models.accounts import Payment
+from ..models.accounts import Payment, PaymentAllocation
 from ..models.core import (CreditNote, DebitNote, Distributor, Invoice, PurchaseOrder,
                            PurchaseOrderLine, SalesOrder)
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
-from . import ledger, profit_loss
+from . import gst as gst_service, ledger, profit_loss
 from .sales import EXPOSURE_STATUSES
 
 ZERO = Decimal("0.00")
 
-GAPS = (
-    ("GAP-A03", "Financial-year close",
-     "Accounting months can be locked. A locked month refuses purchase-cost "
-     "corrections and expense creation or reversal. Invoice changes, credit "
-     "notes, receipts, payments and a year-end close are not covered."),
-    ("GAP-A04", "Invoice due dates",
-     "An invoice carries no due date. Payables due dates are estimated from the supplier's current payment terms and the latest receipt."),
-    ("GAP-A05", "Input GST and net GST payable",
-     "Purchase-side tax is not captured. Only output GST is reported; a net payable figure would be incomplete."),
-    ("GAP-A06", "GSTR-1 / GSTR-3B reconciliation",
-     "No filed return is stored, so no reconciliation with a return can be shown."),
-    ("GAP-A07", "TDS and other statutory dues",
-     "No TDS section, deduction or challan is recorded."),
-    ("GAP-A08", "Vouchers, journal and day book",
-     "Money movements are recorded as receipts and payments only; there is no voucher or posting state."),
-    ("GAP-A09", "Bank reconciliation",
-     "No bank statement or reconciliation record exists."),
-    ("GAP-A10", "Opening balances and balance sheet",
-     "Opening cash, bank and capital balances are not captured, so a balance sheet and a closing cash balance cannot be produced."),
-)
+# A08, A09 and A10 closed in Batch 5: vouchers and the day book are in
+# `services/journal.py`, bank statements and matching in `services/bank_rec.py`,
+# and openings and the balance sheet in `services/balance_sheet.py`.
+GAPS = ()
 
-UNAVAILABLE = (
-    ("balance_sheet", "Balance sheet", "GAP-A10", "Opening balances and assets are not captured."),
-    ("input_gst", "Input GST / net payable", "GAP-A05", "Purchase-side tax is not captured."),
-    ("tds", "TDS and statutory dues", "GAP-A07", "No TDS record exists."),
-    ("bank_reconciliation", "Bank reconciliation", "GAP-A09", "No bank statement is recorded."),
-)
+UNAVAILABLE = ()
 
 
 def _s(value) -> str:
     return str((Decimal(value or 0)).quantize(Decimal("0.01")))
+
+
+def _money(value) -> Decimal:
+    return ledger.money(value)
+
+
+def _grand(document) -> Decimal:
+    return ledger.money(document.grand_total)
 
 
 def _business_day(column):
@@ -176,6 +168,7 @@ def window(db: Session, start: date, end: date, as_of: date | None = None,
 
     payables = payables_as_of(db, as_of)
     credit = credit_exposure(db)
+    net_gst = gst_service.net(db, start, end)
     days = (end - start).days + 1 if end >= start else 0
     dso = (round(float(ageing["total"] / revenue["taxable"] * days), 1)
            if revenue["taxable"] > 0 and days > 0 else None)
@@ -196,6 +189,18 @@ def window(db: Session, start: date, end: date, as_of: date | None = None,
         "returns": {"value": _s(returns["value"]), "count": returns["count"]},
         "debit_notes": {"value": _s(debits["value"]), "count": debits["count"]},
         "output_gst": {k: _s(v) for k, v in gst.items()},
+        "net_gst": {
+            "available": net_gst["available"],
+            "reason": net_gst["reason"],
+            "input": {k: _s(v) for k, v in net_gst["input"].items()},
+            "input_total": _s(net_gst["input_total"]),
+            "blocked_total": _s(net_gst["blocked_total"]),
+            "net": {k: _s(v) for k, v in net_gst["net"].items()},
+            "net_total": _s(net_gst["net_total"]),
+            "expense_itc": {"amount": _s(net_gst["expense_itc"]["amount"]),
+                            "count": net_gst["expense_itc"]["count"],
+                            "included_in_net": False},
+        },
         "collections": {k: (_s(v) if k != "count" else v) for k, v in collections.items()},
         "supplier_payments": {k: (_s(v) if k != "count" else v)
                               for k, v in paid_out.items()},
@@ -215,11 +220,20 @@ def window(db: Session, start: date, end: date, as_of: date | None = None,
             f"Revenue is taxable value of issued invoices; gross includes GST. {days} days in the window.",
             "Outstanding is as at the window end and is net of credit/debit notes and receipts.",
             "Payables are the cost of goods received on or before the date minus payments made by then.",
-            "Cash and bank is the net movement recorded in the window; opening balances are not captured (GAP-A10).",
-            "Output GST only: purchase-side tax is not captured (GAP-A05).",
-            "Accounting months can be locked: a locked month refuses cost "
-            "corrections and expense creation or reversal; invoice changes, credit "
-            "notes, receipts, payments and year-end close are not covered (GAP-A03).",
+            "Cash and bank is the net movement recorded in the window; the "
+            "closing position, with opening balances, is on the balance sheet.",
+            "Net GST is output tax minus eligible input tax captured on supplier "
+            "bills. Blocked input is shown separately and never netted; creditable "
+            "GST on expenses is a memo because an expense records one GST amount "
+            "with no head split.",
+            "A closed financial year refuses dated documents: dispatches, "
+            "receipts and payments, credit and debit notes, invoice cancellation, "
+            "expenses and cost corrections. Only the Administrator can reopen it, "
+            "with a reason. A locked accounting month stays the narrower gate for "
+            "day-to-day corrections.",
+            "Sales invoices freeze the distributor's payment terms and due date at "
+            "issue, so ageing reads the due date from the invoice. Supplier due "
+            "dates remain an estimate from the current terms.",
         ] + ([f"Region filter: {state_name(state) or state}. It narrows revenue, returns, "
               "output GST and distributor receipts; balances and cash stay company-wide."]
              if state else []),
@@ -253,6 +267,14 @@ def payables_as_of(db: Session, as_of: date) -> dict:
                    Payment.purchase_order_id.is_not(None))
             .group_by(Payment.purchase_order_id)).all():
         paid[po_id] = Decimal(amount)
+    # Settlements added later, including an advance drawn down against a bill.
+    for po_id, amount in db.execute(
+            select(PaymentAllocation.purchase_order_id,
+                   func.coalesce(func.sum(PaymentAllocation.amount), 0))
+            .where(PaymentAllocation.applied_on <= as_of,
+                   PaymentAllocation.purchase_order_id.is_not(None))
+            .group_by(PaymentAllocation.purchase_order_id)).all():
+        paid[po_id] = paid.get(po_id, ZERO) + Decimal(amount)
 
     pos = {po.id: po for po in db.scalars(select(PurchaseOrder)).all()}
     terms = dict(db.execute(select(Supplier.id, Supplier.payment_terms_days)).all())
@@ -459,8 +481,123 @@ def receivables_by_distributor(db: Session, limit: int = 10) -> dict:
             "count": len(rows),
             "rows": [{**r, "outstanding": _s(r["outstanding"])} for r in rows[:limit]],
             "note": ("Each distributor opens the party ledger, where every invoice, "
-                     "credit note and receipt is listed. There is no voucher posting "
-                     "state (GAP-A08).")}
+                     "credit note and receipt is listed. Receipts and invoices are "
+                     "not posted as vouchers automatically; a manual journal or "
+                     "opening balance reaches the same heads through the ledger.")}
+
+
+def receivables_by_distributor_window(db: Session, start: date, end: date) -> dict:
+    """What each distributor owed across one window, not just at a point in time.
+
+    Opening is the balance the day before `start`; closing is the balance at
+    `end`. Invoiced, credit notes, debit notes and receipts are the movements
+    dated inside the window, so opening plus the movements equals closing for
+    every party. Documents dated after `end` are excluded, which is what makes
+    the report an as-at statement rather than a moving target.
+
+    The amounts are built from the same documents as `receivable_rows()`:
+    issued invoices, issued credit and debit notes, and receipts allocated to
+    an invoice. An unallocated receipt is not netted against a party here,
+    exactly as it is not netted in the outstanding list. Overdue counts only a
+    closing balance whose invoice carries a due date before `end`; an invoice
+    issued before due dates were captured is left out of overdue rather than
+    being given an assumed term.
+    """
+    parties = {p.id: p for p in db.scalars(select(Distributor)).all()}
+    # A receipt recorded directly against an invoice and one applied later both
+    # count on the day the money settled that invoice, so an advance that is
+    # drawn down in this window shows as received here.
+    receipts = ledger.receipt_movements(db, end)
+    credits: dict[int, list[tuple[date, Decimal]]] = {}
+    for cn in db.scalars(select(CreditNote).where(
+            CreditNote.status == "issued", CreditNote.invoice_id.is_not(None),
+            CreditNote.note_date <= end)).all():
+        credits.setdefault(cn.invoice_id, []).append((cn.note_date, _grand(cn)))
+    debits: dict[int, list[tuple[date, Decimal]]] = {}
+    for dn in db.scalars(select(DebitNote).where(
+            DebitNote.status == "issued", DebitNote.invoice_id.is_not(None),
+            DebitNote.note_date <= end)).all():
+        debits.setdefault(dn.invoice_id, []).append((dn.note_date, _grand(dn)))
+
+    def blank(party_id: int | None) -> dict:
+        party = parties.get(party_id)
+        return {
+            "distributor_id": party_id,
+            "code": party.code if party else None,
+            "name": party.name if party else f"Distributor #{party_id}",
+            "state": party.state_code if party else None,
+            "opening": ZERO, "invoiced": ZERO, "credited": ZERO, "debited": ZERO,
+            "received": ZERO, "closing": ZERO, "overdue": ZERO,
+            "invoices": 0, "open_invoices": 0, "overdue_invoices": 0,
+        }
+
+    groups: dict[int | None, dict] = {}
+    for inv in db.scalars(select(Invoice).where(
+            Invoice.status == "issued", Invoice.invoice_date <= end)
+            .order_by(Invoice.invoice_date, Invoice.id)).all():
+        group = groups.setdefault(inv.distributor_id, blank(inv.distributor_id))
+        total = _grand(inv)
+        got = receipts.get(inv.id, [])
+        got_open = sum((a for d, a in got if d < start), ZERO)
+        got_all = sum((a for _, a in got), ZERO)
+        cr = credits.get(inv.id, [])
+        cr_open = sum((a for d, a in cr if d < start), ZERO)
+        cr_all = sum((a for _, a in cr), ZERO)
+        dr = debits.get(inv.id, [])
+        dr_open = sum((a for d, a in dr if d < start), ZERO)
+        dr_all = sum((a for _, a in dr), ZERO)
+
+        if inv.invoice_date < start:
+            group["opening"] += total + dr_open - cr_open - got_open
+        else:
+            group["invoiced"] += total
+            group["invoices"] += 1
+        group["credited"] += cr_all - cr_open
+        group["debited"] += dr_all - dr_open
+        group["received"] += got_all - got_open
+
+        closing = total + dr_all - cr_all - got_all
+        group["closing"] += closing
+        if closing > 0:
+            group["open_invoices"] += 1
+            if inv.due_date is not None and inv.due_date < end:
+                group["overdue"] += closing
+                group["overdue_invoices"] += 1
+
+    rows = []
+    for group in groups.values():
+        if not any(group[key] != 0 for key in
+                   ("opening", "invoiced", "credited", "debited", "received", "closing")):
+            continue
+        rows.append(group)
+    rows.sort(key=lambda r: (-r["closing"], r["name"] or ""))
+
+    totals = {key: ZERO for key in
+              ("opening", "invoiced", "credited", "debited", "received", "closing", "overdue")}
+    for row in rows:
+        for key in totals:
+            totals[key] += row[key]
+    for row in rows:
+        for key in totals:
+            row[key] = _s(row[key])
+    return {
+        "from": start,
+        "to": end,
+        "rows": rows,
+        "totals": {
+            **{key: _s(value) for key, value in totals.items()},
+            "invoices": sum(r["invoices"] for r in rows),
+            "open_invoices": sum(r["open_invoices"] for r in rows),
+            "overdue_invoices": sum(r["overdue_invoices"] for r in rows),
+        },
+        "count": len(rows),
+        "note": ("Opening is the balance the day before the window; closing is the "
+                 "balance at its last day. Credit notes reduce and debit notes raise "
+                 "what a party owes; only receipts allocated to an invoice are netted. "
+                 "Overdue is the part of the closing balance whose due date fell before "
+                 "the closing date; invoices with no recorded due date are not counted "
+                 "as overdue."),
+    }
 
 
 def report(db: Session, start: date, end: date, state: str | None = None) -> dict:
@@ -500,10 +637,24 @@ def report(db: Session, start: date, end: date, state: str | None = None) -> dic
                      "value": _s(head["amount"]), "available": True,
                      "note": (f"{head['count']} entry(s); non-creditable GST "
                               f"{_s(head['gst_noncreditable'])} included.")})
+    # A figure the records can prove is shown even when the window is incomplete,
+    # labelled partial; "No data yet" is reserved for a window with nothing to show.
+    expenses_known = pl["expenses"]["complete"] or pl["expenses"]["total"] > 0
+    payroll_known = pl["payroll"]["complete"] or bool(pl["payroll"]["periods"])
+    payroll_absent = ", ".join(
+        f"{i['year']}-{i['month']:02d}" for i in
+        pl["payroll"]["missing_months"] + pl["payroll"]["partial_months"])
     if pl["expenses"]["complete"]:
         rows.append({"key": "expenses", "label": "Total expenses",
                      "value": _s(pl["expenses"]["total"]), "available": True,
                      "note": "Approved, non-reversed entries; non-creditable GST included."})
+    elif expenses_known:
+        rows.append({"key": "expenses", "label": "Total expenses",
+                     "value": _s(pl["expenses"]["total"]), "available": True,
+                     "partial": True, "gap": "GAP-P02", "fix": "#/expenses",
+                     "note": (f"Partial: expenses are recorded from "
+                              f"{pl['expenses']['tracked_from'] or 'no configured date'}, "
+                              "so earlier months in this window have no expense records.")})
     else:
         rows.append({"key": "expenses", "label": "Total expenses", "value": None,
                      "available": False, "gap": "GAP-P02",
@@ -513,11 +664,18 @@ def report(db: Session, start: date, end: date, state: str | None = None) -> dic
         rows.append({"key": "payroll", "label": "Payroll (gross)",
                      "value": _s(pl["payroll"]["total"]), "available": True,
                      "note": "Gross salary; employer contributions are not included."})
+    elif payroll_known:
+        rows.append({"key": "payroll", "label": "Payroll (gross)",
+                     "value": _s(pl["payroll"]["total"]), "available": True,
+                     "partial": True, "gap": "GAP-P03", "fix": "#/hr/payroll",
+                     "note": (f"Partial: approved months only. No approved payroll for "
+                              f"{payroll_absent}.")})
     else:
         rows.append({"key": "payroll", "label": "Payroll (gross)", "value": None,
                      "available": False, "gap": "GAP-P03",
-                     "note": "A payroll month is missing or only partly in the window.",
-                     "fix": "#/hr"})
+                     "note": ("No month in this window has an approved payroll "
+                              "period."),
+                     "fix": "#/hr/payroll"})
     if net_available:
         rows.append({"key": "net_profit", "label": "Net profit",
                      "value": _s(pl["net_profit"]["value"]), "available": True})
@@ -550,34 +708,51 @@ def report(db: Session, start: date, end: date, state: str | None = None) -> dic
                            for k, v in pl["net_profit"].items()},
         },
     }
+    # Each card opens the report that proves it, carrying the same window so the
+    # detail and the card cannot disagree. A card whose detail has no window
+    # (receivables and payables are as-at-today lists) opens its own section
+    # unchanged rather than pretending to travel in time.
+    window_q = f"?from={start.isoformat()}&to={end.isoformat()}"
+    as_of_q = f"?as_of={end.isoformat()}"
     out["cards"] = [
         {"key": "revenue", "label": "Revenue", "value": out["revenue"]["taxable"],
-         "href": "#/reports", "note": "Issued invoices, taxable value before GST."},
+         "href": f"#/accounts/gst-out{window_q}",
+         "note": "Issued invoices, taxable value before GST."},
         {"key": "collections", "label": "Collections", "value": out["collections"]["total"],
-         "href": "#/accounts", "note": "Receipts dated in the window."},
+         "href": f"#/accounts/cash{window_q}",
+         "note": "Receipts dated in the window."},
         {"key": "outstanding", "label": "Receivables", "value": out["outstanding"]["total"],
-         "href": "#/accounts", "note": "As at the window end, net of notes and receipts."},
+         "href": "#/accounts/receivables",
+         "note": "As at the window end, net of notes and receipts."},
         {"key": "overdue_60", "label": "Over 60 days", "value": out["outstanding"]["overdue_60"],
-         "href": "#/accounts", "note": "The part of receivables ageing past 60 days."},
+         "href": f"#/accounts/ageing{as_of_q}",
+         "note": "The part of receivables ageing past 60 days."},
         {"key": "payables", "label": "Payables", "value": out["payables"]["total"],
-         "href": "#/accounts", "note": "Goods received, less payments; due dates estimated."},
+         "href": "#/accounts/payables",
+         "note": "Goods received, less payments; due dates estimated."},
         {"key": "payable_week", "label": "Payable within 7 days",
-         "value": out["payables"]["due_this_week"], "href": "#/accounts",
+         "value": out["payables"]["due_this_week"],
+         "href": "#/accounts/payables?due=week",
          "note": "Estimated from each supplier's current payment terms."},
         {"key": "gst", "label": "Output GST", "value": out["output_gst"]["total"],
-         "href": "#/accounts", "note": "Output only; input tax is not captured (GAP-A05)."},
+         "href": f"#/accounts/gst-out{window_q}",
+         "note": ("Output tax on issued documents. Input tax and net payable are "
+                  "built from supplier bills in the input register.")},
         {"key": "cash_bank", "label": "Cash and bank (net)", "value": out["cash_bank_net"],
-         "href": "#/accounts", "note": "Receipts minus payments in the window."},
+         "href": f"#/accounts/cash{window_q}",
+         "note": "Receipts minus payments in the window."},
         {"key": "expenses", "label": "Expenses",
-         "value": (_s(pl["expenses"]["total"]) if pl["expenses"]["complete"] else None),
-         "href": "#/expenses", "available": pl["expenses"]["complete"],
+         "value": _s(pl["expenses"]["total"]) if expenses_known else None,
+         "href": f"#/expenses{window_q}", "available": expenses_known,
+         "partial": expenses_known and not pl["expenses"]["complete"],
          "gap": None if pl["expenses"]["complete"] else "GAP-P02",
          "note": ("Approved entries in the window; non-creditable GST is cost."
                   if pl["expenses"]["complete"] else
-                  "Expenses are not tracked for the whole window.")},
+                  "Partial: expenses are recorded from "
+                  f"{pl['expenses']['tracked_from'] or 'no configured date'}.")},
         {"key": "net_profit", "label": "Net profit",
          "value": (_s(pl["net_profit"]["value"]) if net_available else None),
-         "href": "#/accounts", "available": net_available,
+         "href": "#/accounts/reports?focus=pnl", "available": net_available,
          "gap": None if net_available else (first_gap["code"] if first_gap else "GAP-P02"),
          "note": ("Gross profit less expenses and payroll."
                   if net_available else
@@ -644,7 +819,7 @@ def compare(db: Session, mode: str, first: date, today: date) -> dict:
                "Issued credit notes."),
         metric("output_gst", "Output GST", "amount",
                lambda s, st: s["output_gst"]["total"],
-               "Output only; input tax is not captured."),
+               "Output tax on issued documents; input tax comes from posted supplier bills."),
         metric("outstanding", "Receivables outstanding", "amount",
                lambda s, st: s["outstanding"]["total"], "As at the window end."),
         metric("overdue_60", "Receivables over 60 days", "amount",
@@ -659,12 +834,16 @@ def compare(db: Session, mode: str, first: date, today: date) -> dict:
                "Revenue less returns and cost of goods; partial when invoices are uncosted."),
         metric("expenses", "Expenses", "amount",
                pl_value(lambda st: st["expenses"]["total"]
-                        if st["expenses"]["complete"] else None),
-               "Approved entries in the window; non-creditable GST included."),
+                        if st["expenses"]["complete"]
+                        or st["expenses"]["total"] > 0 else None),
+               "Approved entries in the window; non-creditable GST included. "
+               "Partial when the window starts before expense tracking."),
         metric("payroll", "Payroll (gross)", "amount",
                pl_value(lambda st: st["payroll"]["total"]
-                        if st["payroll"]["complete"] else None),
-               "Gross salary of approved, processed or paid periods."),
+                        if st["payroll"]["complete"]
+                        or st["payroll"]["periods"] else None),
+               "Gross salary of approved, processed or paid periods. Partial when a "
+               "month in the window has no approved payroll."),
         metric("net_profit", "Net profit", "amount",
                pl_value(lambda st: st["net_profit"]["value"]),
                "Gross profit less expenses and payroll."),

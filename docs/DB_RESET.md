@@ -87,7 +87,7 @@ after ten minutes, so verifying a backup and pressing reset tomorrow does not wo
 
 ### 4.1 Every table is classified
 
-The database has 67 tables in schema `public`. Each one is in exactly one list:
+The database has 84 tables in schema `public` at migration `0028_advances`. Each one is in exactly one list:
 **CLEAR** (emptied by a business reset), **KEEP** (must survive it) or **SCHEMA**
 (Alembic bookkeeping, never touched). The lists live in
 `app/services/db_reset.py` (`BUSINESS_TABLES`, `KEPT_TABLES`, `SCHEMA_TABLES`).
@@ -95,17 +95,22 @@ The database has 67 tables in schema `public`. Each one is in exactly one list:
 table that appears in none of them, so a new table cannot silently escape the
 decision.
 
-**Business reset — CLEAR (33 tables, `TRUNCATE … RESTART IDENTITY CASCADE`)**
+**Business reset — CLEAR (46 tables, `TRUNCATE … RESTART IDENTITY CASCADE`)**
 
 | Table | What it holds |
 |---|---|
 | `approval_requests` | approval workflow state |
+| `bank_statements`, `bank_statement_lines` | captured bank statements and the lines matched to book entries |
 | `batches` | stock batches |
+| `cost_corrections` | audited cost corrections and backfills |
 | `credit_notes`, `credit_note_lines` | customer credit notes |
 | `debit_notes`, `debit_note_lines` | supplier debit notes |
 | `email_deliveries` | queued/sent report emails |
 | `email_test_messages` | test-email composer history |
+| `expenses` | expense entries (heads and settings are masters and are kept) |
+| `foc_notes`, `foc_note_lines` | free-sample (FOC) notes and lines |
 | `goods_receipts`, `goods_receipt_lines` | inward receipts |
+| `gst_returns` | figures reported as filed for GSTR-1/GSTR-3B |
 | `hr_announcements` | published notices |
 | `hr_attendance`, `hr_attendance_corrections` | attendance events and corrections |
 | `hr_import_batches` | bulk-import runs |
@@ -115,13 +120,18 @@ decision.
 | `hr_payroll_periods`, `hr_payroll_entries`, `hr_payroll_entry_lines`, `hr_payroll_corrections` | payroll runs and corrections |
 | `invoices`, `invoice_lines` | sales invoices |
 | `leads`, `lead_activities` | CRM pipeline |
+| `opening_balances` | the position carried into a financial year, per ledger head |
+| `payment_allocations` | the settled part of each receipt or payment; the unallocated remainder is the party's advance |
 | `payments` | receipts and payments |
 | `print_logs` | print/PDF history |
+| `purchase_invoices` | supplier tax invoices captured for input GST and vendor TDS |
 | `purchase_orders`, `purchase_order_lines` | purchase orders |
 | `sales_orders`, `sales_order_lines` | sales orders |
+| `statutory_challans` | deposits of deducted TDS and payroll statutory dues |
 | `stock_movements` | stock ledger |
+| `vouchers`, `voucher_lines` | manual journal vouchers and their lines |
 
-**Business reset — KEEP (33 tables)**
+**Business reset — KEEP (37 tables)**
 
 | Table | What survives |
 |---|---|
@@ -135,6 +145,9 @@ decision.
 | `document_sequences` | invoice/order numbering counters |
 | `feature_flags` | module switches |
 | `email_settings`, `email_recipients`, `email_schedules`, `email_schedule_recipients` | SMTP settings, recipient list, schedules |
+| `expense_heads`, `expense_settings` | expense head master and the tracked-from / approval-threshold settings |
+| `financial_year_closes` | closed financial years, with who closed or reopened them and why; kept so a reset cannot silently reopen a closed year |
+| `ledger_accounts` | the chart of accounts (seeded with the document roles and extended by hand); kept so booked vouchers never point at a head a reset deleted |
 | `hr_branches`, `hr_departments`, `hr_work_locations`, `hr_shifts`, `hr_holidays`, `hr_leave_types` | HR location and calendar masters |
 | `hr_salary_components`, `hr_salary_structures`, `hr_salary_structure_lines` | salary configuration |
 | `hr_attendance_rules`, `hr_approval_workflows`, `hr_letter_templates`, `hr_saved_filters`, `hr_period_locks` | HR policy and configuration |
@@ -156,7 +169,7 @@ CLEAR tables) and `test_the_reset_refuses_when_cascade_reaches_a_kept_table`
 before data is lost).
 
 `test_business_mode_leaves_every_kept_table_untouched` seeds at least one row in
-all 33 KEEP tables, snapshots every count plus the role permission lists, feature
+all 37 KEEP tables, snapshots every count plus the role permission lists, feature
 flags and company profile, runs a real business reset, and asserts every KEEP
 count and setting is unchanged while every CLEAR table is at zero.
 
@@ -342,10 +355,10 @@ deleting `maintenance.json`, §5) once the restore is confirmed.
   mode (including worker pause), lockout, audit trail, reset-key endpoint and the
   Settings screen are implemented.
 - `tests/test_db_reset.py` covers 24 cases against isolated `_test` databases,
-  including a business reset that leaves all 33 KEEP tables untouched, a full
+  including a business reset that leaves all 37 KEEP tables untouched, a full
   reset, a failed migration after the drop, a real restore into a clean database
   followed by `alembic check`, and the audit trail surviving a full reset.
-  The whole project suite was 293 passed / 0 failed when last run (2 Nov 2026).
+  The whole project suite was 446 passed / 0 failed when last run (3 Nov 2026).
 - The feature is **not enabled** in this checkout; `DB_RESET_ENABLED` is unset in
   `.env` and false in `.env.example`.
 - Not exercised end to end: a real click-through in a browser with the feature

@@ -651,3 +651,760 @@ for the next step rather than silently fixed:
 functional requirements. The open items are documentation/status staleness, the
 `APP_ENV` label, missing dedicated Billing/Leads tests and the deliberately
 unbuilt modules — all recorded above rather than hidden.
+
+---
+
+## 16. Addendum — 2–3 November 2026 (catalog, FOC, expenses, payroll gaps)
+
+This addendum records what was executed after §1–15 on branch
+`feature/accounting-expenses`. It does not change the earlier results.
+
+| Check | Command / method | Result |
+|---|---|---|
+| Full test suite | `python -m pytest -q` | **386 passed**, 563 warnings, 190.49 s (3 Nov 2026) |
+| JavaScript syntax | `node --check static/js/app.js` | exit 0 |
+| Python imports | `python -c "import app.main"` (via the suite's collection) | the suite collected and ran |
+| Alembic head | `python -m alembic heads` | `0024_catalog_order_dates (head)` |
+| Dev DB revision | `python -m alembic current` | `0023_foc_samples` — **`0024` is not applied to the development database**; pytest applies it to the test database only |
+| Batch 1 tests | `tests/test_catalog_orders.py` inside the full run | passed: category/brand/reorder capture, uncategorised grouping, not-set level excluded from low stock, promise date and approval stamp, sales by category, low-stock attention |
+| Batch 2 tests | `tests/test_profit_loss.py` (12), `tests/test_hr.py` (8), `tests/test_accounts_reports.py` (9), `tests/test_email_reports.py` inside the full run | passed: cut-month allocation `test_cut_month_is_allocated_by_working_days_not_guessed`; GAP-P03 for a missing/unapproved month; skipped employees named by prepare and by the register, with the reason |
+| Batch 2 screen | Not run in a browser | The payroll skipped list, the Partial chip on the P&L rows and the Overview Expenses note were checked by reading the rendered code and by the API tests only; see §17 |
+
+### 16.1 What the Batch 2 tests prove
+
+- A window that ends inside an approved payroll month returns the approved
+  month's gross allocated by each employee's working-day share, marked
+  `prorated` with `allocated` set; a whole month returns the full gross and is
+  not marked. The expected amount is computed independently in the test.
+- A month with no approved payroll raises GAP-P03 and contributes nothing; the
+  total is never an estimate.
+- `Total expenses` and `Payroll (gross)` are present with `partial: true` and a
+  fix link when the input covers only part of the window, while `Net profit`
+  stays `available: false` with the first gap.
+- `POST …/prepare` and `GET …/periods/{id}` return the same skipped set; the
+  employee used by the run is not in it, every other active employee carries
+  "No active salary structure covers this month", and the audit entry stores
+  their codes.
+
+### 16.2 What was not executed
+
+| Item | Status | Reason |
+|---|---|---|
+| Browser walk-through of the payroll skipped block, P&L Partial chip and Overview Expenses note | **Not verified** | The headless-browser write classifier refuses form/button submissions that change application data without an explicit instruction for that exact write; the payroll prepare that produces the skipped list is such a write. The rendered code and the API responses are verified. |
+| Development-database migration to `0024_catalog_order_dates` | **Not executed** | A schema change on the development database needs the owner's explicit approval after a fresh backup; the command list is in §16.3 and nothing was applied silently. |
+| Screens added by Batch 1 (product category/brand/reorder fields, promise date, sales-by-category panel) | **Not verified in a browser** | Same classifier restriction and no explicit instruction to submit those forms; the API and tests cover the capture and the figures. |
+
+### 16.3 Migration command awaiting approval (not run)
+
+```
+python -m alembic upgrade 0024_catalog_order_dates
+python -m alembic downgrade 0023_foc_samples     # rollback, if needed
+```
+
+Take a fresh backup first; the migration only adds nullable columns
+(`products.category`, `products.brand`, `products.reorder_level`,
+`sales_orders.expected_delivery_date`, `sales_orders.approved_at`) and has a
+tested downgrade.
+
+---
+
+## 17. Addendum — 3 November 2026 (Batch 3: financial-year close and invoice due dates)
+
+This addendum records the Batch 3 evidence: GAP-A03 (nothing stopped a document
+being written into a finished year) and GAP-A04 (invoices carried no payment
+terms or due date). It does not change the earlier results.
+
+| Check | Command / method | Result |
+|---|---|---|
+| Full test suite | `python -m pytest -q` | **395 passed**, 569 warnings, 205.15 s (3 Nov 2026). The period test file was extended while this run was collecting, so its last test is covered by the separate run below |
+| Period and due-date tests | `python -m pytest tests/test_periods.py -q` | **10 passed**, 5.88 s, including `test_a_closed_year_refuses_free_sample_notes` |
+| JavaScript syntax | `node --check static/js/app.js` | exit 0 |
+| Alembic head | `python -m alembic heads` | `0025_due_dates_and_year_close (head)` |
+| Dev DB revision | `python -m alembic current` | `0023_foc_samples` — **`0024` and `0025` are not applied to the development database**; pytest applies them to the test database only |
+| Batch 3 screens | Not run in a browser | The Financial years panel, the month-lock panel, the invoice terms row and the ageing due columns were checked by reading the rendered code and by the API tests only; see §17.2 |
+
+### 17.1 What the Batch 3 tests prove
+
+- **Only a completed year can be closed.** Closing the year that is still
+  trading returns 409 and names the year that has ended; a reason shorter than
+  five characters returns 422.
+- **A closed year refuses dated documents with HTTP 423.** A receipt dated inside
+  the closed year is refused and the message names the year; the same receipt is
+  accepted after the Administrator reopens the year with a reason. Both the
+  close and the reopen write audited entries (`accounts.financial_year.close`,
+  `accounts.financial_year.reopen`).
+- **Free-sample notes are inside the gate.** A note drafted for a closed year can
+  be created but its approval is refused with 423, so the "every dated document"
+  claim holds for the FOC flow as well.
+- **Permissions are server-side.** `sales` may read the year list but gets 403 on
+  close; `viewer` gets 403 on the list itself. Only the Administrator can reopen.
+- **A locked accounting month stays the narrower gate.** With January 2026
+  locked, a receipt and a credit note dated in January are refused with 423 and
+  accepted after unlock; a dispatch into a locked month is refused with 423.
+- **The invoice freezes its terms and due date at issue.** A 30-day buyer's
+  invoice carries `payment_terms_days = 30` and `due_date = issue + 30`; changing
+  the distributor master to 90 days afterwards leaves both unchanged.
+- **No terms means no due date.** The field is `None`, not an invented date.
+- **Ageing splits by due date.** Overdue, due within seven days, later and no
+  due date are separate buckets; `days_overdue` is computed from the due date,
+  every outstanding invoice lands in exactly one bucket, and the bucket totals
+  add up to the ageing total.
+
+### 17.2 What was not executed
+
+| Item | Status | Reason |
+|---|---|---|
+| Browser walk-through of the Financial years panel, the month-lock panel, the invoice terms row and the ageing due columns | **Not verified** | The headless-browser write classifier refuses button submissions that change application data without an explicit instruction for that exact write; closing a year and locking a month are such writes. The rendered code and the API responses are verified. |
+| Development-database migration to `0024_catalog_order_dates` and `0025_due_dates_and_year_close` | **Not executed** | A schema change on the development database needs the owner's explicit approval after a fresh backup; the command list is in §17.3. |
+
+### 17.3 Migration commands awaiting approval (not run)
+
+```
+python -m alembic upgrade 0024_catalog_order_dates
+python -m alembic upgrade 0025_due_dates_and_year_close
+python -m alembic downgrade 0024_catalog_order_dates     # rollback of 0025
+python -m alembic downgrade 0023_foc_samples             # rollback of 0024
+```
+
+Take a fresh backup first. `0024` adds nullable columns; `0025` adds the
+`financial_year_closes` table plus `invoices.payment_terms_days` and
+`invoices.due_date` with `ix_invoices_due_date` and `ck_invoice_payment_terms`,
+and both have a tested downgrade.
+
+## 18. Addendum — 3 November 2026 (Batch 4: input GST, reconciliation and statutory dues)
+
+This addendum records the Batch 4 evidence: GAP-A05 (purchase-side tax was not
+captured), GAP-A06 (no filed return was stored) and GAP-A07 (vendor TDS and
+challans were not recorded). It does not change the earlier results.
+
+| Check | Command / method | Result |
+|---|---|---|
+| Full test suite | `python -m pytest -q` | **405 passed**, 591 warnings, 169.33 s (3 Nov 2026). This is the authoritative run; see §18.4 for the two contaminated runs that preceded it |
+| Batch 4 tests | `python -m pytest tests/test_gst_statutory.py -q` | **9 passed** |
+| Existing suites touched | `tests/test_ui_assets.py`, `tests/test_email_reports.py`, `tests/test_accounts_reports.py`, `tests/test_smoke.py` | **29 passed** |
+| JavaScript syntax | `node --check static/js/app.js` | exit 0 |
+| Alembic head | `python -m alembic heads` | `0027_ledger_and_bank_rec (head)` |
+| Dev DB revision | `python -m alembic current` | `0027_ledger_and_bank_rec` (83 tables) since 3 November 2026; see §20 |
+| Money serialisation | read of `app/api/gst.py:_json` | every new route returns `Decimal` as a two-decimal string, never a JSON float |
+| Browser probe | temp SPA server on `127.0.0.1:8011` against `herbanova_bcs_test`, real `/api/auth/login` | see §18.2 |
+
+### 18.1 What the Batch 4 tests prove
+
+- **No bill, no input data.** With no posted supplier bill the register, net
+  payable and the reason are returned with `available: false`; the figure is
+  never zero.
+- **A bill records the tax it was given.** Taxable 1,000.00 with CGST 90.00 and
+  SGST 90.00 totals 180.00 and the bill 1,180.00. A duplicate live bill number
+  for the same supplier is refused (409), a reversal reason shorter than five
+  characters is refused (422), and reversing twice is refused (409). The
+  reversed row stays visible and leaves every total.
+- **Uniqueness is per supplier.** The same bill number is accepted for a second
+  supplier.
+- **Net payable is output less eligible input.** Output CGST 90.00 less eligible
+  input CGST 40.00 gives net CGST 50.00 and net total 100.00; blocked input of
+  20.00 is totalled separately and never netted; expense ITC is a memo with
+  `included_in_net: false`.
+- **Reconciliation compares, it does not resolve.** A saved GSTR-3B matches the
+  computed register on every line; changing filed CGST by 5.00 shows a
+  difference of exactly 5.00; saving the same month and form replaces the row
+  rather than adding one. ITC on GSTR-1, an unknown form and a future month are
+  refused (422).
+- **Statutory dues read two honest sources.** Approved payroll PF 500.00 plus
+  vendor TDS 20.00 with a 300.00 challan leaves PF outstanding 200.00 and TDS
+  outstanding 20.00; a draft payroll contributes nothing and a window without
+  approved payroll reports `available: false`.
+- **Permissions and gates are server-side.** `sales` reads every new endpoint
+  (200) and gets 403 on capture, reversal and challan creation. A bill dated in
+  a locked month or a closed year is refused with 423.
+
+### 18.2 Browser probe (test database, temp server)
+
+The probe ran the real SPA against `herbanova_bcs_test` and signed in through
+the real login endpoint; no token was minted and no credential was printed.
+
+1. Accounting & Finance rendered the three new panels with their empty states,
+   and the Output GST tile note pointed to the input register.
+2. Captured **PUR-000001** (₹1,180.00; CGST 90.00, SGST 90.00). The net line
+   read −180.00 (a credit) and the bill was listed with its ITC flag.
+3. Reversed it with a reason. The register emptied and the net line returned to
+   **No data yet**.
+4. Captured **PUR-000002** with vendor TDS section 194C, rate 2%, amount ₹20.00.
+   TDS and statutory dues showed ₹20.00 withheld and outstanding, with the
+   detail line “Vendor TDS 20.00 across 1 bill”.
+5. Recorded challan **UI-CH-001** for ₹20.00. Outstanding became ₹0.00 and the
+   challan appeared in the table.
+6. Filed a GSTR-3B for November 2026 with zeros and ITC 90.00/90.00. The head,
+   ITC and tax-payable checks read **Matches**; outward taxable value showed a
+   difference against the computed 14,821.00 produced by other test invoices,
+   which is the comparison working as intended.
+7. No console errors or warnings were logged. The temp server was stopped and
+   its helper directory deleted afterwards.
+
+### 18.3 Migration commands awaiting approval (not run at the time; applied later — see §19)
+
+```
+python -m alembic upgrade 0024_catalog_order_dates
+python -m alembic upgrade 0025_due_dates_and_year_close
+python -m alembic upgrade 0026_gst_and_statutory
+python -m alembic downgrade 0025_due_dates_and_year_close   # rollback of 0026
+python -m alembic downgrade 0024_catalog_order_dates        # rollback of 0025
+python -m alembic downgrade 0023_foc_samples                # rollback of 0024
+```
+
+Take a fresh backup first. `0026` adds `purchase_invoices`, `gst_returns` and
+`statutory_challans` with their constraints and indexes, and its downgrade drops
+them. At the time of writing the development database was still at
+`0023_foc_samples`; it was upgraded to `0026` on 3 November 2026 (§19).
+
+### 18.4 Runs that were discarded, and the defect they exposed
+
+- Two full-suite processes were once left running against the same
+  `herbanova_bcs_test` database. Because the session fixture drops and recreates
+  that database, each run corrupted the other (17 failed / 387 passed, then 41
+  failed / 358 passed). Both results are discarded; the clean run in the table
+  above is the one reported. **Never run two pytest processes concurrently.**
+- The first clean run after that exposed a real test-isolation defect: the new
+  statutory test created active salary components named `PF-…`, which leaked
+  into `tests/test_hr_payroll_outputs.py` and made its configured-component list
+  read `['PF', 'PF-…', 'PF-…']`. The new test now creates inactive components
+  and deletes the payroll rows it wrote in a `finally` block. The interaction
+  was reproduced (`test_gst_statutory.py` then `test_hr_payroll_outputs.py`:
+  1 failed) and is now fixed (same pair: 14 passed).
+
+### 18.5 Documentation-drift fixes after the suite
+
+- The accounts report still described output GST as “Output only; input tax is
+  not captured”. That line is now “Output tax on issued documents; input tax
+  comes from posted supplier bills” so a rendered pack cannot contradict the
+  closed gap. No test asserted the old text; `tests/test_accounts_reports.py`
+  and `tests/test_gst_statutory.py` were rerun after the edit: **18 passed**
+  (3 Nov 2026).
+- The two historical sample packs in `docs/samples/` (Accounts and Monthly MD,
+  HTML and text) carried the same old note. Their historical annotations now say
+  input GST, filed-return reconciliation and statutory dues were not captured at
+  render time, and their Output GST line points to supplier bills. The sample
+  figures are unchanged and remain marked historical.
+
+## 19. 404s on the accounts endpoints — 3 November 2026
+
+**Symptom.** F12 → F5 on the Accounts screen showed `Not Found` for
+`input-gst`, `gst-net`, `gst-returns`, `gst-reconciliation`,
+`statutory-dues`, `statutory-challans` and `financial-years`, plus
+“Reconciliation could not be built” and “Financial years could not be loaded”.
+
+**Cause.** Not missing code. Two uvicorn servers were bound to
+`127.0.0.1:8000`: one started on 2 November by an earlier session, and one
+started on 3 November from `Downloads\herbanova-backend\herbanova-final` — a
+different checkout that has no `app/api/gst.py` and no `app/api/periods.py`.
+Its `app.openapi()` exposed 12 accounts paths; the current checkout exposes 23.
+Both checkouts point at the same database, `herbanova_bcs_dev`.
+
+**Fix, with approval ("Restart + migrate").**
+
+1. Fresh backup: `var/backups/pre-migrations-0024-0026-20261103T082237.dump`
+   (334,728 bytes; 73 tables with data verified with `pg_restore -l`).
+2. Stopped both listeners and their child workers (PIDs 11924 and 1124).
+3. Applied `0024_catalog_order_dates` → `0025_due_dates_and_year_close` →
+   `0026_gst_and_statutory`. `alembic current` now reads
+   `0026_gst_and_statutory`; dev has **77 tables**.
+4. Confirmed on the dev database: `purchase_invoices`, `gst_returns`,
+   `statutory_challans` and `financial_year_closes` exist (0 rows each);
+   `invoices.due_date`/`payment_terms_days`, `products.category`/`brand`/
+   `reorder_level` and `sales_orders.approved_at`/`expected_delivery_date`
+   exist.
+5. Started one server from this checkout on `127.0.0.1:8000`. Its
+   `app.openapi()` now lists all 23 accounts paths.
+
+**Result.** The seven endpoints answer `401` without a session instead of
+`404` — the routes resolve. Their authenticated payloads were proven on the
+test database by `tests/test_gst_statutory.py` and the §18.2 browser probe;
+the dev load itself needs the signed-in browser to refresh, since the probe
+browser holds its token in `localStorage` for the old `:8011` origin.
+
+**Rule.** Run uvicorn from
+`D:\This Dell PC Live Backup\User Account\Downloads\herbanova-final-corrected\herbanova-final-corrected`,
+never from `herbanova-backend\herbanova-final`, and never leave two servers
+bound to :8000.
+
+## 20. Migration 0027 applied to development, 3 November 2026
+
+**Approval.** `apply 8411462b33df` (sha256 of
+`alembic/versions/0027_ledger_and_bank_rec.py`, first 12 hex characters).
+The migration is additive: six new tables and nine seeded ledger heads, with a
+working downgrade.
+
+**Steps and evidence.**
+
+1. Fresh backup: `var/backups/pre-migration-0027-20261103T093759.dump`
+   (355,623 bytes; `pg_restore -l` lists 77 tables with data, matching dev at
+   `0026`). `pg_dump` was given the password through the process environment;
+   nothing was printed.
+2. `python -m alembic upgrade head` ran
+   `0026_gst_and_statutory -> 0027_ledger_and_bank_rec` in one transaction.
+   `alembic current` reads `0027_ledger_and_bank_rec`.
+3. Dev now has **83 tables**; `ledger_accounts` holds the nine seeded heads
+   (1000 Cash, 1010 Bank, 1100 Receivables, 2000 Payables, 2100 Output GST,
+   3000 Capital, 4000 Sales, 5000 Purchases, 5900 Round off) and the other five
+   tables are empty.
+4. `python -m alembic check` reports **No new upgrade operations detected**, so
+   the models and the applied schema agree.
+5. **Three** uvicorn instances were found bound to `127.0.0.1:8000` (the §19
+   defect again: two reloader parents had left orphaned multiprocessing workers
+   holding the socket). All were stopped and exactly one server was started from
+   this checkout. Its `app.openapi()` lists 319 operations across 247 paths,
+   with 41 paths under `/api/accounts`, of which 18 are the new voucher,
+   opening, balance-sheet, day-book and bank-reconciliation paths.
+6. The six new endpoints answer `401` without a session:
+   `ledger-accounts`, `opening-balances`, `balance-sheet`, `vouchers`,
+   `day-book`, `bank-statements`.
+7. The services were run read-only against the dev database: 9 active heads,
+   the 2026-27 opening trial balance has a row per head at 0.00 (difference
+   0.00, no opening captured), the day book is empty, and the balance sheet at
+   3 November 2026 balances (assets 4,580,094.76; liabilities 13,347,102.98;
+   retained earnings -8,767,008.22; difference 0.00) while its warnings name the
+   missing opening and the partial document layer.
+
+**Not verified.** The signed-in screens on the dev database were not walked
+through. The probe browser keeps its token in memory for the stopped `:8001`
+server; a reload showed the sign-in screen, and no credential was used or asked
+for. The UI evidence for these panels remains the test-database browser probe
+recorded in `ACCOUNTS_DATA_GAPS.md` (GAP-A08 to A10).
+
+**Result.** The dev database and the code now agree at `0027`, so the Accounts
+panels load against dev data. Nothing was committed or pushed.
+
+## 21. Accounts section bar — 3 November 2026
+
+**What changed.** `Accounting & Finance` now opens with a section bar: one entry
+per panel, one panel shown at a time, and an address per section
+(`#/accounts/reports`, `#/accounts/receivables` … `#/accounts/locks`). The bar
+lists only the sections the role may open. No server route, permission or
+report changed; the panels keep their existing server gates and data loads.
+
+**Method.** The current checkout was served by a temporary uvicorn on
+`127.0.0.1:8011` with `DATABASE_URL` rewritten to `herbanova_bcs_test` (head
+`0027_ledger_and_bank_rec`) and a one-route cookie helper on `:8012` that minted
+a short-lived token with `make_token`. No password was typed, and no token or
+credential was printed. The SPA was driven through the in-app browser's
+`evaluate_script` (hidden viewport, so no screenshots). The helper files were
+deleted afterwards.
+
+**What was seen.**
+
+| Check | Result |
+|---|---|
+| `node --check static/js/app.js` | Passed |
+| Administrator (all three accounts keys), `#/accounts` | 18 entries in nav order; Performance and P&L highlighted; the seven report panels visible and no statement panel |
+| Administrator, click Balance sheet | Address `#/accounts/balance-sheet`; only that panel visible; 17 rows; "Balanced"; four limit warnings |
+| Administrator, direct load `#/accounts/bank` | Bank reconciliation highlighted; only that panel visible; empty state "No bank statement is captured…" (the test database has none) |
+| Administrator, `#/accounts/does-not-exist` | Falls back to Performance and P&L; seven report panels |
+| Administrator, click Vouchers then Back then Forward | Performance restored, then Vouchers; `aria-current` followed each time |
+| `accounts:read` only (`t_sales`), `#/accounts/reports` | 17 entries, no Performance; falls back to Receivables |
+| `accounts:read` only, open GST outward | 71 rows; totals line "Taxable 49,644.50 · CGST 2,376.00 · SGST 2,376.00 · IGST 0.00 · Total 54,708.50" |
+| `accounts:read` only, open Trial balance | 11 rows; "Balanced" |
+| Viewer with no accounts key, `#/accounts` | Screen not reachable; the route falls back to Overview as before |
+| Route cycle dash / customers / sales / inventory / hr / expenses / accounts | Each screen rendered; no console messages |
+
+**Defect found before the walk.** The first version of `applyAccountsSection()`
+read an undefined `sec`. It was corrected to compute the section once and use
+that value; `node --check` passed afterwards.
+
+**Not verified.** Visual appearance at phone and tablet widths and in the dark
+theme. The in-app browser has no visible viewport, so the wrapping CSS and the
+dark-theme rules were not seen; only the computed `display:flex` and the DOM
+behaviour were checked.
+
+**Result.** The section bar, the permission split and the direct addresses work
+in the browser on the test database. `tests/test_accounts_reports.py` was rerun
+after the change (9 passed), including its three server-side 403 assertions for
+a role without the accounts keys. Nothing was committed or pushed.
+
+## 22. Responsive detail drawer — 3 November 2026
+
+**What changed.** The single right-hand drawer (`#drawer`) that holds every
+detail and edit panel now sizes itself by viewport width: 62% at ≥1440 px, 68%
+at 1024–1439, 82% at 768–1023 and 100% below 768. The page behind it stays
+visible under the scrim and its scrolling is locked while the drawer is open.
+The title and × stay fixed above a body that scrolls on its own; table headings
+stick within that body; a table too wide for the panel is moved into its own
+horizontal scroll box (`fitDrawerTables`) so the drawer body never slides
+sideways. ×, Escape and an outside click still close it, with the focus trap
+unchanged. No API, route, permission, form field or action was modified.
+
+**Method.** The current checkout was served by a temporary uvicorn on
+`127.0.0.1:8011` against `herbanova_bcs_test` (head `0027_ledger_and_bank_rec`),
+with the `:8012` cookie helper used in §21. A script drove headless Chrome over
+the DevTools Protocol: it set the session cookie, emulated 1600×900, 1280×900,
+900×900 and 390×844, opened `#/billing`, clicked the first invoice row
+(`button[data-act=open-inv]`), then read geometry from the DOM and saved a
+screenshot per width. A second pass exercised the customer drawer
+(`[data-act=edit-dist]`) and the distributor ledger
+(`[data-act=acc-ledger]`), all three close paths, and a long-ledger scroll. No
+password was typed, and no token or credential was printed.
+
+**What was seen.**
+
+| Check | 1600×900 | 1280×900 | 900×900 | 390×844 |
+|---|---|---|---|---|
+| Drawer width / share of viewport | 992 px / 62% | 870.4 px / 68% | 738 px / 82% | 390 px / 100% |
+| Drawer height | 900 | 900 | 900 | 844 |
+| Drawer body horizontal overflow | 0 | 0 | 0 | 0 |
+| Overlay present, body scroll locked (`overflow:hidden`) | yes / yes | yes / yes | yes / yes | yes / yes |
+| × hit-tested at its top corner | `#dclose` | `#dclose` | `#dclose` | `#dclose` |
+| Table heading computed position | sticky | sticky | sticky | sticky |
+| Tables on the invoice / moved into a scroll box | 3 / 0 | 3 / 0 | 3 / 0 | 3 / 1 |
+
+- The invoice line table (8 columns: line, qty, rate, taxable, CGST, SGST, IGST,
+  total) needs 483 px of content. At 390 px it is contained in its own
+  `.tw.tscroll` box: the table scrolls sideways, the drawer body and heading do
+  not, and the money columns keep their full figures.
+- Outside click at 1280 px (real mouse event at 200,400 on the scrim) closed the
+  drawer; Escape and × did the same. After each close: `#drawer` hidden,
+  `#scrim` hidden, `drawer-open` removed from `<body>`.
+- Customer drawer ("Edit TD-AC0941"): 68%, form present, no horizontal overflow.
+- Distributor ledger ("Ledger: Test distributor", `wide`): 68%, 5 entries, table
+  inside `.tw`, heading sticky. With 40 duplicated rows the table measured
+  2,055 px; the body was scrolled 600 px and the heading top stayed at 91.8 px
+  against a body top of 87.8 px (4 px body padding), i.e. pinned.
+- Dark theme: drawer, drawer header and sticky heading all computed to
+  `rgb(23,35,28)`; no white strip behind the header.
+- Background scrolling: at 1280×600 (page 836 px tall) a wheel over the page
+  moved `scrollY` to 236 with the drawer closed; with the drawer open the same
+  wheel left it at 0; after closing, the wheel moved it to 236 again.
+- Console: no uncaught exception and no failed script request. One 404 for
+  `/favicon.ico` appeared on a first-run profile only; the application has never
+  served a favicon, so this is unrelated to the drawer.
+
+**Defect found and fixed during the run.** With `overflow:visible` on the table
+wrappers, the 8-column invoice table pushed the whole drawer body 109 px sideways
+at 390 px. `fitDrawerTables()` now wraps an unwrapped table in `.tw` and marks a
+table that is wider than its box with `.tscroll`; CSS gives that box
+`overflow-x:auto`. Desktop widths were unaffected (no table marked).
+
+**Not verified.** Physical phones and tablets, touch scrolling and pinch, iOS
+safe-area insets, Safari and Firefox, screen readers, and the printable output
+behind the drawer. The measurements come from Chrome's emulated viewports, not
+real devices. The screenshots are in the run's temporary folder and were not
+added to the repository.
+
+**Result.** All four requested breakpoints and the close, scroll-lock and sticky
+behaviour were measured in the real application on the test database. The
+drawer is one shared container, so invoice, customer, distributor-ledger,
+supplier, purchasing, expense, HR and Accounts panels inherit the same
+behaviour with no per-screen change. Nothing was committed or pushed.
+
+
+## 23. Receivables by distributor section — 3 November 2026
+
+**What changed.** The "Receivables by distributor" table moved out of the
+Performance panel's expandable drill-down and now has its own entry in the
+Accounts section bar (`#/accounts/receivables-by-distributor`). It reads a
+window as a statement — opening plus the window's movements equals closing —
+with columns for opening, invoiced, credit notes, debit notes, received,
+closing, overdue and open invoices per distributor. The window is chosen by
+**Date**, **Month**, **Year** or **From/To**; **Apply** reloads and **Export
+CSV** writes the loaded window. No schema change, migration or permission
+change; the route sits behind `accounts:read`.
+
+**Method.** Six tests were added to `tests/test_accounts_reports.py` covering
+permissions and date guards, the per-row identity, reconciliation of closing
+with the outstanding statement, as-at behaviour (a September receipt and credit
+note are excluded from an August window), overdue requiring a due date before
+the closing day, and an empty window. The full suite was then run. For the
+screen, the current checkout was served by a temporary uvicorn on
+`127.0.0.1:8011` against `herbanova_bcs_test` (head
+`0027_ledger_and_bank_rec`) and driven by headless Chrome over the DevTools
+Protocol at 1440×900: set the session cookie, load the section address, change
+the month through the real control, then click Export CSV with a real mouse
+event into a download folder.
+
+**Measured.**
+
+- `pytest`: **425 passed** (645 warnings, 214 s), including the six new tests.
+- Section bar: 19 entries; `aria-current="page"` on "Receivables by
+  distributor"; only its panel visible; the old `#accDrillPanel` no longer
+  exists; Performance still opens from `#/accounts/reports`.
+- Default window 01 Nov 2026–03 Nov 2026 loaded **30 rows**; the note read
+  "… opening, movements and closing at 03 Nov 2026".
+- Month `2019-05` reloaded to **01–31 May 2019** with **2 rows**; the Total
+  row read closing **1,472.00** and received/invoiced **300.00 / 1,172.00**.
+- Export CSV downloaded
+  `HERBANOVA_Receivables_by_distributor_2019-05-01_2019-05-31.csv`: 13 columns,
+  2 data rows, a Total row; the closing column summed to 1,472.00, equal to the
+  Total cell.
+- Layout: document `scrollWidth − clientWidth` = **0** at 1440, 1280 and 900 px.
+  The table is wider than its box (1,214 px content against 1,115 / 970 / 575 px
+  boxes) and scrolls inside `.tw`; the page itself does not move.
+- Console: no uncaught exception and no failed request.
+
+**Defect found and fixed during the run.** Rupee amounts in the Total row broke
+between the sign and the digits ("₹" on one line). A scoped `white-space:nowrap`
+kept them whole but let the nowrap table's min-content width stretch the grid
+track, giving the page a 65 px horizontal overflow at 1440 px. `.view>*{min-width:0}`
+in `static/css/styles.css` lets the grid item shrink while `.tw` keeps its own
+horizontal scrollbar; the page overflow then measured 0 at all three widths.
+
+**Not verified.** Firefox, Safari, real phones and tablets, screen readers and
+the printed copy. The browser pass used an Administrator session; the
+`sales` (200) and `viewer` (403) cases are covered by the API tests, not by a
+browser session. The screenshot is in the run's temporary folder and was not
+added to the repository. Nothing was committed or pushed.
+
+## 24. Receipt/payment advances and the single receivables filter — 3 November 2026
+
+**Scope.** `POST /api/accounts/payments` with `purpose = outstanding | advance`,
+the new `payment_allocations` table (migration `0028_advances`), the two advance
+heads, automatic draw-down at invoice issue and goods receipt, the party-ledger
+presentation, `GET /api/accounts/advances`, and the Receivables by distributor
+filter reduced to one From–To range applied only on **Apply**.
+
+**Automated tests.** `tests/test_accounts_advances.py` (8 tests):
+
+- A ₹ 300.00 receipt at day 2 settles invoices of ₹ 100.00 (day 0) and
+  ₹ 150.00 (day 1) oldest-first, leaves ₹ 50.00 as an advance, reports both
+  invoices at zero outstanding, and the ledger closes at −50.00 with the
+  settled documents and the held amount in the receipt note.
+- A receipt cannot settle an invoice issued after its own date: the invoice
+  keeps ₹ 80.00 outstanding and the ₹ 80.00 waits as an advance.
+- Advances are absent from Sales and Purchases in the trial balance and appear
+  as ₹ 400.00 credit on **Advances from distributors** and ₹ 250.00 debit on
+  **Advances to suppliers**.
+- A ₹ 500.00 advance is drawn down by a dispatched invoice for the same party;
+  outstanding falls by the applied amount and the ledger reports the remainder.
+- A ₹ 500.00 supplier advance settles a ₹ 300.00 GRN automatically and leaves
+  ₹ 200.00 available.
+- The receivables-by-distributor window counts the allocation as received and
+  closes the row at zero.
+- An advance that names a document is refused 422, as is an unknown purpose.
+- Server-side rights: `sales` may read the advance (200) but not record an
+  entry (403); `viewer` is refused both (403); no money was recorded.
+
+`pytest`: **432 passed** (647 warnings, 205.9 s) including the full suite. The
+independent SQL cross-check in `app/services/reports.py` was taught about
+allocations after the first full run showed the ageing total disagreeing with
+its recomputation; the second run passed.
+
+**Browser walk.** Disposable test database behind a temporary server on
+`127.0.0.1:8011` (the real dev database was not written):
+
+- Record receipt: 45 active distributors, **Record as** offered exactly
+  *Existing outstanding invoice* and *Advance / new payment*; choosing a party
+  fetched its advance and the hint read "Available advance: ₹ 382.00…";
+  advance mode hid the document list. A ₹ 123.45 advance receipt closed the
+  drawer, showed "₹ 123.45 held as advance" and added the row
+  `RCPT-000013 … Advance ₹ 123.45`.
+- Outstanding mode: a ₹ 500.00 receipt against a ₹ 472.00 invoice produced the
+  row `INV/2627/000021 · ₹ 472.00` with `Advance ₹ 28.00`, i.e. the invoice
+  settled and the excess held.
+- Record payment: the supplier list and bill wording were correct; a ₹ 10.00
+  advance payment showed `Advance ₹ 10.00` and the server hint showed the
+  existing ₹ 250.00 advance.
+- Receivables by distributor: the toolbar held only `#rbdFrom`, `#rbdTo`,
+  Apply and Export CSV. Changing both dates produced **no** request; Apply
+  produced exactly one request for `2026-10-01`–`2026-11-03`, and the heading
+  and 34 rows / Total ₹ 60,105.50 followed the chosen range. A From after To
+  showed the refusal with **no** request. Export produced a 3,471-byte
+  `text/csv` named
+  `HERBANOVA_Receivables_by_distributor_2026-10-01_2026-11-03.csv`.
+- Console: no error or warning during the walk.
+
+**Migration.** `0028_advances` was applied to the disposable test database by
+the suite's `alembic upgrade head`. It creates `payment_allocations` (XOR target,
+positive amount, indexes and a partial unique per payment and document), widens
+`ck_ledger_account_role` and seeds heads `1110 Advances to suppliers` and
+`2110 Advances from distributors`. Its downgrade refuses while either head is
+used by an opening balance or voucher line, otherwise restores the old check and
+drops the table and heads. **Applied to the development database on 3 November
+2026** after a `pg_dump -Fc` backup (384,830 bytes), under the explicit
+`apply 6a37ba20ecef` confirmation: `alembic current` reports
+`0028_advances (head)`, `alembic check` reports no new upgrade operations, and
+the two seeded heads exist with roles `supplier_advance` and
+`distributor_advance`. On the live `:8000` server both new routes answer `401`
+unauthenticated (present, not `404`), and `/ui/js/app.js` serves byte-identical
+to the checkout, so the entry drawer and the single From–To filter are the
+current build.
+
+**Residual risks stated, not hidden.** Settlement is not serialised with a row
+lock, so two operators recording a receipt for the same party at the same
+instant could each see the same open invoice; the second transaction would be
+refused by the outstanding check or leave an excess as an advance rather than
+double-settling silently. Receipts held as advances count in the cash
+collection figures on their date (they are cash), never in revenue. The
+receivables report changes only on Apply by design; opening the section still
+loads its default month.
+
+## 25. Gap-closure round — 3 November 2026
+
+**Scope.** Six changes on `feature/gap-closure`: clickable Accounts KPI cards,
+two named start commands for the frontend and backend, password policy moved
+fully to the server, e-mail delivery and worker-session defects, Administrator
+TOTP, and Open/Print for credit and debit notes. Nothing was committed and no
+development-database schema was changed in this round.
+
+### 25.1 KPI cards open their own report
+
+`GET /api/accounts/report` now returns an `href` on every one of its ten
+`cards[]` entries, built from the same window the report used
+(`app/services/accounting.py`). The tile is a plain link; the browser does not
+choose a destination. A card with no figure still links to the section that
+explains its gap.
+
+Browser walk on the disposable test database (backend `127.0.0.1:8030`,
+frontend `127.0.0.1:3030`, signed in as an Administrator):
+
+| Card | Address opened |
+|---|---|
+| Revenue | `#/accounts/gst-out?from=…&to=…` |
+| Output GST | `#/accounts/gst-out?from=…&to=…` |
+| Collections | `#/accounts/cash?from=…&to=…` |
+| Cash and bank (net) | `#/accounts/cash?from=…&to=…` |
+| Receivables | `#/accounts/receivables` |
+| Over 60 days | `#/accounts/ageing?as_of=…` |
+| Payables | `#/accounts/payables` |
+| Payable within 7 days | `#/accounts/payables?due=week` |
+| Expenses | `#/expenses?from=…&to=…` |
+| Net profit | `#/accounts/reports?focus=pnl` |
+
+All ten destinations were distinct where the underlying report differs, the
+window travelled in the address, and a refresh/back kept it. The walk found one
+defect: `?due=week` set the filter state but the payables list had already been
+drawn, so the first paint showed the unfiltered list. `route()` now re-draws
+the statements when a hash-only navigation carries a payables filter; the
+re-check showed "0.00 estimated to fall due within 7 days" on the payables
+panel. No console error during the walk.
+
+`tests/test_accounts_reports.py` covers the report payload and the card values;
+there is no unit test that asserts each `href`, so that part is
+**VERIFIED (browser)** only.
+
+### 25.2 Two start commands
+
+`scripts/run_backend.py` (uvicorn) and `scripts/run_frontend.py` (standard
+library) are documented in [`RUNNING_SERVERS.md`](RUNNING_SERVERS.md). Verified
+on loopback: the SPA, `app.js` and `styles.css` returned 200; `/api/auth/me`
+through the proxy was 401 before sign-in and 200 after, so the first-party
+cookie survived; `/docs` and `/openapi.json` were proxied; stopping the backend
+made the frontend answer **502** with the command to run; `/../.env` and encoded
+traversal variants were refused. A Windows path bug found during the walk
+(`url2pathname` turning `/` into `\`, which made every static file 403) was
+fixed by decoding with `unquote` and keeping POSIX separators.
+
+**Not verified:** a production reverse proxy, TLS termination, a Windows
+service wrapper and multi-worker deployment.
+
+### 25.3 Password policy on the server
+
+The policy, the temporary-password generator and the stored password live only
+on the server (`validate_password`, `generate_temp_password` in
+`app/core/security.py`; the `ChangePassword` field validator; user create and
+reset in `app/api/users.py`). The browser sends the typed password, shows the
+one-time password the server returned once, and mirrors no policy or generator.
+A role change now bumps `token_version`, so a user promoted to Administrator
+ends the old session and must pass the new role's sign-in rules.
+
+Evidence: `tests/test_authz.py` (wrong current password 400, too-short new
+password 422, unchanged password 400, old token revoked) and code review of
+`app/api/users.py`. **Not verified this round:** the in-browser display of a
+server policy message was not re-exercised; the API behaviour is covered.
+
+### 25.4 E-mail delivery and database sessions
+
+Three defects were fixed and covered by tests:
+
+1. **Transport chosen by a contradicting setting.** A saved security choice
+   that disagreed with the port made a correct password fail the handshake.
+   `_transport` now treats 465 as implicit TLS, 587 as STARTTLS and any other
+   port as the saved choice:
+   `tests/test_email_settings.py::test_well_known_smtp_ports_decide_the_transport`.
+2. **Failed settings read poisoned the session.** `load_row` now rolls back,
+   so the next statement on the worker's session does not raise
+   `PendingRollbackError`:
+   `tests/test_email_settings.py::test_an_unreadable_settings_row_rolls_the_session_back`.
+3. **A failed delivery could stay "sending".** `process_one` now rolls back,
+   re-reads the delivery and its schedule, records the failure and commits it,
+   so a database error is logged rather than raised:
+   `tests/test_email_reports.py::test_a_schedule_with_no_next_run_is_committed_even_when_nothing_is_due`
+   covers the related backfill commit; the failure path is exercised by the
+   existing worker tests.
+
+The connection pool is now bounded (10, 20 overflow, 30 s wait) and recycles
+idle connections every 30 minutes (`app/core/db.py`, `app/core/config.py`).
+
+**Not verified: a real delivery to a real inbox.** No live SMTP credential or
+approved recipient exists, and real sends are prohibited by the standing
+brief. Test-mode delivery remains the only executed path (G-09).
+
+### 25.5 Administrator TOTP
+
+Backend, tests and enrollment were verified; the full design is in
+[`ADMIN_2FA.md`](ADMIN_2FA.md).
+
+- `tests/test_totp.py` (8 tests): RFC 6238 vectors; replay refusal; a
+  non-Administrator still signing in with the password alone; an Administrator
+  receiving no session before enrollment; enrollment then a code at the next
+  sign-in; a recovery code working once; a session without the `otp` claim
+  being refused; five wrong codes locking the second step. All 8 pass.
+  Every client in that file uses `base_url="https://testserver"` because
+  `APP_ENV=production` makes the cookie `Secure`; without it the client did
+  not send the cookie and five tests failed with `KeyError: 'secret'`.
+- Browser walk: after the password an Administrator saw the enrollment screen
+  with the key and QR; no `session` cookie was issued and `/api/auth/me`
+  answered 401. The enrollment was completed in the page; the recovery codes
+  were shown once.
+- **Not run in the browser:** entering the verify code after enrollment. Read
+  access to a stored secret or a generated code is blocked by the
+  environment's credential rules, so that one step is covered by the automated
+  test instead. Nothing was printed or logged.
+- **Migration status:** `0029_totp` is at the head of the disposable test
+  database because the suite runs `alembic upgrade head` there, and it was
+  applied to `herbanova_bcs_dev` on 3 November 2026 with the owner's explicit
+  `apply 0029_totp`. Backup first:
+  `var/backups/pre-0029-totp-20261103T172245.dump` (392 KB, 84 table entries,
+  SHA-256 `0d791f2795eb84db54a4c6a504e2b37ff9377732ddae84f6bc67dd47d5ee99b4`).
+  After the apply: `alembic current` = `0029_totp (head)`; the seven `users`
+  columns present with the expected nullability/defaults; 84 tables and 6 users
+  unchanged; `admin` and `admin2` `token_version` 3 → 4; a full `User` select
+  that had raised `UndefinedColumn` before now returns all 6 rows; a login
+  request with an unknown username answered **401 Invalid credentials** (not
+  500) with no traceback in the server log. Both Administrators will enrol at
+  their next sign-in. Production remains unmigrated.
+
+### 25.6 Credit and debit notes — Open and Print
+
+The notes table in Billing lists both kinds newest first; each row has
+**Open** and, with `print:document`, **Print**. `noteDetail` draws the stored
+note (number and financial year, invoice, buyer only when known, date, reason,
+returned-to-stock quantity for a credit, tax breakdown and lines) and the
+print-log verification panel. Print posts to the existing secure route
+`POST /api/print/{credit_note|debit_note}/{id}?copy=ORIGINAL`.
+
+- `tests/test_file_audit.py::test_a_credit_and_a_debit_note_can_be_opened_and_printed`
+  creates an invoice with two units, credits one and debits one, checks both
+  list endpoints return the lines and invoice number, and extracts "CREDIT
+  NOTE" and "DEBIT NOTE" from the generated PDFs.
+- Browser walk as `browser_sales`: two note rows, both with **Open** and
+  **Print**; Open showed `CN/2627/000001` with one line and a valid print
+  panel; Print issued `POST /api/print/debit_note/1?copy=ORIGINAL` → 200
+  `application/pdf`, with the print-log, verify and QR requests also 200.
+  No console error.
+
+### 25.7 Suite and counts
+
+`python -m pytest -q`: **446 passed, 658 warnings in 221.86 s** (3 November
+2026, after all six changes). The suite applies migrations to the disposable
+test database only.
+
+Route table: **327 API operations across 255 paths**, four of them the
+Administrator second-factor endpoints. Module register unchanged at 18 entries,
+17 counted/17 working plus the conditional e-invoice module.
+
+### 25.8 What remains not verified
+
+| Item | Why |
+|---|---|
+| A real e-mail reaching a real inbox | No live SMTP credential or approved recipient; real sends prohibited (G-09) |
+| Typing the TOTP verify code in the browser | Stored secret/code access is blocked; covered by `tests/test_totp.py` |
+| Production reverse proxy and TLS | Deployment work, not run |
+| Physical phone, tablet and screen reader | No device or tooling (G-10) |
+| `0029_totp` on the production database | No approved production deployment in this round |
+| A unit test for each KPI card `href` | The addresses are browser-verified only |

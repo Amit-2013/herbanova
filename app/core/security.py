@@ -94,13 +94,30 @@ def generate_temp_password() -> str:
 
 
 # ---------------------------------------------------------------- session tokens
-def make_token(user_id: int, token_version: int = 1, minutes: int = 60) -> str:
+def make_token(user_id: int, token_version: int = 1, minutes: int = 60,
+               otp: bool = False) -> str:
+    """A session JWT. `otp` marks a session that passed the second factor.
+
+    A user with two-factor enabled is rejected by `current_user` unless the
+    token carries this claim, so a first-factor-only token can never be used
+    even if one were issued by a bug.
+    """
     now = datetime.now(timezone.utc)
     exp = now + timedelta(minutes=minutes)
-    iat = now
-    return jwt.encode({"sub": str(user_id), "tv": int(token_version),
-                       "iat": iat, "exp": exp},
-                      settings.app_secret, "HS256")
+    claims = {"sub": str(user_id), "tv": int(token_version), "iat": now, "exp": exp}
+    if otp:
+        claims["otp"] = True
+    return jwt.encode(claims, settings.app_secret, "HS256")
+
+
+def read_session_token(token: str) -> dict | None:
+    """The full session claim set (sub, tv, otp) or None if the token is invalid."""
+    try:
+        claims = jwt.decode(token, settings.app_secret, ["HS256"])
+        return {"user_id": int(claims["sub"]), "token_version": int(claims.get("tv", 1)),
+                "otp": claims.get("otp") is True}
+    except (jwt.PyJWTError, ValueError, KeyError):
+        return None
 
 
 def read_token(token: str) -> int | None:
@@ -110,8 +127,5 @@ def read_token(token: str) -> int | None:
 
 def read_token_full(token: str) -> tuple[int, int] | None:
     """(user_id, token_version) from a session JWT, or None if it is invalid."""
-    try:
-        claims = jwt.decode(token, settings.app_secret, ["HS256"])
-        return int(claims["sub"]), int(claims.get("tv", 1))
-    except (jwt.PyJWTError, ValueError, KeyError):
-        return None
+    parsed = read_session_token(token)
+    return (parsed["user_id"], parsed["token_version"]) if parsed else None

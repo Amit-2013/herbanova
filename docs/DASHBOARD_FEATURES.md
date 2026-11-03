@@ -66,7 +66,7 @@ Every tile is a link to the records behind it. Value, note and trend are counted
 | 2 | `batches_in_stock` | Batches in stock | `COUNT(batches)` where `on_hand > 0` | `batches` | Daily batch count, same reconstruction |
 | 3 | `expiring` | Expiring ≤ 90 days | Batches with `on_hand > 0`, expiry not null and `expiry <= today + 90`; note splits "already expired" and "within 30 days" | `batches` | Daily count within the same 90-day window |
 | 4 | `po_awaiting` | POs awaiting goods | `COUNT(purchase_orders)` with status `open` or `partially_received` | `purchase_orders` | **No history**: PO status has no stored timeline → text note, no line |
-| 5 | `orders_ready` | Orders ready to dispatch | `COUNT(sales_orders)` with status `approved` | `sales_orders` | **No history**: approval time is not stored → text note |
+| 5 | `orders_ready` | Orders ready to dispatch | `COUNT(sales_orders)` with status `approved` | `sales_orders` | **No history**: the tile counts the orders approved today → text note |
 | 6 | `approvals_waiting` | Approvals waiting | Pending approvals **visible to this user** (HR self-scoping applies) | `approval_requests` | **No history**: no decision timestamp → text note |
 | 7 | `followups_overdue` | Follow-ups overdue | Leads not `won`/`lost` with `next_follow_up < today`; note gives due-today | `leads` | **No history**: only the current follow-up date is stored → text note |
 | 8 | `active_products` | Active products | `COUNT(products)` with status `active` | `products` | **No history**: no creation timestamp → text note |
@@ -85,7 +85,7 @@ Trends are shown as inline SVG sparklines only when at least two finite points e
 | Warehouse above 80% capacity | `used_units / capacity_units` from the capacity service; amber above 80%, red above 95% / over | amber/red when > 0; "Capacity is not set for any warehouse" when none is configured | Inventory → Warehouses |
 | Receivables over 60 days | ageing buckets `61-90` + `90+` | amber when > 0 | Accounts |
 | Approvals needing an Administrator | pending credit-limit or post-billing requests visible to the caller | amber when > 0 | Approvals |
-| Low stock vs reorder level | not stored (GAP-D02) | "No data" | — |
+| Low stock vs reorder level | `SUM(batches.on_hand) < products.reorder_level` for every product with a level set; only products whose level is captured are counted | amber when > 0; the note names up to three below-level products as "sku (balance of level)"; products without a level are "not set", never zero | Inventory → Stock |
 
 The header states the exact number of rows shown and, when present, how many are data gaps ("3 items · 2 data gaps"). Healthy rules (count 0) are omitted.
 
@@ -134,7 +134,7 @@ Up to 6 products by taxable value (before GST) on issued invoices in the period,
 
 ### 5.9 Sales by category
 
-Not available: `products` has no category or brand (GAP-D01). The panel shows **No data yet**, names the gap and explains that grouping would require inventing a category — it does not reuse the product name as a pseudo-category.
+Issued-invoice taxable value grouped by `products.category` (migration `0024`), largest first. Products with no category are grouped as **Uncategorised** and named as such; the panel states the classified and uncategorised totals separately. Nothing is inferred from the product name or SKU. The category a product carries *today* is used, so correcting a mis-categorised product re-groups its history — the panel's note says the figure is as printed on issued invoices, and a product with no category is never guessed. Requires `sales:read`. Evidence: `tests/test_catalog_orders.py::test_category_sales_come_from_issued_invoices` reconciles the row with the invoice lines and proves the total rises only by the new invoice.
 
 ### 5.10 Recent activity
 
@@ -158,15 +158,17 @@ permission that its matching list endpoint requires, and a card with no data say
 
 | Card | What it shows | Source | Gate |
 |---|---|---|---|
-| **Pipeline** | Sales orders by every status (count and value) with the order-to-dispatch average; leads by every status | `sales_orders`, `leads`; dispatch time is `dispatched_at − created_at` for dispatched orders (approval wait included, stated in the note) | `sales:read` for the sales column, `lead:read` for leads |
+| **Pipeline** | Sales orders by every status (count and value); order-to-dispatch average, plus the approval wait and the after-approval wait measured separately from `approved_at`; promise delivery (on time, late, average days late) and open orders past their promise; leads by every status | `sales_orders`, `leads`; raised→dispatch is `dispatched_at − created_at` for dispatched orders; approval is `approved_at − created_at`; after approval is `dispatched_at − approved_at`; lateness compares the IST dispatch date with `expected_delivery_date`. Orders approved or promised before migration `0024` have no stamp and are excluded from those averages rather than counted as zero, and an order without a promise contributes nothing to lateness | `sales:read` for the sales column, `lead:read` for leads |
 | **Customers and credit** | Top customers by issued-invoice value in the period; all-date outstanding per customer with a reconciled total; credit in use per distributor (limit, exposure, available, % used, "over limit" above 100%) | `invoices`, `ledger.receivable_rows`, `sales_orders` exposure statuses, `distributors.credit_limit` | `sales:read` for top/credit, `accounts:read` for outstanding |
 | **PO ageing** | Open and part-received POs bucketed 0–7, 8–14, 15–30, 31+ days since the order date, with count and ordered value; how many have no goods received and how many are part received | `purchase_orders`, `purchase_order_lines`, goods receipts | `stock:read` |
 | **Corrections after billing** | Issued credit- and debit-note counts and values in the period, the latest notes with invoice and reason, and post-billing amendment requests with status | `credit_notes`, `debit_notes`, `approval_requests` (`invoice_post_billing`) | `sales:read` |
 | **HR today** | Active headcount, attendance marked and not marked, pending leave and on-duty applications, attendance by status | `employees`, `hr_attendance`, `hr_leave_applications`, `hr_od_requests` | `hr:read` |
 
 Every card states the period or date it covers. Counts are exact; the note lists
-are capped at six with the true total in the card. PO lateness against a promise
-is not shown because no expected-delivery date is stored (GAP-D05).
+are capped at six with the true total in the card. Sales-order lateness against
+the promise is shown from migration `0024`; **purchase-order** lateness is still
+not shown because POs have no expected-delivery date (the remaining part of
+GAP-D05).
 
 ---
 
@@ -219,8 +221,9 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 
 | Gap | Missing input | What the screen does |
 |---|---|---|
-| GAP-D01 | Product category or brand | "Sales by category" → No data yet |
-| GAP-D02 | Reorder level | "Low stock against reorder level" → No data |
+| GAP-D01 | Product category or brand | **Resolved in migration `0024`**: the category is captured on the product and grouped from issued invoices; uncategorised products are named as such |
+| GAP-D02 | Reorder level | **Resolved in migration `0024`**: the level is captured per product; a product without a level is "not set", never treated as zero |
+| GAP-D05 | Expected delivery date | **Resolved for sales orders in migration `0024`** (promise, lateness and overdue-open); purchase-order expected date remains open |
 | GAP-D03 | Warehouse capacity | **Resolved for configured warehouses in v2** (migration `0009`); a warehouse with no capacity still says "Capacity not set" |
 | GAP-D04 | Batch cost / valuation policy | Expiry rows omit value; footer names the gap; comparison gross-margin card says "No data yet" |
 | GAP-D09 | Persisted backup/restore result | Health card "Not recorded" |
@@ -231,7 +234,7 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 | GAP-V16 | No `distributors.created_at` | Comparison "new customers" card says "No data yet" |
 | GAP-V17 | No prior-year data yet | MoM/YoY prior-year figures read zero with "No data yet", never invented |
 
-`GAP-D05..D08` (PO expected date, invoice due date, input tax, structured lead-status history) do not appear as dashboard figures in this phase; they are recorded in `docs/DASHBOARD_AUDIT.md`.
+`GAP-D07` (input tax) and `GAP-D08` (structured lead-status history) do not appear as dashboard figures; the purchase-order part of `GAP-D05` is also still open. Invoice due dates (`GAP-D06`) are now captured and appear in the Accounts ageing due-date split. They are recorded in `docs/DASHBOARD_AUDIT.md`.
 
 ---
 
@@ -253,6 +256,10 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 | Phase 3 corrections | `test_corrections_reconcile_with_issued_notes` |
 | Phase 3 HR today | `test_hr_today_reconciles_with_attendance_and_requests` |
 | Phase 3 permission scoping and shapes | `test_insights_are_present_and_scoped_by_permission`, `test_insight_card_shapes_are_stable` |
+| Category sales reconcile with invoice lines | `tests/test_catalog_orders.py::test_category_sales_come_from_issued_invoices` |
+| Low stock uses only captured levels | `test_low_stock_attention_uses_the_configured_level` |
+| Promise date, approval stamp and lateness | `test_order_promise_is_stored_editable_and_validated`, `test_approval_is_stamped_when_the_order_is_approved`, `test_pipeline_separates_approval_dispatch_and_lateness` |
+| Stock report exposes grouping and the reorder flag | `test_stock_report_exposes_grouping_and_reorder_flag` |
 
 **Browser verification (1 November 2026):** signed in as the Administrator against the development database at `http://127.0.0.1:8000/ui/`. Confirmed: greeting/date/updated line; 8 KPI tiles with values from the database; attention list with two named gaps; chart totals and hover tooltip; ageing total "₹ 70,00,000.00" in Indian grouping with the report-matching note; expiry filter counts and empty state; warehouse shares; open-PO empty state; approval review drawer showing the server's self-approval restriction; top products; category "No data yet (GAP-D01)"; "Latest 8 of 323 entries."; health cards ("15 of 15" at that time; the register now has 17 counted modules after MOD-17 Accounts reporting and MOD-18 Scheduled e-mail were added, so the card reads "17 of 17"), schema at head, backup not recorded, alerts configured); range 7D switched the window and reloaded; palette opened with Ctrl+K, searched, highlighted with arrows and closed with Esc; dark theme toggled the tokens; Inventory, Approvals, Reports, Sales orders, HR and Settings all still rendered; **no console messages or errors**. The Phase 3 cards were then checked in the same session: pipeline (2 sales orders, 0.5-day average to dispatch across 1 dispatched order), customers and credit (outstanding ₹ 70,00,000.00 reconciling with the ageing panel; 6,250% credit use shown as "over limit"), PO ageing (0 open), corrections (0 notes, 0 post-billing requests) and HR today (5 active, 0 marked, 5 not marked); Customers, Sales orders, Purchases, HR and Overview screens still rendered; dark theme applied to the new cards; no console errors. A duplicate function name (`renderCustomers`) initially hid the customers card and was renamed to `renderInsightCustomers`.
 
@@ -266,11 +273,11 @@ All gates are enforced in `app/api/dashboard.py` and are covered by `tests/test_
 
 | Not built | Reason | What would unblock it |
 |---|---|---|
-| Sales by category / margin by category | GAP-D01 | `products.category` (migration + backfill) |
-| Low-stock and stock-cover alerts | GAP-D02 | `products.reorder_level` |
+| ~~Sales by category~~ | **Built** (`0024`) | `products.category` is captured and grouped from issued invoices; margin by category still needs batch cost per category |
+| ~~Low-stock alerts~~ | **Built** (`0024`) | `products.reorder_level` is captured; stock-cover (days of cover) still needs a consumption rate |
 | Expiry value and stock value | GAP-D04 | Batch cost at receipt or a valuation policy |
-| PO due-date and supplier on-time | GAP-D05 | `purchase_orders.expected_date` |
-| Ageing by due date | GAP-D06 | `invoices.due_date` |
+| PO due-date and supplier on-time | GAP-D05 (PO part) | `purchase_orders.expected_date`; sales-order promise and lateness are built (`0024`) |
+| ~~Ageing by due date~~ | **Built** (`0025`) | `invoices.due_date` frozen at issue; the Accounts ageing shows the due-date split while buckets stay by invoice date |
 | GST input/output summary | GAP-D07 | Purchase tax capture |
 | Lead funnel over time | GAP-D08 | Structured status history |
 | Last backup / restore test card | GAP-D09 | A persisted run record from `backup_restore_test.py` |
@@ -391,7 +398,8 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 
 | Endpoint | Permission | Purpose |
 |---|---|---|
-| `GET /api/accounts/report?from_date&to_date&state` | `accounts:reports` | Window figures, 12-month trend, by-state table, receivables by distributor, gaps |
+| `GET /api/accounts/report?from_date&to_date&state` | `accounts:reports` | Window figures, 12-month trend, by-state table, gaps |
+| `GET /api/accounts/receivables-by-distributor?from_date&to_date` | `accounts:read` | Per distributor opening, invoiced, credit notes, debit notes, received, closing, overdue and open invoices; opening + movements = closing |
 | `GET /api/accounts/report/compare?mode=full_month\|mtd&month=YYYY-MM` | `accounts:reports` | Current window vs previous month vs same month last year |
 | `GET /api/accounts/outstanding`, `/ageing`, `/trial-balance`, `/gst-register`, `/payments`, ledgers | `accounts:read` | Existing statements, unchanged |
 | `GET /api/reports/profit_and_loss?from&to` | `accounts:reports` | P&L statement, eight reconciliation checks (nine when net profit is available) and notes; export also needs `report:export` |
@@ -399,19 +407,22 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 | `GET/POST/PATCH /api/expenses`, `/heads`, `/settings` | `expense:read` / `expense:write` | Expense entries, heads, approval, reversal, receipts and tracking settings |
 | Overview `GET /api/dashboard` → `accounts` | `accounts:reports` | Receivables, payables, cash and bank, output GST, gross profit (partial when needed), expenses and net profit for the selected dates |
 
-**Overview section.** Seven tiles (Receivables, Payables, Cash and bank (net), Output GST, Gross profit, Expenses, Net profit) under the KPI row. Gross profit is live and labelled "partial, X of Y invoices costed" when some invoices lack a captured cost. Net profit is live only when every invoice is costed, expenses are tracked for the whole window and payroll is complete; otherwise it shows its first gap code and opens the fix link. The section is absent for any role without `accounts:reports`.
+**Overview section.** Seven tiles (Receivables, Payables, Cash and bank (net), Output GST, Gross profit, Expenses, Net profit) under the KPI row. Gross profit is live and labelled "partial, X of Y invoices costed" when some invoices lack a captured cost. Expenses and payroll-backed figures show a provable total with a **Partial** chip and a **Fix this** link when an input covers only part of the window. Net profit is live only when every invoice is costed, expenses are tracked for the whole window and payroll is complete; otherwise it shows its first gap code and opens the fix link. The section is absent for any role without `accounts:reports`.
 
 **Accounting & Finance screen.** Above the existing statements when the role holds `accounts:reports`:
 
 | Section | What it shows | Source |
 |---|---|---|
-| Accounts performance | Date window, region filter, eight KPI tiles, notes | `accounting.window()` |
-| Profit and loss | Revenue and returns on taxable value; COGS from the stock ledger; approved expenses by head; payroll gross by month; gross profit labelled partial when needed; net profit only when complete | `profit_loss.statement()` via `accounting.report()` |
+| Accounts performance | Date window, region filter, ten KPI tiles, notes. Each tile is a link carrying the window to the report that proves it (Revenue and Output GST → GST outward; Collections and Cash and bank → Receipts and payments; Receivables → Receivables; Over 60 days → Ageing `as_of`; Payables → Payables; Payable within 7 days → Payables `due=week`; Expenses → Expenses; Net profit → Performance `focus=pnl`). Receivables and Payables carry no window because their lists are as-at-today. | `accounting.window()`; hrefs in `accounting.report()`; applied by `applyAccountsQuery` |
+| Profit and loss | Revenue and returns on taxable value; COGS from the stock ledger; approved expenses by head; payroll gross by month, allocated by working days when the window cuts a month short; gross profit labelled partial when needed; expenses and payroll marked **Partial** with a **Fix this** link when they cover only part of the window; net profit only when complete | `profit_loss.statement()` via `accounting.report()` |
 | Month on month and year on year | Both modes; current / previous / last year / change; no percentage against zero | `accounting.compare()` |
 | Monthly trend | Revenue, collections, payments, net cash, output GST, returns for 12 months | `accounting.monthly_series()` |
 | By state | Invoices, revenue, share, output GST, returns, outstanding; Filter button | `accounting.state_breakdown()` |
-| Receivables by distributor | Outstanding per party, opening the append-only party ledger | `accounting.receivables_by_distributor()` + `/api/accounts/ledger/distributors/{id}` |
-| Data gaps | GAP-A03 to GAP-A10 for what is still not captured, plus GAP-P01/P02/P03 when cost, expenses or payroll are incomplete, each with a fix link | `accounting.GAPS` + `profit_loss.statement()` |
+| Receivables by distributor | Its own section in the bar: one **From date – To date** window applied only when **Apply** is pressed; opening, invoiced, credit notes, debit notes, received, closing, overdue and open invoices per party, with the identity opening + movements = closing; Export CSV of the loaded window; opening the append-only party ledger | `accounting.receivables_by_distributor_window()` via `/api/accounts/receivables-by-distributor` + `/api/accounts/ledger/distributors/{id}` |
+| Receipts, payments and advances | Two-mode money entry: settle the party's open documents oldest-first and hold any excess as an advance, or record the whole amount as an advance with no document. Advances post to their own heads (1110 / 2110), never to Sales or Purchases, and are drawn down automatically by later invoices and goods receipts; the party ledger shows the settlement in the money row and reports `available_advance` | `advances.settle_receipt/settle_payment/apply_to_invoice/apply_to_purchase_order`, `ledger.distributor_ledger/supplier_ledger` via `/api/accounts/payments`, `/api/accounts/advances`, `/api/accounts/ledger/...` |
+| Statements — input GST, filed returns and statutory dues | Input GST — supplier bills (bill capture, tax heads, ITC flag, reversal, net line, expense-ITC memo); GST returns and reconciliation (filed GSTR-1/GSTR-3B figures compared line by line with the register); TDS and statutory dues (withheld, deposited and outstanding per head, with challans) | `gst.register()/net()/reconciliation()`, `statutory.dues()` via `/api/accounts/input-gst`, `/gst-net`, `/gst-returns`, `/gst-reconciliation`, `/statutory-dues`, `/statutory-challans` |
+| Statements — ledger, vouchers and balance sheet | Ledger heads (seeded chart, add, rename, deactivate); opening balances per head and year with the opening difference; balance sheet at a date with openings, vouchers and documents kept apart, section totals, retained earnings and cash and bank; journals and vouchers with draft/post/reverse; day book with a balanced check; bank statements with match, unmatch and a proof | `journal.account_rows/opening_rows/day_book`, `balance_sheet.balance_sheet()`, `bank_rec.reconciliation()` via `/api/accounts/ledger-accounts`, `/opening-balances`, `/balance-sheet`, `/vouchers`, `/day-book`, `/bank-statements` |
+| Data gaps | GAP-P01/P02/P03 when cost, expenses or payroll are incomplete, each naming the missing input; GAP-A08 to GAP-A10 are closed and no longer raised | `accounting.GAPS` + `profit_loss.statement()` |
 
 ## 15. Accounts metric definitions
 
@@ -419,19 +430,23 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 |---|---|---|
 | Revenue (taxable) | Sum of `taxable_value` on issued invoices | Flow, exact window |
 | Invoiced (with GST) | Sum of `grand_total` on issued invoices | Flow |
-| Collections | Receipts dated in the window | Flow |
+| Collections | Receipts dated in the window. A receipt held as an advance counts as cash collected on its date, never as revenue; only the settled part reduces receivables | Flow |
 | Returns | Issued credit notes dated in the window | Flow |
-| Output GST | `tax_total` printed on issued invoices | Flow; input tax not captured (GAP-A05) |
+| Output GST | `tax_total` printed on issued invoices | Flow |
+| Input GST (eligible) | Tax captured on posted supplier bills whose ITC flag is set, head by head; blocked bills totalled separately | Flow; **No data yet** until a bill is posted |
+| Net GST payable | Output GST minus eligible input GST, head by head; a negative figure is a credit | Flow; unavailable until a bill is posted; blocked input and expense ITC are never netted |
+| Filed return differences | Filed figure minus computed register for each GSTR-1/GSTR-3B line, shown with both figures | Per month and form; no filed figure means no comparison |
+| Statutory outstanding | Cumulative withheld (vendor TDS from posted bills plus approved-or-later payroll heads) minus challans deposited, per head | Snapshot at the window end |
 | Receivables outstanding | Issued invoices less receipts and credit/debit notes | Snapshot as at window end |
 | Over 60 days | Ageing buckets 61-90 and 90+ | Snapshot |
 | Payables outstanding | Goods received at order cost less payments | Snapshot; due dates estimated from current supplier terms |
 | Payable within 7 days | Outstanding whose estimated due date falls in the next seven days | Snapshot |
-| Cash and bank (net) | Receipts minus supplier payments | Flow; opening balances not captured (GAP-A10) |
+| Cash and bank (net) | Receipts minus supplier payments; the Overview tile stays a period flow. The balance sheet gives each cash and bank head's closing balance from openings, vouchers and documents | Flow (Overview); snapshot at a date (balance sheet) |
 | Cost of goods sold | Captured issue cost from `costing.invoice_cogs()`, less the cost of stock actually returned; a price-only credit note does not reduce it | Flow; an invoice with no attributed issue is not costed |
 | Gross profit | Net revenue (revenue less returns plus debit notes) minus COGS | Always shown; labelled "partial, X of Y invoices costed" when any invoice is not costed |
-| Expenses | Approved, non-reversed entries by head, dated in the window; non-creditable GST is added to cost, creditable GST is not | Flow; incomplete before `expense_settings.tracked_from` (GAP-P02) |
-| Payroll cost | Gross salary of approved, processed or paid payroll periods for whole calendar months; employer contributions are not included | Whole months only, never prorated (GAP-P03) |
-| Net profit | Gross profit minus expenses and payroll | Shown only when every invoice is costed, expenses cover the window and payroll is complete; otherwise the first gap is shown (GAP-P01/P02/P03) |
+| Expenses | Approved, non-reversed entries by head, dated in the window; non-creditable GST is added to cost, creditable GST is not | Flow; incomplete before `expense_settings.tracked_from` (GAP-P02) — a total that has some entries is shown with a `Partial` chip, not as "No data yet" |
+| Payroll cost | Gross salary of approved, processed or paid payroll periods; employer contributions are not included | A whole month counts in full; a month the window cuts short counts its approved gross by each employee's working-day share and is returned `prorated` with the `allocated` amount (GAP-P03 names a month with no approved payroll) |
+| Net profit | Gross profit minus expenses and payroll | Shown only when every invoice is costed, expenses cover the window and payroll is complete; otherwise the first gap is shown (GAP-P01/P02/P03). A partial component never produces a net profit |
 | Region filter | Narrows revenue, returns, output GST and distributor receipts by buyer state | Balances and trial balance stay company-wide |
 
 ## 16. Permissions
@@ -440,16 +455,16 @@ This register covers the Accounts dashboard, its comparisons and the scheduled r
 |---|---|---|
 | `accounts:read` | Administrator, sales desk | Statements, ledgers, ageing, GST register, trial balance |
 | `accounts:reports` | Administrator only (grantable) | Accounts performance section, Overview Accounts tiles, P&L report and exports, Accounts email block |
-| `accounts:write` | Administrator | Record receipts and payments |
+| `accounts:write` | Administrator | Record receipts and payments, capture or reverse a supplier bill, record a filed GST return and record a statutory challan |
 | `expense:read` / `expense:write` | Administrator | Expenses screen, entries, heads, settings, approval and reversal; the Expenses sidebar entry is shown under the Accounting feature switch only when `expense:read` is held |
 
 Both checks are server-side (`require("accounts:reports")` and `require("accounts:read")`). The screen hides what the API would refuse; it never substitutes for the API check.
 
 ## 17. Data gaps
 
-**Captured now (no longer gaps):** GAP-A01 expenses and heads (expense table, heads, approval, reversal, receipts, settings) and GAP-A02 cost of goods (append-only stock cost, weighted average per product, invoice attribution and audited corrections).
+**Captured now (no longer gaps):** GAP-A01 expenses and heads (expense table, heads, approval, reversal, receipts, settings), GAP-A02 cost of goods (append-only stock cost, weighted average per product, invoice attribution and audited corrections), GAP-A05 input GST and net payable (supplier bills with a head-by-head tax split; net = output less eligible input), GAP-A06 GSTR-1/3B reconciliation (filed figures captured and compared with the register) and GAP-A07 TDS and statutory dues (vendor TDS on the bill, approved payroll heads, challans and the outstanding remainder).
 
-**Still not captured:** GAP-A03 year-end close and whole-book period locks (a locked accounting month refuses cost corrections and expense creation or reversal; invoice changes, credit notes, receipts, payments and year-end close are not covered) · GAP-A04 invoice due dates · GAP-A05 input GST and net payable · GAP-A06 GSTR-1/3B reconciliation · GAP-A07 TDS and statutory dues · GAP-A08 vouchers and day book · GAP-A09 bank reconciliation · GAP-A10 opening balances and balance sheet.
+**Still not captured:** nothing from the A-series remains open. GAP-A08 vouchers, journal and day book, GAP-A09 bank reconciliation and GAP-A10 opening balances and balance sheet were closed on 3 November 2026 (migration `0027`). Their limits are stated on the screen rather than left implicit: a document is not posted as a voucher automatically, there is no bank-file import, and the balance sheet's document layer covers sales, receipts, payments and goods received only, so expenses, payroll and stock cost appear only when vouched. GAP-A03 (financial-year close) and GAP-A04 (invoice due dates) are also closed: a completed year can be closed and refuses dated documents with HTTP 423 until reopened, and the invoice freezes its terms and due date at issue.
 
 **Gaps raised only when the data is missing for the selected window:**
 
@@ -457,7 +472,7 @@ Both checks are server-side (`require("accounts:reports")` and `require("account
 |---|---|---|
 | GAP-P01 | One or more invoices are not fully costed (no attributed stock issue, uncosted units, or a partial issue) | `#/inventory/ledger` |
 | GAP-P02 | Expenses are not tracked for the whole window (window starts before `tracked_from`, or no start date is configured) | `#/expenses` |
-| GAP-P03 | A payroll month in the window is absent, draft or only partly inside the window | `#/hr` |
+| GAP-P03 | A payroll month in the window has no approved payroll (absent or draft); a month the window cuts short is allocated by working days instead, and is named in the gap note only when it cannot be counted | `#/hr/payroll` |
 
 Every remaining gap appears in the screen's Data gaps panel and in the email accounts block; none is drawn as zero. A figure that can be proved is shown even when another input is missing; gross profit is labelled partial and net profit is withheld.
 
@@ -466,7 +481,7 @@ Every remaining gap appears in the screen's Data gaps panel and in the email acc
 | Check | Result |
 |---|---|
 | Accounts report tests | 9 tests in `tests/test_accounts_reports.py`: role gate (`accounts:read` is refused), dates and state validation, ageing and trial-balance reconciliation, Overview tiles equal the report, region filter scope, state and trend sums, gap semantics, both comparison modes with a zero base, email accounts block equal to the report. `test_missing_expenses_and_profit_are_gaps_not_zeroes` asserts GAP-A01/A02 are gone and GAP-P02/P03 are raised instead. |
-| Profit and loss tests | 11 tests in `tests/test_profit_loss.py`: the hand-calculated month (revenue 1,000, returns 100, COGS 400, expenses 150, payroll 200, net profit 150) with GST present and proved not to change profit; non-creditable GST added to expense cost; GAP-P01, GAP-P02 and GAP-P03 cases; CSV, reconciliation CSV, XLSX and PDF opened and parsed; server-side 403s for sales, viewer and employee; sidebar mapping and role visibility |
+| Profit and loss tests | 12 tests in `tests/test_profit_loss.py`: the hand-calculated month (revenue 1,000, returns 100, COGS 400, expenses 150, payroll 200, net profit 150) with GST present and proved not to change profit; non-creditable GST added to expense cost; GAP-P01, GAP-P02 and GAP-P03 cases; `test_cut_month_is_allocated_by_working_days_not_guessed` proves a window ending on the 15th of an approved month returns the working-day share as `prorated`/`allocated` and that the whole month stays unallocated at 900.00; CSV, reconciliation CSV, XLSX and PDF opened and parsed; server-side 403s for sales, viewer and employee; sidebar mapping and role visibility |
 | Costing tests | 18 tests in `tests/test_costing.py`: PO rate on receipt, company-wide weighted average, two invoices on one order, partial dispatch, price-only and stock-return credit notes, partial/NULL cost when no cost exists (never zero), product-row lock and concurrency, transfer/adjustment rows store NULL, audited correction with period lock (HTTP 423), dry-run backfill |
 | Expense tests | 8 tests in `tests/test_expenses.py`: heads, entries, approval threshold switch and amount, non-creditable GST flag, creator cannot decide, reversal, receipts and settings |
 | Reconciliation | The report's nine checks compare the statement with independent SQL over invoices, notes, expenses and payroll; `reconciled` is the conjunction, not a self-comparison |
@@ -478,9 +493,9 @@ Every remaining gap appears in the screen's Data gaps panel and in the email acc
 
 1. **Role for the MD.** There is no seeded MD login. Create an `md` role, grant `accounts:reports` (and `accounts:read` if the statements should be visible), and assign it to the MD user.
 2. **Region scope.** Only flows that carry a buyer state can be filtered. A state filter does not narrow balances or cash; the screen says so. If you need a balance split by state, outstanding must be grouped on the distributor state at invoice time, which needs a stored snapshot.
-3. **Expense tracking start.** Expenses count only from `expense_settings.tracked_from`; a window that starts earlier raises GAP-P02 rather than treating untracked months as zero. Payroll likewise counts whole approved months only and is never prorated.
-4. **Year-end close.** Accounting months can be locked (the HR period-lock pattern, scope `accounting`). A locked month refuses purchase-cost corrections and expense creation or reversal. Invoice changes, credit notes, receipts, payments and a year-end close that freezes every document are not covered (GAP-A03).
-5. **Vouchers** remain receipts and payments; the party ledger is the drill-down, and it links the document rather than a voucher (GAP-A08).
+3. **Expense tracking start.** Expenses count only from `expense_settings.tracked_from`; a window that starts earlier raises GAP-P02 rather than treating untracked months as zero. Payroll counts only approved months; a month the window cuts short is allocated by working days (D-36), and a month with no approved payroll raises GAP-P03 rather than being estimated.
+4. **Year-end close — closed 3 Nov 2026.** A completed financial year can be closed (migration `0025`, `/api/accounts/financial-years`). It refuses every dated document with HTTP 423 — dispatch and invoice, receipts and payments, credit/debit notes, invoice cancellation, expenses, cost corrections and free-sample notes — until the Administrator reopens it with a reason. Accounting months can still be locked (scope `accounting` in `hr_period_locks`) as the narrower gate for routine corrections.
+5. **Vouchers — closed 3 Nov 2026.** A voucher now carries its own lines and a draft/posted/reversed state (migration `0027`); the day book lists posted and reversed vouchers, and the balance sheet merges them with openings and documents. A document still does not post itself as a voucher: the party ledger remains the document drill-down, and the voucher is the manual adjustment layer.
 6. **Exports.** The Accounts screen exports CSV; the P&L report exports CSV, XLSX and PDF with its reconciliation table and notes; the email pack uses the same attachment builder.
 
 ## 20. Scheduled email reports

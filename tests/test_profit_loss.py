@@ -11,7 +11,7 @@ import io
 from calendar import monthrange
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,9 +23,11 @@ from sqlalchemy import select
 from app.core.db import SessionLocal
 from app.models.core import (Batch, CreditNote, CreditNoteLine, Invoice, InvoiceLine,
                              Product, SalesOrder, SalesOrderLine, User, Warehouse)
+from app.models.users import Employee
 from app.models.expenses import APPROVED, Expense, ExpenseHead, ExpenseSettings
 from app.models.hr import PayrollEntry, PayrollPeriod
 from app.services import costing, profit_loss
+from app.services import hr as hr_svc
 from app.services.inventory import post_movement
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -356,6 +358,46 @@ def test_expenses_before_tracking_start_are_a_gap_not_a_zero(client, world):
     assert pl["net_profit"]["available"] is False
 
 
+def test_cut_month_is_allocated_by_working_days_not_guessed(client, world):
+    """An approved month the window cuts short counts its working-day share."""
+    month = (2041, 11)
+    with SessionLocal() as db:
+        admin = _admin(db)
+        period = PayrollPeriod(year=month[0], month=month[1], status="approved")
+        db.add(period)
+        db.flush()
+        db.add(PayrollEntry(period_id=period.id, employee_id=admin.employee_id,
+                            gross=Decimal("900.00"), net=Decimal("900.00"),
+                            status="approved"))
+        db.commit()
+        employee = db.get(Employee, admin.employee_id)
+        days = hr_svc.working_days(db, employee, *month)
+
+    cut = date(month[0], month[1], 15)
+    inside = [day for day in days if day <= cut]
+    assert 0 < len(inside) < len(days)
+    expected = (Decimal("900.00") * Decimal(len(inside)) / Decimal(len(days))
+                ).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+    with _tracking_from(date(2030, 1, 1)), SessionLocal() as db:
+        pl = profit_loss.statement(db, date(month[0], month[1], 1), cut)
+    assert pl["payroll"]["complete"] is True
+    item = next(i for i in pl["payroll"]["periods"]
+                if (i["year"], i["month"]) == month)
+    assert item["prorated"] is True
+    assert item["gross"] == _dec("900.00")
+    assert item["allocated"] == expected
+    assert pl["payroll"]["total"] == expected
+    assert expected < _dec("900.00")
+
+    # The whole month still counts in full and is not marked as allocated.
+    month_start, month_end = _first_last(*month)
+    with _tracking_from(date(2030, 1, 1)), SessionLocal() as db:
+        whole = profit_loss.statement(db, month_start, month_end)
+    assert whole["payroll"]["total"] == _dec("900.00")
+    assert all(not i.get("prorated") for i in whole["payroll"]["periods"])
+
+
 def test_payroll_gap_names_absent_and_unapproved_months(client, world):
     with SessionLocal() as db:
         period = PayrollPeriod(year=2041, month=10, status="draft")
@@ -374,7 +416,7 @@ def test_payroll_gap_names_absent_and_unapproved_months(client, world):
             pl = profit_loss.statement(db, start, end)
         assert pl["payroll"]["complete"] is False
         gap = next(gap for gap in pl["gaps"] if gap["code"] == "GAP-P03")
-        assert gap["fix"] == "#/hr"
+        assert gap["fix"] == "#/hr/payroll"
         assert "2041-09 (no period)" in gap["detail"]
         assert "2041-10 (draft)" in gap["detail"]
         assert pl["payroll"]["total"] == _dec("0.00")

@@ -4,7 +4,7 @@
 **Stage:** 3 — audit registers, refreshed after the Phase 3 verification
 **Date:** 31 October 2026; role grants and guard counts refreshed 1 November 2026
 **Sources:** `app/core/permissions.py` (`PERMISSIONS`, `BASELINE_ROLE_PERMS`), the live `roles` table (read-only query), `app/core/rbac.py`, and every `require(...)` / `require_admin(...)` / `is_admin(...)` call site under `app/api/`.
-**Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand. The 1 November refresh adds `accounts:reports` and `email:manage` to the matrices and recounts the literal guards after the HR and Accounts reporting work. The 2 November refresh adds `expense:read`/`expense:write` (46 keys, 12 groups) after the expense backend; the expense rows are still Administrator-only and the UI is Stage 3. The Stage 2 cost work adds no key: the audited PO cost correction is a second `accounts:write` route (`POST /api/accounts/costs/correction`). The 2 November FOC refresh adds `foc:read`/`foc:write`/`foc:approve` (49 keys, still 12 groups); migration 0023 grants them to the Administrator, inventory and viewer roles. `foc:approve` is Administrator-only.
+**Change note:** no application code, configuration or business data was changed to produce this document. Every table below was generated from the two sources above rather than typed by hand. The 1 November refresh adds `accounts:reports` and `email:manage` to the matrices and recounts the literal guards after the HR and Accounts reporting work. The 2 November refresh adds `expense:read`/`expense:write` (46 keys, 12 groups) after the expense backend; the expense rows are still Administrator-only and the UI is Stage 3. The Stage 2 cost work adds no key: the audited PO cost correction is a second `accounts:write` route (`POST /api/accounts/costs/correction`). The 2 November FOC refresh adds `foc:read`/`foc:write`/`foc:approve` (49 keys, still 12 groups); migration 0023 grants them to the Administrator, inventory and viewer roles. `foc:approve` is Administrator-only. The 3 November ledger refresh adds no key: vouchers, opening balances, ledger heads and bank reconciliation reuse `accounts:read` and `accounts:write`, and their literal guard counts are recounted below.
 
 ## How permissions are enforced
 
@@ -16,6 +16,7 @@
 | A forced password change blocks everything else | `ALLOW_WHILE_MUST_CHANGE` at `rbac.py:27-29` | Only `/api/auth/me`, `/api/auth/logout`, `/api/auth/change-password` are reachable until the password is changed. |
 | Session revocation is separate from permissions | `token_version` check at `rbac.py:43-54` | Password change, admin reset and deactivation revoke existing cookies with **401 Session expired**. |
 | Being signed in is not enough | `require_login` at `rbac.py:94-98` | Still honours the forced password change. |
+| The Administrator second factor is a **role** rule, not a permission key | `requires_totp(user)` in `app/services/totp.py`; `current_user` in `rbac.py` refuses a `totp_enabled` account whose session lacks the `otp` claim | The role `admin` or `super_admin` must sign in with a TOTP code; no permission can grant or waive it. A custom role never receives it. The login step issues no session for these roles until the code is accepted. See [`ADMIN_2FA.md`](ADMIN_2FA.md) and decision D-46. |
 
 Two endpoints add their own administrator checks rather than relying on `require_admin`:
 
@@ -163,6 +164,8 @@ After migration 0023 the live Administrator set matches the 49-key catalogue exa
 
 `accounts:reports` gates the Accounts dashboard, the `report` and report-pack downloads and the Accounts e-mail block. It is granted only to the Administrator in the live data; `accounts:read` alone does not open them (verified live in `docs/VERIFICATION_REPORT.md` §5).
 
+Receipts, payments and advances use the same two keys: `GET /api/accounts/advances` and the party ledgers need `accounts:read`, while `POST /api/accounts/payments` (either an `outstanding` settlement or an `advance` entry) needs `accounts:write`. A role with only `accounts:read`, such as `sales`, can see a distributor's available advance but cannot record one. The server check is asserted for sales and viewer in `tests/test_accounts_advances.py::test_advances_need_accounts_rights`.
+
 `expense:read` is the parent gate for the expense screens and exports; `expense:write` is its child and covers recording an expense, reversing an approved one, uploading its receipt and editing the heads. Editing the approval switch and threshold additionally needs the Administrator role (`require_admin("expense:write")`). No non-Administrator baseline role holds either key, so the module stays closed to other staff until a role is granted them. Recording and reversal are audit events (`expense.create`, `expense.reverse`, `expense.approval`, `expense.attachment`).
 
 ### Leads
@@ -202,22 +205,22 @@ Report **viewing** is not governed by `report:export` alone: each report declare
 
 ## Route groups by permission
 
-Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1 November 2026 after the HR upgrade, HR outputs and Accounts reporting. Routes that call `_can(...)` inside the handler (for example the bank file's `hr:confidential` check) are not double-counted here.
+Counts are the literal `require(...)` call sites in `app/api/`, regenerated on 1 November 2026 after the HR upgrade, HR outputs and Accounts reporting. Routes that call `_can(...)` inside the handler (for example the bank file's `hr:confidential` check) are not double-counted here. The three `accounts:*` rows were recounted on 3 November 2026 after the GST, statutory, ledger, receivables-by-distributor and advances work (`grep -rn 'Depends(require("accounts:..."))' app/api`).
 
 | Permission | Routes guarded | Representative surface |
 |---|---:|---|
+| `accounts:read` | 29 | Statements, ledger heads, opening balances, vouchers, day book, balance sheet, bank statements and reconciliation, supplier bills, filed returns, statutory dues, receipts/payments reads, party advances and receivables by distributor |
 | `hr:write` | 26 | Employees, HR configuration, leave balances, salary, locks, templates |
+| `accounts:write` | 23 | Receipts/payments, the audited PO cost correction, supplier bills and reversals, filed returns, challans, ledger heads, openings, vouchers and posting, bank statements and matching |
 | `hr:read` | 20 | HR dashboard, employee master, profile, attendance/leave reads, outputs |
 | `sales:read` | 12 | Sales orders, invoices, credit/debit notes, distributors, customers, expiry history |
 | `hr:payroll_prepare` | 12 | Payroll runs, register, bank file, statutory summary, payslips |
 | `user:manage` | 10 | Users, roles, secondary password, employee login link |
-| `accounts:read` | 7 | Outstanding, party ledgers, GST register, trial balance, receipts/payments reads |
 | `note:write` / `stock:read` / `hr:attendance_self` / `tax:read` | 6 each | Notes; stock and warehouses; own check-in/out and requests; rate master and slabs |
 | `stock:write` / `lead:write` / `print:document` / `tax:write` / `expense:read` / `expense:write` | 5 each | Warehouses and POs; leads; PDFs; settings and rates; expense reads and writes |
 | `audit:read` | 4 | Audit trail and activity feed |
 | `lead:read` / `sales:write` / `supplier:read` | 3 each | Leads; sales orders; suppliers |
 | `accounts:reports` | 2 | Accounts dashboard and report export |
-| `accounts:write` | 2 | Receipts/payments and the audited PO cost correction |
 | `email:manage` | 2 | Scheduled recipients/schedules and delivery administration |
 | `employee:read` / `employee:write` / `approval:read` / `invoice:write` / `invoice:cancel` / `hr:attendance_manage` / `hr:payroll_approve` / `hr:reports` / `distributor:write` / `product:read` / `product:write` / `supplier:write` | 2 each | Respective masters, approvals and HR actions |
 | `db:reset` / `credit:manage` / `hr:confidential` / `lead:assign` / `report:export` / `dispatch:write` / `approval:decide` / `supplier:bank` | 1 each | Reset; credit limits; confidential reads (most use `_can` inside); reassignment; export; dispatch; decisions; bank-change request |
@@ -237,6 +240,7 @@ The catalogue has **49** keys. `accounts:reports`, `email:manage`, the two expen
 | Frozen role parity with the seeded roles | **VERIFIED** | `tests/test_roles_parity.py` — catalogue coverage, admin completeness, baseline subset, seeded-role equality and unknown-key rejection |
 | Authentication, permission denial, the Administrator role gate, immediate DB-role edits, baseline fallback, deactivation and forced password change | **VERIFIED** | `tests/test_authz.py` (7 tests) |
 | Parent-child rules, admin-only locking and API enforcement | **VERIFIED** | `tests/test_permission_tree.py` (11 tests); browser check in `docs/VERIFICATION_REPORT.md` §5 |
+| Administrator second factor: RFC 6238 vectors, replay, non-admin unaffected, no session before enrollment, recovery code single use, session without the `otp` claim refused, five-code lock | **VERIFIED** | `tests/test_totp.py` (8 tests); enrollment walked in a browser, code-entry step not re-exercised; migration `0029_totp` on the test database only — `docs/VERIFICATION_REPORT.md` §25.5 |
 | Central module switches and the API gate | **VERIFIED** | `tests/test_feature_switches.py` (10 tests); `docs/VERIFICATION_REPORT.md` §5 |
 | Live role matrix for HR, payroll, accounts reporting and the audit/user surfaces | **VERIFIED** | `docs/VERIFICATION_REPORT.md` §5: admin/admin2 `200`, HR manager `200` on HR and `403` on payroll/bank/audit/users, business roles `403` on HR |
 | Every individual guarded route is exercised | **PARTIAL** | Decision paths are covered by `tests/test_approvals.py`, `tests/test_hr.py` and the Phase 3 live GET sweep (75 routes); the gate-type tests are not repeated for every endpoint |

@@ -11,7 +11,7 @@ with `hr:attendance_self`; team-wide actions need the corresponding manager/HR
 right. Decisions go through the central Approvals module (`hr_approvals.py`).
 """
 from calendar import monthrange
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, date as date_cls, datetime, time, timedelta, timezone
 from decimal import Decimal
 import csv
 import io
@@ -1779,6 +1779,21 @@ class HolidayIn(BaseModel):
     location_id: int | None = None
 
 
+class HolidayPatch(BaseModel):
+    """Send only what changes. An explicit null clears the branch or office."""
+    # The field is named date, which shadows the type in this class body, so the
+    # annotation uses the alias.
+    date: date_cls | None = None
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    branch_id: int | None = None
+    location_id: int | None = None
+
+
+class DepartmentPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=100)
+    status: Literal["active", "inactive"] | None = None
+
+
 def _shift_dict(s: Shift) -> dict:
     return {"id": s.id, "name": s.name,
             "start_time": s.start_time.strftime("%H:%M"),
@@ -1848,9 +1863,28 @@ def list_holidays(year: int | None = None, db: Session = Depends(get_db),
              "location_id": h.location_id} for h in db.scalars(stmt.order_by(Holiday.date)).all()]
 
 
+def _check_holiday_scope(db: Session, branch_id: int | None,
+                         location_id: int | None) -> None:
+    if branch_id is not None and not db.get(Branch, branch_id):
+        raise HTTPException(404, "Branch not found")
+    if location_id is not None:
+        office = db.get(WorkLocation, location_id)
+        if not office:
+            raise HTTPException(404, "Office not found")
+        if branch_id is not None and office.branch_id is not None \
+                and office.branch_id != branch_id:
+            raise HTTPException(422, "That office belongs to a different branch")
+
+
+def _holiday_dict(h: Holiday) -> dict:
+    return {"id": h.id, "date": h.date, "name": h.name,
+            "branch_id": h.branch_id, "location_id": h.location_id}
+
+
 @router.post("/holidays", status_code=201)
 def create_holiday(body: HolidayIn, db: Session = Depends(get_db),
                    actor=Depends(require("hr:write"))):
+    _check_holiday_scope(db, body.branch_id, body.location_id)
     h = Holiday(**body.model_dump())
     db.add(h)
     try:
@@ -1860,7 +1894,41 @@ def create_holiday(body: HolidayIn, db: Session = Depends(get_db),
     audit(db, actor.id, "hr.holiday.create", f"holiday:{h.id}",
           {"date": str(h.date), "name": h.name})
     db.commit()
-    return {"id": h.id, "date": h.date, "name": h.name}
+    return _holiday_dict(h)
+
+
+@router.patch("/holidays/{holiday_id}")
+def update_holiday(holiday_id: int, body: HolidayPatch, db: Session = Depends(get_db),
+                   actor=Depends(require("hr:write"))):
+    """Correct a holiday. Attendance already marked keeps the status it was
+    recorded with; a new date applies to future marking only."""
+    h = db.get(Holiday, holiday_id)
+    if not h:
+        raise HTTPException(404, "Holiday not found")
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(422, "No changes were supplied")
+    if data.get("date", h.date) is None or data.get("name", h.name) is None:
+        raise HTTPException(422, "A holiday needs a date and a name")
+    branch_id = data["branch_id"] if "branch_id" in data else h.branch_id
+    location_id = data["location_id"] if "location_id" in data else h.location_id
+    _check_holiday_scope(db, branch_id, location_id)
+    changes = {}
+    for key, value in data.items():
+        old = getattr(h, key)
+        if old != value:
+            changes[key] = {"old": str(old) if old is not None else None,
+                            "new": str(value) if value is not None else None}
+            setattr(h, key, value)
+    if changes:
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback(); raise HTTPException(409, "Holiday already exists")
+        audit(db, actor.id, "hr.holiday.update", f"holiday:{h.id}",
+              {"name": h.name, **changes})
+        db.commit()
+    return _holiday_dict(h)
 
 
 @router.get("/departments")
@@ -1881,6 +1949,47 @@ def create_department(body: BranchIn, db: Session = Depends(get_db),
     audit(db, actor.id, "hr.department.create", f"department:{d.id}", {"name": d.name})
     db.commit()
     return {"id": d.id, "code": d.code, "name": d.name}
+
+
+@router.patch("/departments/{department_id}")
+def update_department(department_id: int, body: DepartmentPatch, db: Session = Depends(get_db),
+                      actor=Depends(require("hr:write"))):
+    """Rename or retire a department. The code is permanent.
+
+    Employees linked by department_id show the new name in the directory; the
+    denormalised name on those rows is updated with the master, never inferred
+    for anyone else.
+    """
+    d = db.get(Department, department_id)
+    if not d:
+        raise HTTPException(404, "Department not found")
+    data = body.model_dump(exclude_unset=True)
+    if not data or all(v is None for v in data.values()):
+        raise HTTPException(422, "No changes were supplied")
+    changes: dict = {}
+    if data.get("name") is not None and data["name"] != d.name:
+        if db.scalar(select(Department).where(Department.name == data["name"],
+                                              Department.id != d.id)):
+            raise HTTPException(409, "Department name exists")
+        changes["name"] = {"old": d.name, "new": data["name"]}
+        d.name = data["name"]
+        linked = db.scalars(select(Employee).where(
+            Employee.department_id == d.id)).all()
+        for emp in linked:
+            emp.department = d.name
+        changes["employees_renamed"] = len(linked)
+    if data.get("status") is not None and data["status"] != d.status:
+        changes["status"] = {"old": d.status, "new": data["status"]}
+        d.status = data["status"]
+    if changes:
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback(); raise HTTPException(409, "Department name exists")
+        audit(db, actor.id, "hr.department.update", f"department:{d.id}",
+              {"code": d.code, **changes})
+        db.commit()
+    return {"id": d.id, "code": d.code, "name": d.name, "status": d.status}
 
 
 # --------------------------------------------------------------- attendance
@@ -2931,11 +3040,17 @@ def create_structure(body: StructureIn, db: Session = Depends(get_db),
     emp = db.get(Employee, body.employee_id)
     if not emp:
         raise HTTPException(404, "Employee not found")
+    component_ids = [line.component_id for line in body.lines]
+    if len(component_ids) != len(set(component_ids)):
+        raise HTTPException(422, "Each salary component can appear only once")
     # Close the previous active structure the day before the revision.
     prev = db.scalar(select(SalaryStructure).where(
         SalaryStructure.employee_id == emp.id, SalaryStructure.status == "active")
         .order_by(SalaryStructure.effective_from.desc()))
-    if prev and prev.effective_from < body.effective_from:
+    if prev and prev.effective_from >= body.effective_from:
+        raise HTTPException(
+            409, "A structure already starts on or after this date; choose a later effective date")
+    if prev:
         prev.effective_to = body.effective_from - timedelta(days=1)
     s = SalaryStructure(employee_id=emp.id, effective_from=body.effective_from,
                         payment_mode=body.payment_mode, created_by=actor.id)
@@ -3001,6 +3116,7 @@ def get_period(period_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Payroll period not found")
     emps = {e.id: e for e in db.scalars(select(Employee)).all()}
     return {"id": p.id, "year": p.year, "month": p.month, "status": p.status,
+            "skipped": payroll_svc.skipped_employees(db, p),
             "entries": [{"id": e.id, "employee_id": e.employee_id,
                          "employee": emps[e.employee_id].full_name if e.employee_id in emps else "?",
                          "employee_code": emps[e.employee_id].code if e.employee_id in emps else "",
@@ -3032,11 +3148,14 @@ def prepare_payroll(period_id: int, db: Session = Depends(get_db),
     p.status = "under_review"
     p.prepared_by = actor.id
     p.prepared_at = datetime.now(timezone.utc)
+    skipped = payroll_svc.skipped_employees(db, p, entries=entries)
     audit(db, actor.id, "hr.payroll.prepare", f"payroll:{p.id}",
           {"year": p.year, "month": p.month, "entries": len(entries),
+           "skipped": [s["code"] for s in skipped],
            "net": str(sum((e.net for e in entries), Decimal(0)))})
     db.commit()
     return {"id": p.id, "status": p.status, "entries": len(entries),
+            "skipped": skipped,
             "net": _m(sum((e.net for e in entries), Decimal(0)))}
 
 
@@ -3377,9 +3496,10 @@ def payroll_reconciliation(period_id: int, db: Session = Depends(get_db),
             "gaps": gaps,
             "accounts_note": "Payroll is carried into the profit and loss as gross salary "
                              "for this approved period, so it is never also recorded as an "
-                             "expense. There is no journal or voucher posting (GAP-A08). "
+                             "expense. It is not posted as a voucher automatically; record "
+                             "a journal in Accounts if it must reach the stored ledger. "
                              "The bank file total is the figure Accounts can match against "
-                             "the bank statement; no ledger balance exists to reconcile it to."}
+                             "the bank statement."}
 
 
 @router.get("/me/payslips")

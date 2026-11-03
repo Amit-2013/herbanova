@@ -20,6 +20,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Date, cast, func, or_, select, text
@@ -259,6 +260,37 @@ def _top_products(db: Session, start: date, end: date) -> dict:
             "note": "Revenue is taxable value (before GST)."}
 
 
+def _category_sales(db: Session, start: date, end: date) -> dict:
+    """Issued-invoice value grouped by the product category the user captured.
+
+    A product with no category is grouped as "Uncategorised" and named as such.
+    Nothing is inferred from the product name or SKU.
+    """
+    group = func.coalesce(func.nullif(func.trim(Product.category), ""), "Uncategorised")
+    rows = db.execute(
+        select(group, func.coalesce(func.sum(InvoiceLine.taxable_value), 0),
+               func.coalesce(func.sum(InvoiceLine.qty), 0),
+               func.count(func.distinct(Invoice.id)))
+        .join(Product, Product.id == InvoiceLine.product_id)
+        .join(Invoice, Invoice.id == InvoiceLine.invoice_id)
+        .where(Invoice.status == "issued", Invoice.invoice_date >= start,
+               Invoice.invoice_date <= end)
+        .group_by(group)
+        .order_by(func.sum(InvoiceLine.taxable_value).desc())).all()
+    totals = {name: Decimal(revenue or 0) for name, revenue, _qty, _count in rows}
+    classified = sum((value for name, value in totals.items()
+                      if name != "Uncategorised"), Decimal(0))
+    uncategorised = totals.get("Uncategorised", Decimal(0))
+    out = [{"category": name, "revenue": _money(revenue), "qty": qty,
+            "invoices": int(count)} for name, revenue, qty, count in rows]
+    return {"available": True, "rows": out,
+            "total": _money(classified + uncategorised),
+            "classified_total": _money(classified),
+            "uncategorised_total": _money(uncategorised),
+            "note": ("Revenue is taxable value (before GST). Products with no category "
+                     "are shown as Uncategorised, never guessed.")}
+
+
 def _stock_by_warehouse(db: Session) -> list[dict]:
     rows = capacity.warehouse_positions(db)
     total = sum((Decimal(r["used_units"]) for r in rows), Decimal(0))
@@ -397,10 +429,20 @@ def _attention(db: Session, user, perms: set[str], today: date,
                       "severity": "warn" if admin_items else "ok",
                       "href": "#/approvals", "available": True})
     if stock is not None:
-        items.append({"key": "low_stock", "label": "Low stock against reorder level",
-                      "severity": "off", "count": None, "available": False,
-                      "gap": "GAP-D02",
-                      "note": "No reorder level is captured."})
+        levels = db.execute(
+            select(Product.id, Product.sku, Product.name, Product.reorder_level,
+                   func.coalesce(func.sum(Batch.on_hand), 0))
+            .join(Batch, Batch.product_id == Product.id, isouter=True)
+            .where(Product.reorder_level.is_not(None))
+            .group_by(Product.id, Product.sku, Product.name, Product.reorder_level)
+            .order_by(Product.sku)).all()
+        low = [row for row in levels if row[4] < row[3]]
+        if levels:
+            names = ", ".join(f"{sku} ({qty:f} of {level:f})" for _, sku, _, level, qty in low[:3])
+            items.append({"key": "low_stock", "label": "Low stock against reorder level",
+                          "count": len(low), "severity": "warn" if low else "ok",
+                          "href": "#/inventory/stock", "available": True,
+                          "note": names or "No product is below its reorder level."})
     return items
 
 
@@ -645,19 +687,56 @@ def _pipeline(db: Session, perms: set[str]) -> dict:
                  "value": _money(counts.get(key, (0, 0))[1])}
                 for key, label in SALES_STATUS_LABELS.items()]
         dispatched = db.execute(
-            select(SalesOrder.created_at, SalesOrder.dispatched_at)
+            select(SalesOrder.created_at, SalesOrder.approved_at,
+                   SalesOrder.dispatched_at, SalesOrder.expected_delivery_date)
             .where(SalesOrder.status == "dispatched",
                    SalesOrder.dispatched_at.is_not(None))).all()
         days = [(done - raised).total_seconds() / 86400
-                for raised, done in dispatched
+                for raised, _approved, done, _promise in dispatched
                 if raised is not None and done is not None and done >= raised]
+        approval_days = [(approved - raised).total_seconds() / 86400
+                         for raised, approved, _done, _promise in dispatched
+                         if raised is not None and approved is not None and approved >= raised]
+        after_days = [(done - approved).total_seconds() / 86400
+                      for _raised, approved, done, _promise in dispatched
+                      if approved is not None and done is not None and done >= approved]
+        late = []
+        on_time = 0
+        for _raised, _approved, done, promise in dispatched:
+            if promise is None:
+                continue
+            delivered = done.astimezone(ZoneInfo(REPORT_TZ)).date()
+            if delivered <= promise:
+                on_time += 1
+            else:
+                late.append((delivered - promise).days)
+        overdue_open = db.scalar(
+            select(func.count()).where(
+                SalesOrder.status.in_(("pending_approval", "approved")),
+                SalesOrder.expected_delivery_date.is_not(None),
+                SalesOrder.expected_delivery_date < date.today())) or 0
         out["sales"] = {
             "rows": rows, "total": sum(r["count"] for r in rows),
             "dispatch": {
                 "measured": len(days),
                 "average_days": round(sum(days) / len(days), 1) if days else None,
-                "note": ("From the order being raised to dispatch. Approval time is "
-                         "not stored separately, so it is included.")}}
+                "approval_measured": len(approval_days),
+                "approval_average_days": (round(sum(approval_days) / len(approval_days), 1)
+                                          if approval_days else None),
+                "after_approval_measured": len(after_days),
+                "after_approval_average_days": (round(sum(after_days) / len(after_days), 1)
+                                                if after_days else None),
+                "delivery": {
+                    "measured": on_time + len(late), "on_time": on_time,
+                    "late": len(late),
+                    "average_days_late": (round(sum(late) / len(late), 1)
+                                          if late else None)},
+                "overdue_open": int(overdue_open),
+                "note": ("Raised to dispatch runs from the order date to dispatch. "
+                         "Approval and dispatch are also measured separately where the "
+                         "approval stamp exists (orders approved from this release). "
+                         "Lateness compares the dispatch date with the promised date; an "
+                         "order without a promise is not counted.")}}
     if "lead:read" in perms:
         counts = dict(db.execute(select(Lead.status, func.count())
                                  .group_by(Lead.status)).all())
@@ -1670,7 +1749,7 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
     if out["orders_ready"] is not None:
         tile("orders_ready", "Orders ready to dispatch", out["orders_ready"],
              "#/sales", "Approved and not yet dispatched, as of today.",
-             trend_note="No history yet: approval time is not stored on the order.")
+             trend_note="No history yet: the tile counts orders that are approved today.")
     if out["approvals_waiting"] is not None:
         tile("approvals_waiting", "Approvals waiting", out["approvals_waiting"],
              "#/approvals", "Requests still pending a decision, as of today.",
@@ -1720,6 +1799,11 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
         pl = profit_loss.statement(db, start, end)
         net_available = pl["net_profit"]["available"]
         first_gap = pl["gaps"][0] if pl["gaps"] else None
+        # A figure the records prove is shown even when the window is incomplete,
+        # labelled partial; the gap chip stays for a window with nothing to show.
+        expenses_known = (pl["expenses"]["complete"]
+                          or pl["expenses"]["total"] > 0)
+        expenses_partial = expenses_known and not pl["expenses"]["complete"]
         out["accounts"] = {
             "from": start.isoformat(), "to": end.isoformat(),
             "receivable_total": summary["outstanding"]["total"],
@@ -1733,9 +1817,15 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
             "gross_profit_label": pl["gross_profit"]["label"],
             "invoices_costed": pl["cogs"]["invoices_costed"],
             "invoices_total": pl["cogs"]["invoices_total"],
-            "expenses": (_money(pl["expenses"]["total"])
-                         if pl["expenses"]["complete"] else None),
-            "expenses_gap": None if pl["expenses"]["complete"] else "GAP-P02",
+            "expenses": _money(pl["expenses"]["total"]) if expenses_known else None,
+            "expenses_gap": (None if expenses_known else "GAP-P02"),
+            "expenses_partial": expenses_partial,
+            "expenses_note": (
+                "Approved entries in the window; non-creditable GST is part of the cost."
+                if pl["expenses"]["complete"] else
+                (f"Partial: expenses are recorded from "
+                 f"{pl['expenses']['tracked_from'] or 'no configured date'}."
+                 if expenses_known else None)),
             "net_profit": _money(pl["net_profit"]["value"]) if net_available else None,
             "net_profit_gap": (None if net_available else
                                (first_gap["code"] if first_gap else "GAP-P02")),
@@ -1759,10 +1849,7 @@ def dashboard(from_date: date | None = None, to_date: date | None = None,
         out["approvals"] = _approvals_section(db, user, perms)
     if "sales:read" in perms:
         out["top_products"] = _top_products(db, start, end)
-        out["category_sales"] = {
-            "available": False, "gap": "GAP-D01",
-            "note": "No product category or brand is captured, so sales cannot be "
-                    "grouped by category without inventing one."}
+        out["category_sales"] = _category_sales(db, start, end)
     if "audit:read" in perms:
         out["recent_activity"] = _activity(db, start=start, end=end)
 

@@ -9,10 +9,12 @@ Payroll is the gross salary of approved, processed or paid monthly periods, and
 never both expenses and payroll for the same money: the system payroll head
 refuses manual entries.
 
-A month of payroll counts only when the whole month lies inside the window and
-its period is approved or later. A partial month is never prorated, because a
-prorated salary is a guess. The same rule applies to expense tracking: a window
-that starts before `expense_settings.tracked_from` has a gap, not a zero.
+A month of payroll counts in full when the whole month lies inside the window
+and its period is approved or later. When the window cuts a month short, the
+approved month's gross is allocated by each employee's working-day share of
+that month; the allocation is labelled and never applied to a month with no
+approved payroll. The same rule applies to expense tracking: a window that
+starts before `expense_settings.tracked_from` has a gap, not a zero.
 
 Net profit is reported only when every invoice is costed, expenses are tracked
 for the whole window and payroll is complete. Until then the statement shows the
@@ -30,7 +32,9 @@ from sqlalchemy.orm import Session
 from ..models.core import CreditNote, DebitNote, Invoice
 from ..models.expenses import APPROVED, Expense, ExpenseHead, ExpenseSettings
 from ..models.hr import PayrollEntry, PayrollPeriod
+from ..models.users import Employee
 from . import costing
+from . import hr as hr_svc
 
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -108,39 +112,80 @@ def _expenses(db: Session, start: date, end: date) -> dict:
     }
 
 
+def _period_gross(db: Session, period: PayrollPeriod) -> Decimal:
+    return Decimal(db.scalar(
+        select(func.coalesce(func.sum(PayrollEntry.gross), 0))
+        .where(PayrollEntry.period_id == period.id)) or 0)
+
+
+def _allocate(db: Session, period: PayrollPeriod, wstart: date, wend: date,
+              calendars: dict) -> Decimal:
+    """The part of an approved month that falls inside the window.
+
+    Each employee's own working-day calendar is the basis: payroll already
+    spreads fixed components over those days, so the share is of a recorded
+    gross, not a re-estimate of one. A month with no approved payroll is never
+    allocated and is reported as a gap instead.
+    """
+    total = ZERO
+    for entry in period.entries:
+        month_days = calendars.get((entry.employee_id, period.year, period.month))
+        if month_days is None:
+            employee = db.get(Employee, entry.employee_id)
+            month_days = (hr_svc.working_days(db, employee, period.year, period.month)
+                          if employee is not None else [])
+            calendars[(entry.employee_id, period.year, period.month)] = month_days
+        if not month_days:
+            continue
+        inside = sum(1 for day in month_days if wstart <= day <= wend)
+        total += Decimal(entry.gross) * Decimal(inside) / Decimal(len(month_days))
+    return money(total)
+
+
 def _payroll(db: Session, start: date, end: date) -> dict:
     periods = {(p.year, p.month): p for p in db.scalars(select(PayrollPeriod)).all()}
-    gross = {pid: Decimal(value) for pid, value in db.execute(
-        select(PayrollEntry.period_id,
-               func.coalesce(func.sum(PayrollEntry.gross), 0))
-        .group_by(PayrollEntry.period_id)).all()}
     included, missing, partial = [], [], []
     total = ZERO
+    calendars: dict = {}
     for year, month, first, last in _months(start, end):
         period = periods.get((year, month))
         status = period.status if period else None
-        value = gross.get(period.id, ZERO) if period else ZERO
         whole = first >= start and last <= end
-        item = {"year": year, "month": month, "status": status,
-                "gross": money(value)}
-        if not whole:
-            # A part-month salary cannot be included without prorating, which
-            # would invent a figure. It is named so the reader can widen the window.
+        item = {"year": year, "month": month, "status": status}
+        if whole:
+            value = _period_gross(db, period) if period else ZERO
+            item["gross"] = money(value)
+            if status in PAYROLL_GOOD:
+                item["included"] = True
+                included.append(item)
+                total += value
+            else:
+                item["included"] = False
+                missing.append(item)
+            continue
+        wstart, wend = max(start, first), min(end, last)
+        if status in PAYROLL_GOOD and period is not None:
+            allocated = _allocate(db, period, wstart, wend, calendars)
+            item.update(gross=money(_period_gross(db, period)), included=True,
+                        prorated=True, allocated=allocated,
+                        portion=f"{wstart.isoformat()} to {wend.isoformat()}")
+            included.append(item)
+            total += allocated
+        else:
+            # No approved payroll for this month: a share of it would be a guess,
+            # so the month is named as a gap and left out.
+            item["gross"] = money(_period_gross(db, period) if period else ZERO)
             item["included"] = False
             partial.append(item)
-        elif status in PAYROLL_GOOD:
-            item["included"] = True
-            included.append(item)
-            total += value
-        else:
-            item["included"] = False
-            missing.append(item)
     return {
         "total": money(total),
         "periods": included,
         "missing_months": missing,
         "partial_months": partial,
         "complete": not missing and not partial,
+        "method": ("A month wholly inside the window counts in full. A month cut by "
+                   "the window counts its approved gross allocated by each "
+                   "employee's working-day share of that month."),
     }
 
 
@@ -229,12 +274,13 @@ def statement(db: Session, start: date, end: date) -> dict:
         if absent:
             detail.append("Payroll is not approved for " + ", ".join(absent))
         if partly:
-            detail.append("Part of the window falls outside " + ", ".join(partly)
-                          + " and payroll is never prorated")
+            detail.append("Payroll is not approved for " + ", ".join(partly)
+                          + ", which the window only partly covers")
         gaps.append(_gap(
             "GAP-P03", "Payroll is incomplete for the window",
-            ". ".join(detail) + ". Payroll cost is left out rather than estimated.",
-            "#/hr", "Open HR"))
+            ". ".join(detail) + ". Only an approved month is counted, whole or "
+            "allocated by working days; nothing is estimated.",
+            "#/hr/payroll", "Open HR payroll"))
 
     return {
         "from": start.isoformat(),
@@ -277,7 +323,8 @@ def statement(db: Session, start: date, end: date) -> dict:
             "Costing method: weighted average per product, company-wide, captured when "
             "stock is issued.",
             "Payroll cost is gross salary from approved, processed or paid periods, "
-            "without employer contributions.",
+            "without employer contributions. A month the window cuts short is counted "
+            "by its working-day share and marked as allocated.",
             "Expenses are approved, non-reversed entries; non-creditable GST is added "
             "to cost and creditable GST is not.",
         ] + ([f"Expenses are recorded from {expenses['tracked_from']}."]

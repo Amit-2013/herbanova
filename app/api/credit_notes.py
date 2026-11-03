@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..core.db import get_db
 from ..core.rbac import require
 from ..models.core import CreditNote, Invoice, Warehouse
+from ..services import periods
 from ..services.audit import audit
 from ..services.notes import NoteError, create_credit_note
 
@@ -142,6 +143,10 @@ def get_credit_note(cn_id: int, db: Session = Depends(get_db), _=Depends(require
 @router.post("", response_model=CreditNoteOut, status_code=201)
 def issue_credit_note(body: CreditNoteIn, db: Session = Depends(get_db),
                       user=Depends(require("note:write"))):
+    try:
+        periods.refuse_if_closed(db, body.note_date or date.today(), "a credit note")
+    except periods.PeriodClosed as exc:
+        raise HTTPException(423, str(exc))
     try:
         note = create_credit_note(db, invoice_id=body.invoice_id, lines=body.lines,
                                   reason=body.reason, issued_by=user.id,

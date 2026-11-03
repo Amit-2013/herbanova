@@ -11,22 +11,21 @@ holds the user/role helpers from Module Phase 1 - the two must not collide.
 
 What this module does **not** claim:
 
-- Input tax. A purchase order records a cost, not a tax split, so there is no
-  purchase-side GST in the register. The outward register is complete; the input
-  register needs purchase invoices with tax, which the system does not capture
-  yet. `gst_register()` says so in its response instead of inventing figures.
+- Input tax. This function reports outward supplies only. Input tax comes from
+  supplier bills captured in `purchase_invoices`; `app/services/gst.py` composes
+  the input register, the net payable and the comparison with a filed return.
 - Statutory return formats. The register is a reconciliation aid in the shape of
   the GSTR-1 sections, not a filing file. A GST practitioner must review it
   before anything is filed (E-022 is still outstanding).
 """
 from collections import OrderedDict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models.accounts import RECEIPT, Payment
+from ..models.accounts import PAYMENT, RECEIPT, Payment, PaymentAllocation
 from ..models.core import (CreditNote, DebitNote, Distributor, Invoice, PurchaseOrder,
                            PurchaseOrderLine)
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
@@ -45,12 +44,49 @@ def _grand(document) -> Decimal:
 
 
 # --------------------------------------------------------------- outstanding
+def _allocated(db: Session, column, until: date | None = None) -> dict[int, Decimal]:
+    stmt = (select(column, func.coalesce(func.sum(PaymentAllocation.amount), 0))
+            .where(column.is_not(None)))
+    if until is not None:
+        stmt = stmt.where(PaymentAllocation.applied_on <= until)
+    return {i: money(v) for i, v in db.execute(stmt.group_by(column)).all()}
+
+
+def allocated_by_payment(db: Session, until: date | None = None) -> dict[int, Decimal]:
+    """How much of each receipt or payment has been settled against a document."""
+    return _allocated(db, PaymentAllocation.payment_id, until)
+
+
 def received_by_invoice(db: Session) -> dict[int, Decimal]:
-    rows = db.execute(
+    """Money settled against each invoice, from direct payments and allocations."""
+    out = {i: money(v) for i, v in db.execute(
         select(Payment.invoice_id, func.coalesce(func.sum(Payment.amount), 0))
         .where(Payment.kind == RECEIPT, Payment.invoice_id.is_not(None))
-        .group_by(Payment.invoice_id)).all()
-    return {i: money(v) for i, v in rows}
+        .group_by(Payment.invoice_id)).all()}
+    for invoice_id, amount in _allocated(db, PaymentAllocation.invoice_id).items():
+        out[invoice_id] = money(out.get(invoice_id, ZERO) + amount)
+    return out
+
+
+def receipt_movements(db: Session, until: date | None = None) -> dict[int, list[tuple[date, Decimal]]]:
+    """When each invoice was paid, for a windowed statement.
+
+    A receipt recorded directly against an invoice counts on its payment day; a
+    settlement added later counts on the day it was applied, which is what makes
+    an advance and a settlement separable at any date.
+    """
+    out: dict[int, list[tuple[date, Decimal]]] = {}
+    stmt = select(Payment).where(Payment.kind == RECEIPT, Payment.invoice_id.is_not(None))
+    if until is not None:
+        stmt = stmt.where(Payment.paid_on <= until)
+    for pay in db.scalars(stmt).all():
+        out.setdefault(pay.invoice_id, []).append((pay.paid_on, money(pay.amount)))
+    stmt = (select(PaymentAllocation).where(PaymentAllocation.invoice_id.is_not(None)))
+    if until is not None:
+        stmt = stmt.where(PaymentAllocation.applied_on <= until)
+    for row in db.scalars(stmt).all():
+        out.setdefault(row.invoice_id, []).append((row.applied_on, money(row.amount)))
+    return out
 
 
 def noted_by_invoice(db: Session) -> dict[int, Decimal]:
@@ -93,6 +129,8 @@ def receivable_rows(db: Session) -> list[dict]:
             "adjusted": adjusted,
             "received": got,
             "outstanding": money(_grand(inv) + adjusted - got),
+            "payment_terms_days": inv.payment_terms_days,
+            "due_date": inv.due_date,
         })
     return rows
 
@@ -121,23 +159,34 @@ def received_value_by_po(db: Session) -> dict[int, Decimal]:
 
 
 def paid_by_po(db: Session) -> dict[int, Decimal]:
-    rows = db.execute(
+    out = {i: money(v) for i, v in db.execute(
         select(Payment.purchase_order_id, func.coalesce(func.sum(Payment.amount), 0))
-        .where(Payment.kind == "payment", Payment.purchase_order_id.is_not(None))
-        .group_by(Payment.purchase_order_id)).all()
-    return {i: money(v) for i, v in rows}
+        .where(Payment.kind == PAYMENT, Payment.purchase_order_id.is_not(None))
+        .group_by(Payment.purchase_order_id)).all()}
+    for po_id, amount in _allocated(db, PaymentAllocation.purchase_order_id).items():
+        out[po_id] = money(out.get(po_id, ZERO) + amount)
+    return out
 
 
 def payable_rows(db: Session) -> list[dict]:
     received = received_value_by_po(db)
     paid = paid_by_po(db)
     names = dict(db.execute(select(Supplier.id, Supplier.name)).all())
+    terms = dict(db.execute(select(Supplier.id, Supplier.payment_terms_days)).all())
+    last_receipt = {
+        po_id: (stamp.date() if hasattr(stamp, "date") else stamp)
+        for po_id, stamp in db.execute(
+            select(GoodsReceipt.po_id, func.max(GoodsReceipt.received_at))
+            .group_by(GoodsReceipt.po_id)).all()}
     rows = []
     for po in db.scalars(select(PurchaseOrder).order_by(PurchaseOrder.id)).all():
         value = received.get(po.id, ZERO)
         if value <= 0:
             continue                      # nothing has arrived, so nothing is owed
         got = paid.get(po.id, ZERO)
+        received_on = last_receipt.get(po.id)
+        term_days = int(terms.get(po.supplier_id, 30) or 0)
+        due_on = (received_on + timedelta(days=term_days)) if received_on else None
         rows.append({
             "purchase_order_id": po.id,
             "number": po.po_number,
@@ -146,6 +195,9 @@ def payable_rows(db: Session) -> list[dict]:
             "received_value": value,
             "paid": got,
             "outstanding": money(value - got),
+            "received_on": received_on,
+            "terms_days": term_days,
+            "due_on": due_on,
         })
     return rows
 
@@ -160,22 +212,34 @@ BUCKETS: tuple[tuple[str, str, int, int | None], ...] = (
 )
 
 
+# How far ahead "due this week" reaches, counted from the as-at day inclusive.
+DUE_SOON_DAYS = 7
+
+
 def ageing_rows(db: Session, as_of: date | None = None) -> dict:
-    """Outstanding invoices grouped by age, in four buckets.
+    """Outstanding invoices grouped by age, with their due dates alongside.
 
-    Age is days since the invoice date, measured at `as_of` (today by default),
-    because an invoice has no due date of its own and the distributor's payment
-    terms are not carried onto it. The amounts come from `receivable_rows()`, so
-    they are net of credit notes and debit notes: a return moves the invoice into
-    the bucket its remaining balance belongs to, exactly as the outstanding list,
-    the ledger and the trial balance show it (COR-012).
+    The four buckets still age from the invoice date, so a figure can be
+    compared with earlier statements; the due date is a second measure, not a
+    replacement. Each row carries the invoice's due date (captured from the
+    distributor's terms at issue, GAP-A04), how many days overdue it is, and a
+    `due` summary splits the outstanding total into overdue, due within a week,
+    later, and no due date at all. An invoice issued before a term was captured
+    has no due date and is counted as such rather than being given an assumed
+    one.
 
-    Settled invoices carry nothing outstanding and are left out entirely.
+    Amounts come from `receivable_rows()`, so they are net of credit notes and
+    debit notes: a return moves the invoice into the bucket its remaining
+    balance belongs to, exactly as the outstanding list, the ledger and the
+    trial balance show it (COR-012). Settled invoices are left out entirely.
     """
     day = as_of or date.today()
     buckets = [{"key": key, "label": label, "first": first, "last": last,
                 "total": ZERO, "count": 0, "rows": []}
                for key, label, first, last in BUCKETS]
+    due = {key: {"total": ZERO, "count": 0}
+           for key in ("overdue", "due_this_week", "not_yet_due", "no_due_date")}
+    soon = day + timedelta(days=DUE_SOON_DAYS)
 
     for row in receivable_rows(db):
         outstanding = money(row["outstanding"])
@@ -183,6 +247,8 @@ def ageing_rows(db: Session, as_of: date | None = None) -> dict:
             continue
         days = max(0, (day - row["date"]).days)
         bucket = next(b for b in buckets if b["last"] is None or days <= b["last"])
+        due_date = row.get("due_date")
+        overdue_by = (day - due_date).days if due_date is not None and due_date < day else 0
         bucket["rows"].append({
             "invoice_id": row["invoice_id"],
             "number": row["number"],
@@ -190,10 +256,22 @@ def ageing_rows(db: Session, as_of: date | None = None) -> dict:
             "distributor_id": row["distributor_id"],
             "distributor": row["distributor"],
             "days": days,
+            "due_date": due_date,
+            "days_overdue": overdue_by,
             "outstanding": outstanding,
         })
         bucket["total"] = money(bucket["total"] + outstanding)
         bucket["count"] += 1
+        if due_date is None:
+            key = "no_due_date"
+        elif due_date < day:
+            key = "overdue"
+        elif due_date <= soon:
+            key = "due_this_week"
+        else:
+            key = "not_yet_due"
+        due[key]["total"] = money(due[key]["total"] + outstanding)
+        due[key]["count"] += 1
 
     for bucket in buckets:
         bucket["rows"].sort(key=lambda r: (-r["days"], r["number"]))
@@ -202,7 +280,27 @@ def ageing_rows(db: Session, as_of: date | None = None) -> dict:
         "buckets": buckets,
         "total": money(sum((b["total"] for b in buckets), ZERO)),
         "count": sum(b["count"] for b in buckets),
+        "due": due,
     }
+
+
+def advance_balance(db: Session, kind: str, party_id: int) -> Decimal:
+    """Money received or paid that is still unapplied for this party.
+
+    A receipt or payment recorded before allocations existed named its invoice
+    or order outright, so it counts as fully settled; only the remainder of a
+    general entry stays available.
+    """
+    settled = allocated_by_payment(db)
+    column = Payment.distributor_id if kind == RECEIPT else Payment.supplier_id
+    total = ZERO
+    for pay in db.scalars(select(Payment).where(Payment.kind == kind,
+                                                column == party_id)).all():
+        if pay.invoice_id is not None or pay.purchase_order_id is not None:
+            continue
+        amount = money(pay.amount)
+        total = money(total + max(amount - settled.get(pay.id, ZERO), ZERO))
+    return total
 
 
 # ------------------------------------------------------------------ ledgers
@@ -224,18 +322,37 @@ def distributor_ledger(db: Session, distributor_id: int) -> dict:
         entries.append({"date": dn.note_date, "document": dn.debit_note_number,
                         "kind": "debit_note", "debit": _grand(dn), "credit": ZERO,
                         "note": dn.reason, "ref_id": dn.id})
+    # The receipt row already credits the whole amount against the invoices
+    # above, so a settlement is shown in its note rather than as a second
+    # debit that would count the money twice.
+    settled: dict[int, list[tuple[str, Decimal]]] = {}
+    for pay_id, number, applied in db.execute(
+            select(PaymentAllocation.payment_id, Invoice.invoice_number,
+                   PaymentAllocation.amount)
+            .join(Invoice, Invoice.id == PaymentAllocation.invoice_id)
+            .where(PaymentAllocation.invoice_id.is_not(None))).all():
+        settled.setdefault(pay_id, []).append((number, money(applied)))
     for pay in db.scalars(select(Payment).where(Payment.kind == RECEIPT,
                                                 Payment.distributor_id == distributor_id)).all():
+        amount = money(pay.amount)
+        parts = [pay.reference or pay.mode]
+        rows = settled.get(pay.id, [])
+        if rows:
+            parts.append("settled " + ", ".join(f"{n} ₹{money(a)}" for n, a in rows))
+            excess = money(amount - sum((a for _, a in rows), ZERO))
+            if excess > 0:
+                parts.append(f"₹{money(excess)} held as advance")
         entries.append({"date": pay.paid_on, "document": pay.number, "kind": "receipt",
-                        "debit": ZERO, "credit": money(pay.amount),
-                        "note": pay.reference or pay.mode, "ref_id": pay.id})
+                        "debit": ZERO, "credit": amount,
+                        "note": " · ".join(p for p in parts if p), "ref_id": pay.id})
     entries.sort(key=lambda e: (e["date"], e["document"]))
     balance = ZERO
     for entry in entries:
         balance = money(balance + entry["debit"] - entry["credit"])
         entry["balance"] = balance
     return {"party": name, "party_id": distributor_id, "entries": entries,
-            "closing_balance": balance}
+            "closing_balance": balance,
+            "available_advance": advance_balance(db, RECEIPT, distributor_id)}
 
 
 def supplier_ledger(db: Session, supplier_id: int) -> dict:
@@ -251,18 +368,34 @@ def supplier_ledger(db: Session, supplier_id: int) -> dict:
                         "document": po.po_number, "kind": "goods_received",
                         "debit": ZERO, "credit": value, "note": "at order cost",
                         "ref_id": po.id})
+    settled: dict[int, list[tuple[str, Decimal]]] = {}
+    for pay_id, number, applied in db.execute(
+            select(PaymentAllocation.payment_id, PurchaseOrder.po_number,
+                   PaymentAllocation.amount)
+            .join(PurchaseOrder, PurchaseOrder.id == PaymentAllocation.purchase_order_id)
+            .where(PaymentAllocation.purchase_order_id.is_not(None))).all():
+        settled.setdefault(pay_id, []).append((number, money(applied)))
     for pay in db.scalars(select(Payment).where(Payment.kind == "payment",
                                                 Payment.supplier_id == supplier_id)).all():
+        amount = money(pay.amount)
+        parts = [pay.reference or pay.mode]
+        rows = settled.get(pay.id, [])
+        if rows:
+            parts.append("settled " + ", ".join(f"{n} ₹{money(a)}" for n, a in rows))
+            excess = money(amount - sum((a for _, a in rows), ZERO))
+            if excess > 0:
+                parts.append(f"₹{money(excess)} still held as advance")
         entries.append({"date": pay.paid_on, "document": pay.number, "kind": "payment",
-                        "debit": money(pay.amount), "credit": ZERO,
-                        "note": pay.reference or pay.mode, "ref_id": pay.id})
+                        "debit": amount, "credit": ZERO,
+                        "note": " · ".join(p for p in parts if p), "ref_id": pay.id})
     entries.sort(key=lambda e: (e["date"] or date.min, e["document"]))
     balance = ZERO
     for entry in entries:
         balance = money(balance + entry["credit"] - entry["debit"])
         entry["balance"] = balance
     return {"party": name, "party_id": supplier_id, "entries": entries,
-            "closing_balance": balance}
+            "closing_balance": balance,
+            "available_advance": advance_balance(db, PAYMENT, supplier_id)}
 
 
 # ------------------------------------------------------------ GST registers
@@ -290,29 +423,28 @@ def gst_register(db: Session, date_from: date | None = None,
         credit.append({"number": cn.credit_note_number, "date": cn.note_date,
                        "taxable": money(cn.taxable_value), "cgst": money(cn.cgst_total),
                        "sgst": money(cn.sgst_total), "igst": money(cn.igst_total),
-                       "total": _grand(cn)})
+                       "cess": money(cn.cess_total), "total": _grand(cn)})
     for dn in db.scalars(select(DebitNote).where(DebitNote.status == "issued")).all():
         if not within(dn.note_date):
             continue
         debit.append({"number": dn.debit_note_number, "date": dn.note_date,
                       "taxable": money(dn.taxable_value), "cgst": money(dn.cgst_total),
                       "sgst": money(dn.sgst_total), "igst": money(dn.igst_total),
-                      "total": _grand(dn)})
+                      "cess": money(dn.cess_total), "total": _grand(dn)})
 
     def total(rows, key, sign=1) -> Decimal:
         return money(sum((r[key] for r in rows), ZERO) * sign)
 
-    keys = ("taxable", "cgst", "sgst", "igst", "total")
+    keys = ("taxable", "cgst", "sgst", "igst", "cess", "total")
     totals = {k: money(total(b2b, k) + total(debit, k) - total(credit, k)) for k in keys}
     return {
         "from": date_from, "to": date_to,
         "b2b": b2b, "credit_notes": credit, "debit_notes": debit,
         "totals": totals,
         "input_register": None,
-        "note": ("Outward supplies only. Purchase orders record a cost, not a tax "
-                 "split, so the input register cannot be produced from them; it "
-                 "needs purchase invoices with tax, which the system does not "
-                 "capture yet. This is a reconciliation aid, not a filing file."),
+        "note": ("Outward supplies only. Input GST, net payable and the comparison "
+                 "with a filed return are built from captured supplier bills by "
+                 "`app/services/gst.py`. This is a reconciliation aid, not a filing file."),
     }
 
 
@@ -380,18 +512,31 @@ def trial_balance(db: Session, as_of: date | None = None) -> dict:
         elif adjustment < 0:
             add("Round off", debit=abs(adjustment))
 
-    # Money in and out; the mode decides which account it moved through.
+    # Money in and out; the mode decides which account it moved through. The part
+    # settled against an invoice or bill clears the receivable/payable; the rest
+    # is an advance, carried on its own head so it never reads as sales or
+    # purchases. A payment recorded before allocations existed was fully settled
+    # by definition (it named its invoice or order outright).
+    settled = allocated_by_payment(db, as_of)
     stmt = select(Payment)
     if as_of is not None:
         stmt = stmt.where(Payment.paid_on <= as_of)
     for pay in db.scalars(stmt).all():
+        amount = money(pay.amount)
         account = "Cash" if pay.mode == "cash" else "Bank"
+        legacy = pay.invoice_id is not None or pay.purchase_order_id is not None
+        allocated = amount if legacy else min(settled.get(pay.id, ZERO), amount)
+        advance = money(amount - allocated)
         if pay.kind == RECEIPT:
-            add(account, debit=money(pay.amount))
-            add("Receivables", credit=money(pay.amount))
+            add(account, debit=amount)
+            add("Receivables", credit=allocated)
+            if advance > 0:
+                add("Advances from distributors", credit=advance)
         else:
-            add("Payables", debit=money(pay.amount))
-            add(account, credit=money(pay.amount))
+            add("Payables", debit=allocated)
+            if advance > 0:
+                add("Advances to suppliers", debit=advance)
+            add(account, credit=amount)
 
     # Goods received: a purchase, owed to the supplier until paid.
     received = received_value_by_po(db)

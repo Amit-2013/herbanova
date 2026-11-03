@@ -499,6 +499,8 @@ def _seed_kept_rows(conn, actor_id: int) -> None:
     conn.execute("INSERT INTO hr_holidays (date, name) VALUES ('2026-12-31', 'Kept holiday')")
     conn.execute("INSERT INTO hr_period_locks (scope, year, month, locked_by, reason) "
                  "VALUES ('payroll', 2025, 12, %s, 'Kept lock')", (actor_id,))
+    conn.execute("INSERT INTO financial_year_closes (financial_year, reason, closed_by) "
+                 "VALUES ('2024-25', 'Kept year close', %s)", (actor_id,))
     conn.execute("INSERT INTO hr_saved_filters (user_id, view, name) "
                  "VALUES (%s, 'leads', 'Kept filter')", (actor_id,))
     conn.execute("INSERT INTO hr_attendance_rules (created_by) VALUES (%s)", (actor_id,))

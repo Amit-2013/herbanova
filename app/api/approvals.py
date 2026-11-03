@@ -295,6 +295,8 @@ def _decide_sales_order(db: Session, approval_id: int, body: DecisionIn, user):
     ar.decision_reason = body.reason.strip()
     ar.pending_approver_role = None
     so.status = "approved" if approved else "rejected"
+    if approved:
+        so.approved_at = datetime.now(timezone.utc)
     audit(db, user.id, "approval.decide", f"approval:{ar.id}",
           {"decision": body.decision, "reason": ar.decision_reason, "order": so.so_number,
            "reasons": ar.reasons, "administrator": is_admin(db, user)})
