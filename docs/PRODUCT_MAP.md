@@ -10,7 +10,7 @@ to keep, what to switch off and what to build next.
 (routes and permissions), `app/main.py` (37 router inclusions, 343 operations on 4 November 2026),
 `app/services/reports.py` (27 reports), `app/services/report_packs.py`
 (7 e-mail packs), `app/core/permissions.py` (49 keys), the live database at
-migration `0029_totp` on the development and test databases (84 tables; `0029_totp` adds columns only), and
+migration `0030_sign_in_content` on the development and test databases (88 tables; `0030_sign_in_content` adds four tables), and
 [`FEATURE_INVENTORY.md`](FEATURE_INVENTORY.md), which remains the row-level
 evidence register. Every status below is copied from that register; nothing is
 promoted here.
@@ -39,7 +39,7 @@ permission check, so hiding a menu item is convenience only.
 | API operations / paths | 327 / 255 |
 | HR and employee operations | 105 (including 4 legacy `/api/employees` endpoints) |
 | Modules in the register | 18 (17 working, MOD-15 conditional and not built) |
-| Database tables | 84 at head `0029_totp` |
+| Database tables | 88 at head `0030_sign_in_content` |
 | Permission keys / groups | 49 / 12 |
 | Built-in and live roles | 8 |
 | Reports in the catalogue | 27 |

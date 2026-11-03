@@ -12,7 +12,7 @@
 
 **Gap-closure update (3 November 2026, two-factor):** migration `0029_totp` adds seven nullable-or-defaulted columns to `users` (documented under [`users`](#users)) and bumps `token_version` for the Administrator roles so pre-release sessions end. It also leaves sessions revoked on downgrade by design. **Status: applied to the disposable test database and to the development database** on 3 November 2026 after the owner's explicit `apply 0029_totp` and a verified backup; `alembic current` reads `0029_totp (head)` on both. The development table and row counts below are unchanged (84 tables, 6 users); the `users` table now has 24 columns.
 
-**Gap-closure update (4 November 2026, sign-in page content):** migration `0030_sign_in_content` adds four tables — `sign_in_banners` (9 columns), `sign_in_notices` (8), `sign_in_contacts` (8) and `legal_documents` (6) — with 31 columns in total, and seeds the two legal rows (`privacy`, `terms`) unpublished with a null body. **Status: applied to the disposable test database only.** The development database remains at `0029_totp` and production has not been migrated; the application code is additive, so a database without the tables serves the sign-in page's “No data yet” fallback rather than invented content. The downgrade drops the four tables; a banner image already on disk is not deleted by a schema rollback. The tables are documented in “Sign-in page content” below.
+**Gap-closure update (4 November 2026, sign-in page content):** migration `0030_sign_in_content` adds four tables — `sign_in_banners` (9 columns), `sign_in_notices` (8), `sign_in_contacts` (8) and `legal_documents` (6) — with 31 columns in total, and seeds the two legal rows (`privacy`, `terms`) unpublished with a null body. **Status: applied to the disposable test database and to the development database** — development was upgraded 4 November 2026 from `0029_totp` after a verified dump (`var/backups/pre-0030-20261104T004028/`, sha256 `d4263da528056741a73c71cdc83c6da4872bbdb16bfc2d8f91afb074954099e7`) and the owner's explicit `apply aa7d6c858c02`; `alembic current` reads `0030_sign_in_content (head)` there with 88 tables. Production remains at `0028_advances`. The application code is additive, so a database without the tables serves the sign-in page's “No data yet” fallback rather than invented content. The downgrade drops the four tables; a banner image already on disk is not deleted by a schema rollback. The tables are documented in “Sign-in page content” below.
 
 **Usage columns are a text-search guide, not proof of use.** `be/ui/rep` counts word-boundary occurrences of the column name in backend code (`app/api`, `app/services`, `app/core`), the browser app (`static/js/app.js`, `static/index.html`) and report builders. Generic names (`id`, `status`, `created_at`) are counted wherever the word appears, so treat the numbers as a pointer for follow-up, not a semantic claim.
 
@@ -1699,7 +1699,7 @@ Rows 18–24 are added by migration `0029_totp`, applied to the development data
 
 **Check constraints:** `ck_payment_allocation_target`: `(invoice_id IS NOT NULL AND purchase_order_id IS NULL) OR (invoice_id IS NULL AND purchase_order_id IS NOT NULL)`; `ck_payment_allocation_amount`: `amount > 0::numeric`
 
-**Note:** the table is created by `0028_advances`, which the test database has and the dev database does not yet carry; the columns above are read from the migration and ORM.
+**Note:** the table is created by `0028_advances`, which the development and test databases have carried since 3 November 2026; the column list above was read from the migration and ORM.
 
 
 ## Accounting controls
@@ -2015,13 +2015,13 @@ Added by `0027_ledger_and_bank_rec` (3 November 2026). The dev row counts below 
 
 ## Sign-in page content
 
-Added by migration `0030_sign_in_content`, which is on the disposable test database only. The development database has these tables only after the migration is approved and applied, so the row counts below are 0 there. The `be/ui/rep` usage counts have not been regenerated for these new tables.
+Added by migration `0030_sign_in_content`, which the test database and the development database both carry (development upgraded 4 November 2026). The two legal rows are seeded unpublished with a null body; the banner, notice and contact tables are empty on development as recorded below. The `be/ui/rep` usage counts have not been regenerated for these new tables.
 
 ### legal_documents
 
 **Purpose:** Privacy Policy and Terms & Conditions, addressed by key; unpublished until an Administrator writes and publishes the text.
 
-**ORM:** `LegalDocument` · **Rows (dev):** 0 (not migrated) · **Columns:** 6
+**ORM:** `LegalDocument` · **Rows (dev):** 2 (seeded `privacy` and `terms`, both unpublished with a null body) · **Columns:** 6
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -2040,7 +2040,7 @@ Added by migration `0030_sign_in_content`, which is on the disposable test datab
 
 **Purpose:** Promotion banners on the sign-in page: image file name, title, optional link, sort order and active flag.
 
-**ORM:** `SignInBanner` · **Rows (dev):** 0 (not migrated) · **Columns:** 9
+**ORM:** `SignInBanner` · **Rows (dev):** 0 · **Columns:** 9
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -2064,7 +2064,7 @@ Added by migration `0030_sign_in_content`, which is on the disposable test datab
 
 **Purpose:** Help-line boxes (Sales, Service, Customer Support) shown under the sign-in form and in the Forgot Password panel.
 
-**ORM:** `SignInContact` · **Rows (dev):** 0 (not migrated) · **Columns:** 8
+**ORM:** `SignInContact` · **Rows (dev):** 0 · **Columns:** 8
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|
@@ -2087,7 +2087,7 @@ A row must carry the label and at least one of detail, phone or email; the API r
 
 **Purpose:** Dated notices shown on the sign-in page; the page lists the five most recent active rows.
 
-**ORM:** `SignInNotice` · **Rows (dev):** 0 (not migrated) · **Columns:** 8
+**ORM:** `SignInNotice` · **Rows (dev):** 0 · **Columns:** 8
 
 | # | Column | Type | Null | DB default | Key | Inline note | be/ui/rep |
 |---:|---|---|:--:|---|---|---|---|

@@ -1604,22 +1604,25 @@ answered `200` with no session. The gates are evaluated on the server
 
 | View | File | Measured |
 |---|---|---|
-| 1440 light, open | `dash-range-1440-light` | Trigger label `Nov 1, 2026 - Nov 4, 2026`, 231 px; popover 620 px; months November and December 2026; `scrollWidth == viewport` |
-| 1440 dark, open | `dash-range-1440-dark` | Same geometry on dark tokens |
-| 1440 closed | `dash-range-1440-closed` | Trigger with caret and calendar glyph, no popover |
-| 768 | `dash-range-768` | Popover fits the content column |
-| 390 open and closed | `dash-range-390`, `dash-range-390-closed` | Trigger 336 px, popover 358 px, zero horizontal overflow at 390×844 |
+| 1440 light | `dashbar-1440-light-bar` / `-cal` | Filter strip 1160 px: trigger 231 px at x 269, presets immediately to its right at x 514–984, one 30 px row, no popover while clicking. Opened: popover 620 × 335 px, calendar 590 px (November and December 2026), zero overflow |
+| 1440 dark | `dashbar-1440-dark-bar` / `-cal` | Same geometry on dark tokens |
+| 768 light | `dashbar-768-light-bar` / `-cal` | Strip wraps to 94 px: trigger on the first row, presets at x 31–501 on the second; popover 620 px inside 768 px; two months; zero overflow |
+| 390 light | `dashbar-390-light-bar` / `-cal` | Trigger 336 px; presets under it as two wrapped rows (66 px, x 27–363); popover 358 px, one month; zero horizontal overflow |
 
-Preset clicks were exercised for `30D`, `90D` and `This FY`; the label moved and
-the dashboard issued `GET /api/dashboard?from_date=…&to_date=…`, not a
-client-side filter. A custom pair was then picked in the calendar — 5 October
-start, 20 October end — and the request
-`from_date=2026-10-05&to_date=2026-10-20` returned `200`; the preset lost its
-pressed state and the pair was written to `localStorage`. The backwards-pair
-swap, future-day disabling and the next-month arrow limit were read at
-`app.js:1760-1846` but not separately driven; only the layout, the preset
-clicks, one custom pair, the resulting requests and the stored values were
-exercised.
+The presets were moved out of the calendar into the filter bar to the right of
+the trigger (4 November 2026), leaving the popover as the calendar alone; the
+click path was re-driven after the move: selecting `90D` from the bar applied
+at once without involving the popover, left `90d` as the only `aria-pressed`
+preset, moved the label to `Aug 7, 2026 - Nov 4, 2026` and issued
+`GET /api/dashboard?from_date=2026-08-07&to_date=2026-11-04`. Earlier in the
+same round the preset clicks for `30D`, `90D` and `This FY` were exercised and a
+custom pair was picked in the calendar — 5 October start, 20 October end — and
+the request `from_date=2026-10-05&to_date=2026-10-20` returned `200`; the preset
+lost its pressed state and the pair was written to `localStorage`. The
+backwards-pair swap, future-day disabling and the next-month arrow limit were
+read at `app.js:1760-1846` but not separately driven; only the layout, the
+preset clicks, one custom pair, the resulting requests and the stored values
+were exercised.
 
 ### 27.4 Regression run
 
@@ -1633,10 +1636,29 @@ it at `0030_sign_in_content`.
 
 | Item | Why |
 |---|---|
-| Migration `0030_sign_in_content` on development and production | Applied to the test database only. Development is at `0029_totp` and production at `0028_advances`; migrating them needs a verified backup and the owner's explicit `apply <fingerprint>` |
+| Migration `0030_sign_in_content` on production | Development was migrated on 4 November 2026 (§27.6); production is at `0028_advances` and needs a verified backup and the owner's explicit `apply <fingerprint>` |
 | Automatic rotation with two or more banners | Only one image file was uploaded during the walk, so the 6-second cycle never advanced; `startPromoRotation` and its pause bindings were read, not executed |
 | Real tablet and phone | Desktop-emulated widths only; no physical device |
 | Screen readers | No assistive tooling in this workspace |
 | Opening the operating system's file-picker dialog | The form was submitted with a generated `FileList` on the input; the native dialog cannot be opened headlessly, but the panel's upload path itself ran |
 | A dedicated test for the range widget | The server-side window is covered by `tests/test_dashboard_phase2.py` and `test_dashboard_phase3.py`; the popover itself has browser evidence only |
 | Production data | Not touched in this round |
+
+### 27.6 Development database migration to 0030
+
+Applied on 4 November 2026 after a verified dump and the owner's explicit
+`apply aa7d6c858c02`.
+
+| Step | Command | Result |
+|---|---|---|
+| Backup | `pg_dump -Fc` of `herbanova_bcs_dev` into `var/backups/pre-0030-20261104T004028/` | `herbanova_bcs_dev-pre-0030-20261104T004028.dump`, 394,633 bytes, sha256 `d4263da528056741a73c71cdc83c6da4872bbdb16bfc2d8f91afb074954099e7`, 908 TOC entries (`pg_restore --list`); pre-apply revision `0029_totp`, 84 public tables |
+| Approval | fingerprint re-read before applying | `aa7d6c858c02` matched |
+| Upgrade | `python -m alembic upgrade head` | `Running upgrade 0029_totp -> 0030_sign_in_content` |
+| Revision | `python -m alembic current` | `0030_sign_in_content (head)` |
+| Schema | SQL over `information_schema` | 88 public tables; `legal_documents` 6 columns / 2 rows, `sign_in_banners` 9 / 0, `sign_in_contacts` 8 / 0, `sign_in_notices` 8 / 0 |
+| Seeds | `SELECT key, title, published, body IS NULL` | `('privacy','Privacy Policy',false,true)` and `('terms','Terms & Conditions',false,true)` |
+| Public reads | temporary server on 8011 against development | `/api/public/sign-in` 200 with company "Herbanova LLP", empty `banners`/`notices`/`contacts`, both legal entries `published:false`; `/api/public/sign-in/legal/privacy` and `/legal/terms` 200 with `"body":null`; the temporary server was then stopped |
+
+The long-running development server on `:8000` (started before this code existed)
+still answers 404 for the new routes until it is restarted from the current
+checkout. Production remains at `0028_advances`.

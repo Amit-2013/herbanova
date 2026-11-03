@@ -46,7 +46,7 @@ The payload defaults every Phase-2 section to `null` and fills only what the cal
 |---|---|---|
 | Greeting and date | "Good morning/afternoon/evening, {username}" plus the long local date (en-IN) | `greeting()`, `renderDash()` |
 | Search button | Opens the palette; shows the platform shortcut (`Ctrl/⌘ K`) | `openPalette()` |
-| Period selector | One range trigger showing `Oct 5, 2026 - Nov 3, 2026`; it opens presets **1D, 7D, 30D, Month to date, Last month, 90D, This FY** and a two-month calendar with start/end selection (swap if chosen backwards, future days disabled, hover preview, Escape/outside click to cancel); the window survives reload (`hb.dashFrom`/`hb.dashTo`/`hb.dashPreset`); the pressed preset is `aria-pressed`; a stale preset is unhighlighted once the day moves on | `renderDashRange()`, `drawDashCalendar()`, `pickDashDay()`, `bindDashRange()`, `applyDashDates()` |
+| Period selector | One range trigger showing `Oct 5, 2026 - Nov 3, 2026`, with the presets **1D, 7D, 30D, Month to date, Last month, 90D, This FY** in the filter bar immediately to its right (they apply at once); the trigger opens a two-month calendar with start/end selection (swap if chosen backwards, future days disabled, hover preview, Escape/outside click to cancel); the window survives reload (`hb.dashFrom`/`hb.dashTo`/`hb.dashPreset`); the pressed preset is `aria-pressed`; a stale preset is unhighlighted once the day moves on | `renderDashRange()`, `drawDashCalendar()`, `pickDashDay()`, `bindDashRange()`, `applyDashDates()` |
 | MoM & YoY | Replaces the old top-bar "New sales order" action and opens the comparison page; "New sales order" remains on the Sales screen and in the command palette | `#compare` |
 | New sales order | Only rendered when the role holds `sales:write`; opens the existing sales-order form | `dashNewSo` |
 | Updated line | "As at {date} · {n}-day period, {from} to {to} · updated {time}" | `renderDash()` |
@@ -301,7 +301,7 @@ The repository has no separate Feature Inventory or Requirements Traceability Ma
 
 | Item | Behaviour |
 |---|---|
-| Controls | A range trigger (`#dashRangeBtn`) opening presets **1D, 7D, 30D, Month to date, Last month, 90D, This FY** and a two-month calendar (`#dashCalMonths`); no From/To text inputs remain |
+| Controls | A range trigger (`#dashRangeBtn`) with the presets **1D, 7D, 30D, Month to date, Last month, 90D, This FY** in the filter bar to its right, and a two-month calendar (`#dashCalMonths`) in the popover it opens; no From/To text inputs remain. Below 560 px the preset row wraps under the trigger |
 | Default | First day of the current month to today (D-02) |
 | Selection | Click the start day, then the end day; the pair is swapped when chosen backwards; days after today are disabled and the next-month arrow stops at the current month; hovering previews the range; Cancel, a second click on the trigger, an outside click or Escape closes without applying, and Escape returns focus |
 | Validation | The calendar prevents future days and reversed ranges; `applyDashDates()` still refuses an impossible stored pair in place; the server answers `from_date > to_date` or a future `to_date` with 422 (D-03) |

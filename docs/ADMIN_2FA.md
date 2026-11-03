@@ -114,7 +114,9 @@ rows were unchanged, `admin` and `admin2` moved from `token_version` 3 to 4
 `var/backups/pre-0029-totp-20261103T172245.dump` (392 KB, 84 table entries,
 SHA-256 `0d791f2795eb84db54a4c6a504e2b37ff9377732ddae84f6bc67dd47d5ee99b4`).
 Both Administrators now enrol at their next sign-in; production remains on
-`0028_advances` until the same approval is given there.
+`0028_advances` until the same approval is given there. The development database
+then advanced to `0030_sign_in_content` on 4 November 2026, which is additive and
+leaves these columns and the enrolled state untouched.
 
 ## 7. Operating it
 

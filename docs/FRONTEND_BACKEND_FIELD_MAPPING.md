@@ -33,7 +33,7 @@ The browser talks to the API through one helper, `api()` at `static/js/app.js:36
 | Browser views (`#/…`) | 20 | `static/js/app.js:200-208` |
 | Report catalogue entries | 25 | `app/services/reports.py` `CATALOG` |
 | Request schemas with a JSON body | 64 | `app/api/**` |
-| Database tables | 84 at head `0029_totp` | `docs/DATABASE_TABLE_COLUMN_REGISTER.md`; `db_reset.table_classification()` |
+| Database tables | 88 at head `0030_sign_in_content` | `docs/DATABASE_TABLE_COLUMN_REGISTER.md`; `db_reset.table_classification()` |
 
 The SPA is a single page with hash routes. Visibility of a view is decided in the browser by `VIEW_PERM` (`static/js/app.js:205-208`), but authorisation is always re-checked on the server by `require(perm)` / `require_admin(perm)` (`app/core/rbac.py:74-100`). Hiding a button is therefore a convenience, never a control.
 
@@ -90,7 +90,7 @@ The signed-out screen renders only what the server supplies. There are no fixed 
 
 | UI element | API | Permission | Content |
 |---|---|---|---|
-| Period control: one trigger (`#dashRangeLabel`, e.g. `Oct 5, 2026 - Nov 3, 2026`) opens a popover with presets `1D` `7D` `30D` `Month to date` `Last month` `90D` `This FY` and a two-month calendar (first click start, second end, backwards pair swapped), all tiles and panels | `GET /api/dashboard?from_date=&to_date=` | `require_login`, then per section | Payload as at §2.1; the browser sends calendar dates, and the legacy `range=` parameter is still accepted for older callers but limited to 7/30/90 (422 otherwise). `to_date` in the future or `from_date` after `to_date` → **422**. `from_date`/`to_date` persist in `localStorage` (`hb.dashFrom`, `hb.dashTo`, `hb.dashPreset`); a stored preset that no longer matches today is dropped from the highlight, not from the window. Sections the role cannot read are `null`, never `0`. |
+| Period control: one trigger (`#dashRangeLabel`, e.g. `Oct 5, 2026 - Nov 3, 2026`) with preset pills `1D` `7D` `30D` `Month to date` `Last month` `90D` `This FY` beside it in the filter bar, and a two-month calendar in the popover it opens (first click start, second end, backwards pair swapped), all tiles and panels | `GET /api/dashboard?from_date=&to_date=` | `require_login`, then per section | Payload as at §2.1; the browser sends calendar dates, and the legacy `range=` parameter is still accepted for older callers but limited to 7/30/90 (422 otherwise). `to_date` in the future or `from_date` after `to_date` → **422**. `from_date`/`to_date` persist in `localStorage` (`hb.dashFrom`, `hb.dashTo`, `hb.dashPreset`); a stored preset that no longer matches today is dropped from the highlight, not from the window. Sections the role cannot read are `null`, never `0`. |
 | Stock KPIs, expiry watch, warehouses, open POs | same payload | `stock:read` | `stock`, `purchase_orders`, `stock_by_warehouse`, `expiry_watch`, `open_pos`, stock KPI tiles |
 | Sales KPIs, top products, category panel | same payload | `sales:read` | `orders_ready`, `top_products`, `category_sales`; sales side of `sales_vs_purchases` is masked server-side without it |
 | Receivables ageing | same payload | `accounts:read` | `receivables_ageing`, from `ledger.ageing_rows` (same function as the report) |
