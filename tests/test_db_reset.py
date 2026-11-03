@@ -528,6 +528,12 @@ def _seed_kept_rows(conn, actor_id: int) -> None:
     ).fetchone()[0]
     conn.execute("INSERT INTO email_schedule_recipients (schedule_id, recipient_id, field) "
                  "VALUES (%s, %s, 'to')", (schedule_id, recipient_id))
+    conn.execute("INSERT INTO sign_in_banners (title, image_path, sort_order, active, "
+                 "created_by) VALUES ('Kept banner', 'kept.png', 0, true, %s)", (actor_id,))
+    conn.execute("INSERT INTO sign_in_notices (title, body, notice_date, active, created_by) "
+                 "VALUES ('Kept notice', 'Still here', '2026-01-01', true, %s)", (actor_id,))
+    conn.execute("INSERT INTO sign_in_contacts (label, detail, sort_order, active) "
+                 "VALUES ('Kept desk', 'Weekdays', 0, true)")
     conn.execute("INSERT INTO audit_log (action, record) "
                  "VALUES ('reset.test', 'row that must survive')")
 

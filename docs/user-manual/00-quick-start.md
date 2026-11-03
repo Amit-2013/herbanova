@@ -1,26 +1,47 @@
 # 1. Getting Started
 
 **Audience:** everyone with a login.
-**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification, screen layout refreshed), §1.11 (starting the servers) and §1.12 (the application shell) added 3 November 2026.
+**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification, screen layout refreshed), §1.11 (starting the servers) and §1.12 (the application shell) added 3 November 2026; §1.1 and §1.2 rewritten on 4 November 2026 for the new sign-in page (Administrator-managed banner, notices, help line and legal pages) and the **Save ID** / **Forgot Password** controls.
 **What you need:** the application address from your administrator, a username, and your password.
 
 ## 1.1 Opening the application
 
-Enter the address in a browser. The server root redirects to **`/ui/`** (`app/main.py:71-81`), which is the single-page application. The sign-in screen asks for a **Username** and a **Password**. Usernames are matched case-insensitively; the password is case-sensitive.
+Enter the address in a browser. The server root redirects to **`/ui/`** (`app/main.py:71-81`), which is the single-page application. The sign-in screen asks for a **User ID** and a **Password**. Usernames are matched case-insensitively; the password is case-sensitive.
+
+The page has two columns on a desktop, one column on a phone or a narrow tablet:
+
+| Area | Position | Who writes it |
+|---|---|---|
+| Promotion banner | Left, above the notices | Administrator, **Settings → Sign-in page** |
+| **Notices** | Left, with the date, title and text of each notice | Administrator |
+| **Sign in** form | Right, top | Fixed: User ID, Password, **Save ID**, **Forgot Password?**, **Login** |
+| **Help line** | Right, under the form | Administrator; one box per team (Sales, Service, Customer Support) |
+| Copyright and **Privacy Policy** / **Terms & Conditions** | Footer | Company name from the company profile; the two documents from the Administrator |
+
+Everything except the form itself is stored on the server and can be changed without touching the page. **A part the Administrator has not filled in shows “No data yet” and is never replaced with sample text**: an empty notice list says *No data yet*, a missing banner shows *No data yet* in the promotion area, and a legal page whose text has not been published opens with **Not published yet**. Banners rotate automatically in sort order; the arrows and dots let you choose one, and the rotation stops while the pointer or keyboard focus is on the banner, while the tab is hidden, and when the **reduced motion** system preference is on. **VERIFIED (code)** for the rotation rule: the browser walk had one banner, so the six-second cycle was not exercised.
+
+On a phone the form comes first, then the help line, then the banner and notices, so nothing has to be scrolled past before signing in.
+
+**VERIFIED:** the public payload is `GET /api/public/sign-in` and the banner image is served by `GET /api/public/sign-in/banners/{id}/image` (`app/api/signin.py:145-184`); the browser renders it in `refreshSignInContent()` (`static/js/app.js:461-470`). The empty states come from `signinEmpty()` (`app.js:339-343`). The whole page was walked at 1440, 768 and 390 px in both themes on 4 November 2026 (`docs/VERIFICATION_REPORT.md` §27).
 
 **VERIFIED (code):** `POST /api/auth/login` normalises the username to lower case before lookup (`app/api/auth.py:55-59`) and sets an HttpOnly cookie called `session` (`auth.py:72-73`). The browser never stores the password or a token in JavaScript.
 
 ## 1.2 Signing in
 
-1. Type your username. Spaces before and after are ignored.
+1. Type your User ID. Spaces before and after are ignored.
 2. Type your password. It is not displayed.
-3. Select **Sign in**.
+3. Select **Save ID** if you want the browser to remember the User ID on this computer (see below).
+4. Select **Login**.
 
 On success the application closes the sign-in screen, loads your identity and permission list from the server, and opens the main shell. The top-right corner shows your username, your role and a **Sign out** button.
 
+**Save ID.** The saved User ID is kept in this browser only — never on the server, and never the password. It is stored only after a **successful** sign-in, so a mistyped ID is not remembered. The next time the sign-in page opens, the User ID is filled in and the box is already ticked. Untick **Save ID** and sign in again, or clear the User ID, to forget it.
+
+**Forgot Password?** opens a panel titled **Forgot password** that names the Administrator as the person who resets passwords and shows the **Customer Support** help-line box the Administrator configured (detail, phone and email). The page deliberately does **not** send an e-mail or reset anything: a reset is issued from **Logins and employees**, and the new temporary password must be changed at the next sign-in (§1.3). If the Administrator has not added a help-line box, the panel says so instead of inventing a phone number.
+
 **Administrator accounts take a second step.** If you sign in as the Administrator or Super Admin, the password alone does not open the shell: a **Two-step verification** screen asks for a six-digit code from Google Authenticator, or — the first time — asks you to set the app up. This is described in §1.10.
 
-**VERIFIED:** the browser re-reads `/api/auth/me` after login instead of trusting a copy of the permissions kept in the page (`static/js/app.js:112-123`). What you can see is therefore decided by the server, not by the screen.
+**VERIFIED:** the browser re-reads `/api/auth/me` after login instead of trusting a copy of the permissions kept in the page (`static/js/app.js:112-123`). What you can see is therefore decided by the server, not by the screen. **Save ID** was exercised end to end on 4 November 2026: ticked and signed in → stored; signed out and reloaded → filled in and ticked; unticked and signed in → cleared (`docs/VERIFICATION_REPORT.md` §27).
 
 ### If the password is wrong
 

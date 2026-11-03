@@ -1,8 +1,8 @@
 # Interface design system
 
-**Status:** applied on `feature/gap-closure`, 3 November 2026.
+**Status:** applied on `feature/gap-closure`, 3 November 2026; sign-in page and Overview range control added 4 November 2026.
 **Applies to:** every screen in the single-page application (`static/index.html`, `static/css/styles.css`, `static/js/app.js`).
-**Evidence:** `var/shots/*.png` and [`VERIFICATION_REPORT.md`](VERIFICATION_REPORT.md) §26.
+**Evidence:** `var/shots/*.png` and [`VERIFICATION_REPORT.md`](VERIFICATION_REPORT.md) §26–§27.
 
 This document is the reference for anyone changing the interface. It records the
 rules the current CSS follows, so a later change can keep them rather than
@@ -110,6 +110,8 @@ hover `#932a20`) so white labels keep a contrast above 5:1. Placeholder
 | **Module rail** | 232 px, grouped by verb ("Sales and customers", "Stock and supply", "Finance and insight", "People and admin"). 10 px uppercase group labels, 30 px rows, active row uses a translucent fill plus a 3 px turmeric inset line. Counts sit at the right as turmeric pills. |
 | **Page head** | Title and one-line factual subtitle. Primary action sits on the same line, right-aligned. |
 | **Filter band** | Tinted `--head` strip with 4 px radius; controls align on a common baseline. Labels are 10.5 px uppercase. Presets use the segmented control. Secondary reset action is pushed to the far right. |
+| **Range trigger and calendar** | One 34 px bordered trigger showing the selected window (`Oct 5, 2026 - Nov 3, 2026`), a calendar glyph and a caret; the open state takes a moss border plus a 2 px halo. The popover is anchored left under the trigger, 620 px wide (never wider than the viewport minus 48 px), `--r` radius, `--shadow-2`. Inside: a wrapping row of pill presets, then two stacked months (`3fr` each, 18 px apart). Days are 28 px; in-range days use `--moss-t`, the two ends use solid moss, today is moss bold, future days are disabled at 40% and arrows stop at the current month. A hint line and a live preview sit above and below the grid. Below 560 px the trigger and popover go full width. |
+| **Sign-in page** | Two columns, `1.22fr / 1fr`, 20 px gap inside a 1240 px shell: promotion banner and notices on the left, the credentials panel and help-line boxes on the right (the right column caps at 470 px). The banner keeps a 16/10 frame with `object-fit: cover`, a gradient title strip and arrow/dot controls; notices are dated cards. At 1000 px the grid becomes one column with the credentials **first** (order 1) and the banner and notices below; the banner shortens to 16/9 at 300 px tall, 240 px at 820 px and 200 px at 520 px, and the footer wraps left-aligned. Empty banner/notice/contact slots hold a neutral "No data yet" row, never placeholder marketing text. |
 | **Buttons** | Pill (16 px radius; 6 px when small), 34 px tall (27 px `sm`), 13 px/600. Primary moss, ghost white with border, danger red. 150 ms hover transition; `:active` darkens one step. |
 | **Inputs** | 34 px, 3 px radius, 1 px line. Hover darkens the border; focus adds a 1 px moss ring plus a 2 px `moss-t` halo. Placeholders are `--faint` and never the only label. |
 | **Cards** | White, 1 px border, 6 px radius, 16–18 px padding. KPI tiles use a 24 px figure, a sentence of context and an optional sparkline drawn from stored movements. |
@@ -139,6 +141,9 @@ hover `#932a20`) so white labels keep a contrast above 5:1. Placeholder
 - Easing: `cubic-bezier(.2,.7,.3,1)` (`--ease`) for entry, plain `ease` for
   colour changes.
 - Nothing loops, pulses or glows. No parallax, no scroll-triggered animation.
+- The sign-in banner rotates every 6 s with a 350 ms cross-fade. Rotation stops
+  while the pointer or keyboard focus is inside the banner, while the tab is
+  hidden, and permanently under reduced motion; arrows and dots always work.
 - `prefers-reduced-motion: reduce` collapses every animation and transition to
   0.001 ms (`styles.css:357-359`). Verified with an emulated preference in
   headless Chrome on 3 November 2026: drawer and buttons reported `1e-06s`
@@ -149,7 +154,10 @@ hover `#932a20`) so white labels keep a contrast above 5:1. Placeholder
 | Width | Shell | Notable changes |
 |---|---|---|
 | ≥1440 px | Rail visible | Drawer 62%; 4 KPI columns |
-| 1024–1439 px | Rail visible | 3 KPI columns; drawer 68% |
+| 1024–1439 px | Rail visible | 3 KPI columns; drawer 68%; range popover 620 px |
+| ≤1000 px | Sign-in only | Sign-in grid becomes one column, credentials first, banner below |
+| ≤560 px | — | KPI single column; filter segments wrap; dates full width; range trigger and popover full width |
+| ≤520 px | — | Help-line boxes stack one column; sign-in banner 200 px; sign-in footer wraps left |
 | 821–1023 px | Rail visible | Nav compresses below 820 px height |
 | ≤820 px | Rail becomes a top band | 2 KPI columns; drawer 82%; status bar shows only the environment |
 | ≤600 px | Top band | Form rows collapse to one column; drawer 100% |

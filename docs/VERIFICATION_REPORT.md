@@ -1522,3 +1522,121 @@ The one content observation to hand to the owner: the status bar reads
 `Environment: production` while the development backend serves the page (the
 value comes from `APP_ENV` on the server). It is pre-existing and was not
 changed.
+
+## 27. Sign-in page content and the Overview range control — 4 November 2026
+
+**Scope.** The Administrator-managed sign-in page (promotion banners, dated
+notices, the three help-line boxes and the two legal pages) and the Overview
+period control (trigger, presets, two-month calendar). Schema is migration
+`0030_sign_in_content`; every route and table is additive.
+
+**Environment.** A temporary `uvicorn` on `127.0.0.1:8010` against the isolated
+test database `herbanova_bcs_test`, migrated to `0030_sign_in_content`, with the
+static front end served from the same process. The browser was headless Chrome
+driven over CDP. The development database (`herbanova_bcs_dev`) was **not**
+migrated and was not written to; production was not touched. The pytest session
+recreated the test database afterwards, so the probe's banners, notices and
+edits no longer exist.
+
+### 27.1 What the automated tests prove
+
+`python -m pytest -q tests/test_signin.py` — **8 passed**. Each test names the
+rule it pins:
+
+| Test | Rule |
+|---|---|
+| `test_the_public_page_never_invents_content` | With no rows, the public payload carries empty lists; the page shows the neutral empty state, not sample text |
+| `test_unpublished_legal_text_is_not_returned` | A `published = false` legal row is not served |
+| `test_banner_upload_replacement_deactivation_and_delete` | Upload, replace (old file removed), deactivate and delete |
+| `test_banner_upload_refusals` | File type and the 2,000,000-byte ceiling are refused |
+| `test_notice_crud_and_public_order` | Notice create/edit/delete and the order the public page receives |
+| `test_contact_boxes_are_validated_and_editable` | A box needs a label and at least one value; e-mail shape is checked |
+| `test_legal_text_must_be_written_before_it_is_published` | Publishing with an empty body is refused |
+| `test_only_the_administrator_manages_sign_in_content` | A non-administrator is refused every write, and reads the public route |
+
+`python -m pytest -q tests/test_db_reset.py` — **24 passed**, including the
+business-mode run that requires every KEPT table, now also
+`sign_in_banners`, `sign_in_notices`, `sign_in_contacts` and
+`legal_documents`, to be byte-identical after a reset.
+
+### 27.2 Browser walk — sign-in page
+
+Screenshots are in `var/shots`. The database held one banner, two notices and
+three contacts created through the administrator endpoints.
+
+| View | Files | What was checked |
+|---|---|---|
+| 1440 light | `signin-content-1440-light` | Banner left, credentials and help line right, footer with copyright and both legal links |
+| 1440 dark | `signin-content-1440-dark` | Same layout on dark tokens; no panel loses its border or placeholder contrast |
+| 768 | `signin-content-768` | One column, credentials first, banner and notices below |
+| 390 | `signin-content-390` | Same order, banner shortened, no control off-screen |
+| Administrator panel | `signin-admin-panel-light`, `signin-admin-panel-dark` | The Settings → Sign-in page drawer with banner upload, notice list and contact boxes |
+| Filled and edited | `signin-admin-filled-1440`, `signin-admin-edited-1440` | After saving a notice edit, a contact edit and a banner replacement |
+| Forgot Password | `signin-forgot-1440` | The panel names the Administrator, shows the Customer Support box and sends nothing |
+| Legal | `signin-legal-1440` | A published Privacy Policy renders in the dialog |
+| Save ID | `signin-saveid-return` | After sign-out and reload the User ID is prefilled and the box is ticked |
+
+**Measured content changes.**
+
+- Both banners were submitted through the drawer's own form
+  (`#signinBannerForm`) with a generated PNG placed on the file input as a
+  `FileList`; the native file-picker dialog itself was not opened. Replacing
+  the banner changed the bytes served by
+  `/api/public/sign-in/banners/{id}/image`: the new file was reported as
+  `38c66ffb4ac454af0381da36fee4d1136025816a` (SHA-1), 21,638 bytes, and the
+  old file was gone from `var/signin_banners`.
+- The revised notice title and body and the revised Service contact appeared on
+  the public page after saving, which is the check that the page reads the
+  database rather than fixed markup.
+- Publishing Privacy Policy with an empty body was refused with `422` and the
+  message "Write the document text before publishing it". After entering 156
+  characters of synthetic text it published, and the footer link opened it.
+- Save ID: with the box ticked the User ID reappeared after sign-out and a full
+  reload; with it cleared the stored value was removed. The value lives in
+  `localStorage` only; no password is stored or prefilled.
+
+**Role checks.** A `viewer` login received `403` from `GET`, `POST` and `PATCH`
+under `/api/admin/sign-in/*`, while the three `/api/public/sign-in*` reads
+answered `200` with no session. The gates are evaluated on the server
+(`require_admin("user:manage")`), not only in the browser.
+
+### 27.3 Browser walk — Overview period control
+
+| View | File | Measured |
+|---|---|---|
+| 1440 light, open | `dash-range-1440-light` | Trigger label `Nov 1, 2026 - Nov 4, 2026`, 231 px; popover 620 px; months November and December 2026; `scrollWidth == viewport` |
+| 1440 dark, open | `dash-range-1440-dark` | Same geometry on dark tokens |
+| 1440 closed | `dash-range-1440-closed` | Trigger with caret and calendar glyph, no popover |
+| 768 | `dash-range-768` | Popover fits the content column |
+| 390 open and closed | `dash-range-390`, `dash-range-390-closed` | Trigger 336 px, popover 358 px, zero horizontal overflow at 390×844 |
+
+Preset clicks were exercised for `30D`, `90D` and `This FY`; the label moved and
+the dashboard issued `GET /api/dashboard?from_date=…&to_date=…`, not a
+client-side filter. A custom pair was then picked in the calendar — 5 October
+start, 20 October end — and the request
+`from_date=2026-10-05&to_date=2026-10-20` returned `200`; the preset lost its
+pressed state and the pair was written to `localStorage`. The backwards-pair
+swap, future-day disabling and the next-month arrow limit were read at
+`app.js:1760-1846` but not separately driven; only the layout, the preset
+clicks, one custom pair, the resulting requests and the stored values were
+exercised.
+
+### 27.4 Regression run
+
+`python -m pytest -q` on 4 November 2026 against the isolated test database:
+**454 passed, 0 failed, 693 warnings in 258.61 s (exit 0)**. This includes the
+eight sign-in tests, the 24 database-reset tests after the KEPT-table seeds were
+added, and the whole earlier suite. The run recreated the test database and left
+it at `0030_sign_in_content`.
+
+### 27.5 What was not verified
+
+| Item | Why |
+|---|---|
+| Migration `0030_sign_in_content` on development and production | Applied to the test database only. Development is at `0029_totp` and production at `0028_advances`; migrating them needs a verified backup and the owner's explicit `apply <fingerprint>` |
+| Automatic rotation with two or more banners | Only one image file was uploaded during the walk, so the 6-second cycle never advanced; `startPromoRotation` and its pause bindings were read, not executed |
+| Real tablet and phone | Desktop-emulated widths only; no physical device |
+| Screen readers | No assistive tooling in this workspace |
+| Opening the operating system's file-picker dialog | The form was submitted with a generated `FileList` on the input; the native dialog cannot be opened headlessly, but the panel's upload path itself ran |
+| A dedicated test for the range widget | The server-side window is covered by `tests/test_dashboard_phase2.py` and `test_dashboard_phase3.py`; the popover itself has browser evidence only |
+| Production data | Not touched in this round |

@@ -58,7 +58,7 @@ const state = {user: null, perms: new Set(), features: null, featureFlags: [], m
 state.rp.filters = {employee_id: "", department: "", branch_id: ""};
 state.rp.opts = null;
 
-/* The Overview window. A preset fills both fields; editing a field clears it.
+/* The Overview window. A preset fills the trigger; a custom range clears it.
    Dates are calendar days in the business time zone, sent to the server as
    from_date/to_date so the figures are counted there, not filtered here. */
 function dayIso(d) {
@@ -66,7 +66,7 @@ function dayIso(d) {
 }
 function dashWindow(key, now = new Date()) {
   const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (key === "7d" || key === "30d" || key === "90d") {
+  if (key === "1d" || key === "7d" || key === "30d" || key === "90d") {
     const n = Number(key.slice(0, -1));
     const s = new Date(t); s.setDate(t.getDate() - (n - 1));
     return {from: dayIso(s), to: dayIso(t)};
@@ -89,6 +89,10 @@ try {
       && from <= to) {
     state.dashFrom = from; state.dashTo = to;
     state.dashPreset = localStorage.getItem("hb.dashPreset") || "";
+    // Presets are relative to today, so a stored one no longer matches once
+    // the day moves on. The pair stays; only the highlight is dropped.
+    const presetWindow = state.dashPreset ? dashWindow(state.dashPreset) : null;
+    if (!presetWindow || presetWindow.from !== from || presetWindow.to !== to) state.dashPreset = "";
   }
 } catch (e) { /* storage blocked */ }
 try {
@@ -252,8 +256,10 @@ function leave(msg) {
   state.user = null; state.perms = new Set(); state.features = null;
   state.featureFlags = []; state.movements = null;
   state.dashboard = null; state.dashLoading = false; state.dashError = null;
+  signinAdmin.loaded = false;
   closePalette();
   closeDrawer();
+  closeDashRange();
   $("#mustChange").classList.add("hide");
   $("#changePwForm").reset();
   $("#totp").classList.add("hide");
@@ -261,6 +267,7 @@ function leave(msg) {
   $("#shell").classList.add("hide");
   $("#login").classList.remove("hide");
   $("#lerr").textContent = msg || "";
+  refreshSignInContent();
   $("#u").focus();
 }
 function showPasswordChange(u) {
@@ -296,7 +303,8 @@ async function login(e) {
   const btn = $("#loginBtn"); btn.disabled = true;
   const res = await api("/api/auth/login", {method: "POST", body: {username: $("#u").value.trim(), password: $("#p").value}});
   btn.disabled = false;
-  if (!res.ok) { $("#lerr").textContent = res.status === 401 ? "Username or password is incorrect." : detail(res.body); return; }
+  if (!res.ok) { $("#lerr").textContent = res.status === 401 ? "User ID or password is incorrect." : detail(res.body); return; }
+  saveLoginId();
   const data = res.body || {};
   // The server decides whether a password alone is enough. It never sends a
   // session cookie until the authenticator step (or enrollment) is complete.
@@ -305,6 +313,209 @@ async function login(e) {
   $("#p").value = "";
   const me = await api("/api/auth/me");           // permissions come from the server, not from a copy in this file
   enter(me.ok ? me.body : res.body);
+}
+
+/* ---------- sign-in page content (public, Administrator-managed) ---------- */
+const SAVE_ID_KEY = "hb.savedUser";
+const promoMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+let signinContent = null;
+let promoSlides = [];
+let promoIndex = 0;
+let promoTimer = null;
+let promoPaused = false;
+
+function applySavedId() {
+  let saved = "";
+  try { saved = localStorage.getItem(SAVE_ID_KEY) || ""; } catch (err) { /* storage blocked */ }
+  if (saved) { $("#u").value = saved; $("#saveId").checked = true; }
+}
+function saveLoginId() {
+  const value = $("#u").value.trim();
+  try {
+    if ($("#saveId").checked && value) localStorage.setItem(SAVE_ID_KEY, value);
+    else localStorage.removeItem(SAVE_ID_KEY);
+  } catch (err) { /* storage blocked */ }
+}
+function signinEmpty(text = "No data yet") {
+  const p = document.createElement("p");
+  p.className = "signin-empty"; p.textContent = text;
+  return p;
+}
+function signinDate(iso) {
+  const value = new Date(`${iso}T00:00:00`);
+  return Number.isNaN(value.getTime()) ? iso
+    : value.toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
+}
+function contactBox(contact) {
+  const box = document.createElement("div"); box.className = "contact-box";
+  const label = document.createElement("h3"); label.textContent = contact.label;
+  box.appendChild(label);
+  if (contact.detail) {
+    const p = document.createElement("p"); p.textContent = contact.detail; box.appendChild(p);
+  }
+  if (contact.phone) {
+    const p = document.createElement("p"), a = document.createElement("a");
+    a.href = `tel:${contact.phone.replace(/[^\d+]/g, "")}`; a.textContent = contact.phone;
+    p.appendChild(a); box.appendChild(p);
+  }
+  if (contact.email) {
+    const p = document.createElement("p"), a = document.createElement("a");
+    a.href = `mailto:${encodeURIComponent(contact.email)}`; a.textContent = contact.email;
+    p.appendChild(a); box.appendChild(p);
+  }
+  return box;
+}
+function renderPromo(banners) {
+  const track = $("#promoTrack"), dots = $("#promoDots"), controls = $("#promoControls");
+  stopPromoRotation();
+  track.replaceChildren(); dots.replaceChildren();
+  promoSlides = []; promoIndex = 0;
+  if (!banners.length) { track.appendChild(signinEmpty()); controls.classList.add("hide"); return; }
+  banners.forEach((banner, i) => {
+    const slide = document.createElement(banner.link_url ? "a" : "div");
+    slide.className = "promo-slide";
+    slide.setAttribute("aria-hidden", "true");
+    if (banner.link_url) {
+      slide.href = banner.link_url;             // the server refused javascript: and // hosts
+      if (/^https?:\/\//i.test(banner.link_url)) {
+        slide.target = "_blank"; slide.rel = "noopener noreferrer";
+      }
+    }
+    const img = document.createElement("img");
+    img.src = banner.image_url; img.alt = banner.title || "Promotion";
+    img.loading = i ? "lazy" : "eager";
+    slide.appendChild(img);
+    if (banner.title) {
+      const caption = document.createElement("span");
+      caption.className = "promo-caption"; caption.textContent = banner.title;
+      slide.appendChild(caption);
+    }
+    track.appendChild(slide); promoSlides.push(slide);
+    const dot = document.createElement("button");
+    dot.type = "button"; dot.className = "promo-dot"; dot.setAttribute("role", "tab");
+    dot.setAttribute("aria-selected", "false");
+    dot.setAttribute("aria-label", `Banner ${i + 1} of ${banners.length}`);
+    dot.addEventListener("click", () => { showPromo(i); startPromoRotation(); });
+    dots.appendChild(dot);
+  });
+  controls.classList.toggle("hide", banners.length < 2);
+  showPromo(0);
+  startPromoRotation();
+}
+function showPromo(index) {
+  if (!promoSlides.length) return;
+  promoIndex = (index + promoSlides.length) % promoSlides.length;
+  promoSlides.forEach((slide, i) => {
+    slide.classList.toggle("on", i === promoIndex);
+    slide.setAttribute("aria-hidden", i === promoIndex ? "false" : "true");
+  });
+  $$("#promoDots .promo-dot").forEach((dot, i) =>
+    dot.setAttribute("aria-selected", i === promoIndex ? "true" : "false"));
+}
+function startPromoRotation() {
+  stopPromoRotation();
+  if (promoPaused || promoSlides.length < 2 || document.hidden
+      || (promoMotion && promoMotion.matches)) return;
+  promoTimer = setInterval(() => showPromo(promoIndex + 1), 6000);
+}
+function stopPromoRotation() {
+  if (promoTimer) { clearInterval(promoTimer); promoTimer = null; }
+}
+function renderNotices(notices) {
+  const list = $("#noticeList"); list.replaceChildren();
+  $("#noticeCount").textContent = notices.length
+    ? `${notices.length} item${notices.length === 1 ? "" : "s"}` : "";
+  if (!notices.length) { list.appendChild(signinEmpty()); return; }
+  notices.forEach(notice => {
+    const item = document.createElement("article"); item.className = "notice-item";
+    const when = document.createElement("time");
+    when.dateTime = notice.date; when.textContent = signinDate(notice.date);
+    const title = document.createElement("h3"); title.textContent = notice.title;
+    item.append(when, title);
+    if (notice.body) {
+      const text = document.createElement("p"); text.textContent = notice.body; item.appendChild(text);
+    }
+    list.appendChild(item);
+  });
+}
+function renderContacts(contacts) {
+  const list = $("#contactList"); list.replaceChildren();
+  if (!contacts.length) { list.appendChild(signinEmpty()); return; }
+  contacts.forEach(contact => list.appendChild(contactBox(contact)));
+}
+function renderLegalLinks(legal) {
+  const docs = new Map((legal || []).map(doc => [doc.key, doc]));
+  $$("[data-legal]").forEach(btn => {
+    const doc = docs.get(btn.dataset.legal);
+    if (doc) { btn.textContent = doc.title || btn.textContent; btn.classList.remove("hide"); }
+    else btn.classList.add("hide");
+  });
+  const shown = $$("[data-legal]").filter(btn => !btn.classList.contains("hide")).length;
+  const sep = $("[data-legal-sep]");
+  if (sep) sep.classList.toggle("hide", shown < 2);
+}
+function renderCopyright(company) {
+  const name = (company && (company.trade_name || company.name)) || "HERBANOVA";
+  $("#copyright").textContent = `© ${new Date().getFullYear()} ${name}. All rights reserved.`;
+}
+async function refreshSignInContent() {
+  const res = await api("/api/public/sign-in");
+  signinContent = res.ok ? res.body
+    : {company: null, banners: [], notices: [], contacts: [], legal: []};
+  renderCopyright(signinContent.company);
+  renderPromo(signinContent.banners || []);
+  renderNotices(signinContent.notices || []);
+  renderContacts(signinContent.contacts || []);
+  renderLegalLinks(signinContent.legal || []);
+}
+async function openLegal(key) {
+  const button = $(`[data-legal="${key}"]`);
+  const fallback = key === "privacy" ? "Privacy Policy" : "Terms & Conditions";
+  $("#legalTitle").textContent = button && button.textContent ? button.textContent : fallback;
+  const body = $("#legalBody"); body.textContent = "";
+  const dialog = $("#legalDialog");
+  if (!dialog.open) dialog.showModal();
+  const res = await api(`/api/public/sign-in/legal/${key}`);
+  if (!res.ok) { body.textContent = "Could not load this document. Try again."; return; }
+  if (!res.body.published || !res.body.body) { body.textContent = "Not published yet"; return; }
+  if (res.body.title) $("#legalTitle").textContent = res.body.title;
+  body.textContent = res.body.body;
+}
+function openForgot() {
+  const box = $("#forgotContacts"); box.replaceChildren();
+  const contacts = (signinContent && signinContent.contacts) || [];
+  const support = contacts.find(contact => /customer\s*support/i.test(contact.label || ""));
+  const chosen = support || contacts[0];
+  const hint = document.createElement("p"); hint.className = "forgot-note";
+  if (!chosen) {
+    hint.textContent = "No data yet. Ask your Administrator to publish a Customer Support contact.";
+    box.appendChild(hint);
+  } else {
+    hint.textContent = support
+      ? "Contact this team to have your password reset:"
+      : "Customer Support is not configured yet. The Administrator's published contact is:";
+    box.append(hint, contactBox(chosen));
+  }
+  const dialog = $("#forgotDialog");
+  if (!dialog.open) dialog.showModal();
+}
+function bindSignInPage() {
+  applySavedId();
+  $("#promoPrev").addEventListener("click", () => { showPromo(promoIndex - 1); startPromoRotation(); });
+  $("#promoNext").addEventListener("click", () => { showPromo(promoIndex + 1); startPromoRotation(); });
+  const promo = $("#promo");
+  promo.addEventListener("mouseenter", () => { promoPaused = true; stopPromoRotation(); });
+  promo.addEventListener("mouseleave", () => { promoPaused = false; startPromoRotation(); });
+  promo.addEventListener("focusin", () => { promoPaused = true; stopPromoRotation(); });
+  promo.addEventListener("focusout", () => { promoPaused = false; startPromoRotation(); });
+  document.addEventListener("visibilitychange", startPromoRotation);
+  $("#forgotBtn").addEventListener("click", openForgot);
+  $$("[data-legal]").forEach(btn => btn.addEventListener("click", () => openLegal(btn.dataset.legal)));
+  $("#legalClose").addEventListener("click", () => $("#legalDialog").close());
+  $("#forgotClose").addEventListener("click", () => $("#forgotDialog").close());
+  [$("#legalDialog"), $("#forgotDialog")].forEach(dialog => {
+    dialog.addEventListener("click", e => { if (e.target === dialog) dialog.close(); });
+  });
 }
 
 /* ---------- two-step verification (Administrator accounts) ---------- */
@@ -391,7 +602,8 @@ function totpToggleRecovery() {
 }
 async function boot() {
   const me = await api("/api/auth/me");
-  if (me.ok) enter(me.body); else $("#login").classList.remove("hide");
+  if (me.ok) enter(me.body);
+  else { $("#login").classList.remove("hide"); refreshSignInContent(); }
 }
 
 /* ---------- data ---------- */
@@ -508,6 +720,7 @@ const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read"
                    approvals: "approval:read",
                    hr: "hr:read", scheduled: "email:manage"};
 function route() {
+  closeDashRange();
   // A hash may carry a query (`#/accounts/gst-out?from=...&to=...`) so a KPI
   // card can open its own report with the same window. The query is read here
   // and applied after the section has rendered.
@@ -722,10 +935,7 @@ function renderDash() {
   $("#dashGreet").textContent = u ? `${greeting()}, ${u.username}` : "Overview";
   $("#dashDate").textContent = new Date().toLocaleDateString("en-IN", {
     weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  const fromEl = $("#dashFrom"), toEl = $("#dashTo");
-  const today = dayIso(new Date());
-  if (fromEl) { fromEl.max = today; if (document.activeElement !== fromEl) fromEl.value = state.dashFrom; }
-  if (toEl) { toEl.max = today; if (document.activeElement !== toEl) toEl.value = state.dashTo; }
+  renderDashRange();
   $$("[data-dash-preset]").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.dashPreset === state.dashPreset)));
   const dateErr = $("#dashDateErr");
@@ -1521,7 +1731,153 @@ function applyDashDates(from, to, preset) {
 
 function setDashPreset(key) {
   const w = dashWindow(key);
+  closeDashRange();
   applyDashDates(w.from, w.to, key);
+}
+
+/* The period popover: a preset strip and two month grids for a custom range.
+   Selection is start then end; picking an earlier day than the start swaps the
+   two, so a range is always sent to the server as from <= to. */
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November", "December"];
+const DOW = ["M", "T", "W", "T", "F", "S", "S"];
+const dashCal = {open: false, first: "", start: "", end: "", hover: "", picking: false};
+
+const dashDayLabel = iso => new Date(iso + "T00:00:00")
+  .toLocaleDateString("en-US", {month: "short", day: "numeric", year: "numeric"});
+
+function renderDashRange() {
+  const label = $("#dashRangeLabel");
+  if (label) label.textContent = `${dashDayLabel(state.dashFrom)} - ${dashDayLabel(state.dashTo)}`;
+}
+
+function shiftDashCalendar(dir) {
+  const first = new Date(dashCal.first + "T00:00:00");
+  dashCal.first = dayIso(new Date(first.getFullYear(), first.getMonth() + dir, 1));
+  drawDashCalendar();
+}
+
+function drawDashCalendar() {
+  const first = new Date(dashCal.first + "T00:00:00");
+  const today = dayIso(new Date());
+  $("#dashCalMonths").innerHTML = [0, 1].map(k => {
+    const m = new Date(first.getFullYear(), first.getMonth() + k, 1);
+    const y = m.getFullYear(), mon = m.getMonth();
+    const lead = (m.getDay() + 6) % 7;
+    const days = new Date(y, mon + 1, 0).getDate();
+    let cells = "";
+    for (let i = 0; i < lead; i++) cells += '<span class="drp-blank"></span>';
+    for (let day = 1; day <= days; day++) {
+      const iso = dayIso(new Date(y, mon, day));
+      cells += `<button type="button" class="drp-day" data-day="${iso}" `
+        + `aria-label="${dashDayLabel(iso)}"${iso > today ? " disabled" : ""}>${day}</button>`;
+    }
+    return `<div class="drp-month"><div class="drp-month-name">${MONTH_NAMES[mon]} ${y}</div>`
+      + `<div class="drp-week" aria-hidden="true">${DOW.map(w => `<span>${w}</span>`).join("")}</div>`
+      + `<div class="drp-days">${cells}</div></div>`;
+  }).join("");
+  const now = new Date();
+  const current = [now.getFullYear(), now.getMonth()];
+  $("#dashCalNext").disabled =
+    first.getFullYear() > current[0]
+    || (first.getFullYear() === current[0] && first.getMonth() >= current[1]);
+  paintDashCalendar();
+}
+
+function paintDashCalendar() {
+  const a = dashCal.start;
+  const b = dashCal.picking ? dashCal.hover : dashCal.end;
+  const lo = a && b ? (a <= b ? a : b) : "";
+  const hi = a && b ? (a <= b ? b : a) : "";
+  const today = dayIso(new Date());
+  $$("#dashCalMonths .drp-day").forEach(el => {
+    const iso = el.dataset.day;
+    const edge = iso === dashCal.start || iso === dashCal.end;
+    el.classList.toggle("today", iso === today);
+    el.classList.toggle("edge", edge);
+    el.classList.toggle("in-range", !!lo && !!hi && iso > lo && iso < hi);
+    el.setAttribute("aria-pressed", String(edge));
+  });
+  $("#dashCalHint").textContent = dashCal.picking ? "Choose the end date" : "Choose the start date";
+  $("#dashRangePreview").textContent = !dashCal.start ? "No range selected"
+    : dashCal.picking ? `${dashDayLabel(dashCal.start)} - …`
+      : `${dashDayLabel(dashCal.start)} - ${dashDayLabel(dashCal.end)}`;
+}
+
+function openDashRange() {
+  if (dashCal.open) return;
+  dashCal.open = true;
+  dashCal.first = state.dashFrom.slice(0, 8) + "01";
+  dashCal.start = state.dashFrom;
+  dashCal.end = state.dashTo;
+  dashCal.hover = "";
+  dashCal.picking = false;
+  $("#dashRangePop").classList.remove("hide");
+  $("#dashRangeBtn").setAttribute("aria-expanded", "true");
+  drawDashCalendar();
+}
+
+function closeDashRange() {
+  if (!dashCal.open) return;
+  dashCal.open = false;
+  $("#dashRangePop").classList.add("hide");
+  $("#dashRangeBtn").setAttribute("aria-expanded", "false");
+}
+
+function pickDashDay(iso) {
+  if (!iso) return;
+  if (!dashCal.picking) {
+    dashCal.start = iso;
+    dashCal.end = "";
+    dashCal.hover = "";
+    dashCal.picking = true;
+    paintDashCalendar();
+    return;
+  }
+  let from = dashCal.start, to = iso;
+  if (to < from) { const swap = from; from = to; to = swap; }
+  dashCal.picking = false;
+  dashCal.start = from;
+  dashCal.end = to;
+  paintDashCalendar();
+  closeDashRange();
+  applyDashDates(from, to, "");
+}
+
+function bindDashRange() {
+  if (!$("#dashRangeWrap")) return;
+  $("#dashRangeBtn").addEventListener("click", () => {
+    if (dashCal.open) closeDashRange(); else openDashRange();
+  });
+  $("#dashRangeCancel").addEventListener("click", closeDashRange);
+  $("#dashCalPrev").addEventListener("click", () => shiftDashCalendar(-1));
+  $("#dashCalNext").addEventListener("click", () => {
+    if (!$("#dashCalNext").disabled) shiftDashCalendar(1);
+  });
+  $("#dashCalMonths").addEventListener("click", e => {
+    const day = e.target.closest(".drp-day");
+    if (day && !day.disabled) pickDashDay(day.dataset.day);
+  });
+  $("#dashCalMonths").addEventListener("mouseover", e => {
+    if (!dashCal.open || !dashCal.picking) return;
+    const day = e.target.closest(".drp-day");
+    if (!day || day.disabled || day.dataset.day === dashCal.hover) return;
+    dashCal.hover = day.dataset.day;
+    paintDashCalendar();
+  });
+  $("#dashCalMonths").addEventListener("mouseleave", () => {
+    if (!dashCal.picking || !dashCal.hover) return;
+    dashCal.hover = "";
+    paintDashCalendar();
+  });
+  document.addEventListener("click", e => {
+    if (dashCal.open && !e.target.closest("#dashRangeWrap")) closeDashRange();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape" || !dashCal.open) return;
+    closeDashRange();
+    $("#dashRangeBtn").focus();
+  });
 }
 
 /* ---------- MoM & YoY comparison ---------- */
@@ -7265,6 +7621,286 @@ async function renderHrSelf() {
     ${notes.length ? `<ul class="hr-notes">${notes.map(x => `<li class="hr-note"><b>${esc(x.title)}</b><p>${esc(x.body || "")}</p>
       <small>${esc(fmtStamp(x.published_at))}</small></li>`).join("")}</ul>` : `<p class="muted">No announcements yet.</p>`}`;
 }
+/* ---------- sign-in page administration (Settings) ---------- */
+const signinAdmin = {loaded: false, loading: false,
+                     data: {banners: [], notices: [], contacts: [], legal: []}};
+
+function signinAdminVisible() {
+  return can("user:manage")
+    && String((state.user && state.user.role) || "").trim().toLowerCase() === "admin";
+}
+function signinActiveChip(on) {
+  return `<span class="chip ${on ? "ok" : "off"}">${on ? "Active" : "Hidden"}</span>`;
+}
+async function loadSigninAdmin(force) {
+  if (signinAdmin.loading) return;
+  signinAdmin.loading = true;
+  const res = await api("/api/admin/sign-in");
+  signinAdmin.loading = false;
+  if (!res.ok) {
+    $("#signinAdminBody").innerHTML = `<p class="muted">${esc(detail(res.body))}</p>`;
+    return;
+  }
+  signinAdmin.data = res.body;
+  signinAdmin.loaded = true;
+  renderSigninAdmin();
+  if (force) signinAdmin.loaded = true;
+}
+function renderSigninAdmin() {
+  const d = signinAdmin.data;
+  const banners = d.banners.length ? d.banners.map(b => `<tr>
+      <td><img class="sa-thumb" src="${esc(b.image_url)}" alt=""></td>
+      <td class="strong">${esc(b.title)}</td>
+      <td>${b.link_url ? esc(b.link_url) : "–"}</td>
+      <td class="n">${b.sort_order}</td>
+      <td>${signinActiveChip(b.active)}</td>
+      <td><div class="rowacts">
+        <button class="btn sm ghost" type="button" data-act="signin-banner-edit" data-id="${b.id}">Edit</button>
+        <button class="btn sm danger" type="button" data-act="signin-banner-delete" data-id="${b.id}">Delete</button>
+      </div></td></tr>`).join("") : `<tr><td colspan="6" class="muted">No data yet.</td></tr>`;
+  const notices = d.notices.length ? d.notices.map(n => `<tr>
+      <td>${esc(fmtDate(n.date))}</td>
+      <td class="strong">${esc(n.title)}</td>
+      <td>${esc(n.body ? (n.body.length > 80 ? n.body.slice(0, 80) + "…" : n.body) : "–")}</td>
+      <td>${signinActiveChip(n.active)}</td>
+      <td><div class="rowacts">
+        <button class="btn sm ghost" type="button" data-act="signin-notice-edit" data-id="${n.id}">Edit</button>
+        <button class="btn sm danger" type="button" data-act="signin-notice-delete" data-id="${n.id}">Delete</button>
+      </div></td></tr>`).join("") : `<tr><td colspan="5" class="muted">No data yet.</td></tr>`;
+  const contacts = d.contacts.length ? d.contacts.map(c => `<tr>
+      <td class="strong">${esc(c.label)}</td>
+      <td>${esc(c.detail || "–")}</td>
+      <td>${esc(c.phone || "–")}</td>
+      <td>${esc(c.email || "–")}</td>
+      <td class="n">${c.sort_order}</td>
+      <td>${signinActiveChip(c.active)}</td>
+      <td><div class="rowacts">
+        <button class="btn sm ghost" type="button" data-act="signin-contact-edit" data-id="${c.id}">Edit</button>
+        <button class="btn sm danger" type="button" data-act="signin-contact-delete" data-id="${c.id}">Delete</button>
+      </div></td></tr>`).join("") : `<tr><td colspan="7" class="muted">No data yet.</td></tr>`;
+  const legal = d.legal.length ? d.legal.map(l => `<tr>
+      <td class="strong">${esc(l.title)}</td>
+      <td><code>${esc(l.key)}</code></td>
+      <td>${l.published && l.body ? `<span class="chip ok">Published</span>`
+        : `<span class="chip off">Not published yet</span>`}</td>
+      <td><div class="rowacts">
+        <button class="btn sm ghost" type="button" data-act="signin-legal-edit" data-key="${esc(l.key)}">Edit text</button>
+      </div></td></tr>`).join("") : `<tr><td colspan="4" class="muted">No data yet.</td></tr>`;
+  $("#signinAdminBody").innerHTML = `
+    <section class="sa-section">
+      <h3 class="sa-h">Promotion banners
+        <button class="btn sm" type="button" data-act="signin-banner-new">Upload banner</button></h3>
+      <div class="tw"><table><thead><tr><th>Image</th><th>Title</th><th>Link</th><th class="n">Order</th><th>State</th><th></th></tr></thead>
+        <tbody>${banners}</tbody></table></div>
+      <p class="help">Active banners rotate on the sign-in page in sort order. JPEG, PNG or WebP, up to 2 MB.</p>
+    </section>
+    <section class="sa-section">
+      <h3 class="sa-h">Notices
+        <button class="btn sm" type="button" data-act="signin-notice-new">Add notice</button></h3>
+      <div class="tw"><table><thead><tr><th>Date</th><th>Title</th><th>Text</th><th>State</th><th></th></tr></thead>
+        <tbody>${notices}</tbody></table></div>
+      <p class="help">The sign-in page shows the five most recent active notices.</p>
+    </section>
+    <section class="sa-section">
+      <h3 class="sa-h">Help line
+        <button class="btn sm" type="button" data-act="signin-contact-new">Add contact box</button></h3>
+      <div class="tw"><table><thead><tr><th>Box</th><th>Detail</th><th>Phone</th><th>Email</th><th class="n">Order</th><th>State</th><th></th></tr></thead>
+        <tbody>${contacts}</tbody></table></div>
+      <p class="help">Each box needs a label and at least one of detail, phone or email.</p>
+    </section>
+    <section class="sa-section">
+      <h3 class="sa-h">Legal pages</h3>
+      <div class="tw"><table><thead><tr><th>Document</th><th>Key</th><th>State</th><th></th></tr></thead>
+        <tbody>${legal}</tbody></table></div>
+      <p class="help">The footer links open the published text. An unpublished page shows “Not published yet”.</p>
+    </section>`;
+}
+function signinBannerForm(id) {
+  const row = id ? signinAdmin.data.banners.find(b => b.id === id) : null;
+  openDrawer(row ? "Edit banner" : "Upload banner",
+    "A banner is an image file stored on this server. JPEG, PNG or WebP, up to 2 MB.", `
+    <form id="signinBannerForm" data-id="${row ? row.id : ""}" novalidate>
+      <label>Title <input name="title" maxlength="120" value="${esc(row ? row.title : "")}" required></label>
+      <label>Link (optional) <input name="link_url" maxlength="500" value="${esc(row ? row.link_url || "" : "")}"
+        placeholder="/ui/#/products or https://…"></label>
+      <div class="row2">
+        <label>Sort order <input name="sort_order" type="number" step="1" value="${row ? row.sort_order : 0}"></label>
+        <div><label class="check" style="margin-bottom:0"><input type="checkbox" name="active" ${!row || row.active ? "checked" : ""}> Active</label></div>
+      </div>
+      <label>${row ? "Replace image (optional)" : "Image"}
+        <input type="file" name="file" accept="image/jpeg,image/png,image/webp"${row ? "" : " required"}>
+      </label>
+      ${row ? `<div class="note">Leave the file empty to keep the current image. Choose a file to replace it.</div>` : ""}
+      <div class="actions"><button class="btn" type="submit">${row ? "Save banner" : "Upload and save"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+      <div class="err"></div>
+    </form>`);
+}
+async function signinUpload(path, fd) {
+  let res;
+  try { res = await fetch(path, {method: "POST", credentials: "same-origin", body: fd}); }
+  catch (e) { return {status: 0, ok: false, body: {detail: "Cannot reach the server. Check the connection and try again."}}; }
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* empty body */ }
+  if (res.status === 401 && state.user) leave("Your session has ended. Sign in again.");
+  return {status: res.status, ok: res.ok, body};
+}
+async function saveSigninBanner(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  const title = form.elements.title.value.trim();
+  const link = form.elements.link_url.value.trim();
+  const sort = Number(form.elements.sort_order.value || 0);
+  const active = form.elements.active.checked;
+  const file = form.elements.file.files[0];
+  if (!title) { err.textContent = "Enter a title."; return; }
+  if (!id && !file) { err.textContent = "Choose an image to upload."; return; }
+  btn.disabled = true;
+  let res;
+  if (!id) {
+    const fd = new FormData();
+    fd.append("file", file); fd.append("title", title); fd.append("link_url", link);
+    fd.append("sort_order", String(sort)); fd.append("active", String(active));
+    res = await signinUpload("/api/admin/sign-in/banners", fd);
+  } else {
+    res = await api(`/api/admin/sign-in/banners/${id}`,
+      {method: "PATCH", body: {title, link_url: link, sort_order: sort, active}});
+    if (res.ok && file) {
+      const fd = new FormData(); fd.append("file", file);
+      res = await signinUpload(`/api/admin/sign-in/banners/${id}/image`, fd);
+    }
+  }
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, id ? "Banner saved" : "Banner uploaded");
+  closeDrawer(); loadSigninAdmin(true);
+}
+async function deleteSigninBanner(id) {
+  if (!confirm("Delete this banner and its image? The sign-in page stops showing it.")) return;
+  const res = await api(`/api/admin/sign-in/banners/${id}`, {method: "DELETE"});
+  toast(res, "Banner deleted");
+  if (res.ok) loadSigninAdmin(true);
+}
+function signinNoticeForm(id) {
+  const row = id ? signinAdmin.data.notices.find(n => n.id === id) : null;
+  openDrawer(row ? "Edit notice" : "Add notice",
+    "The sign-in page shows the date, title and text of active notices.", `
+    <form id="signinNoticeForm" data-id="${row ? row.id : ""}" novalidate>
+      <label>Title <input name="title" maxlength="160" value="${esc(row ? row.title : "")}" required></label>
+      <label>Notice date <input name="notice_date" type="date" value="${row ? row.date : new Date().toISOString().slice(0, 10)}" required></label>
+      <label>Text (optional) <textarea name="body" maxlength="2000" rows="5">${esc(row ? row.body || "" : "")}</textarea></label>
+      <label class="check"><input type="checkbox" name="active" ${!row || row.active ? "checked" : ""}> Show on the sign-in page</label>
+      <div class="actions"><button class="btn" type="submit">${row ? "Save notice" : "Add notice"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+      <div class="err"></div>
+    </form>`);
+}
+async function saveSigninNotice(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  const title = form.elements.title.value.trim();
+  const date = form.elements.notice_date.value;
+  const body = form.elements.body.value.trim() || null;
+  const active = form.elements.active.checked;
+  if (!title) { err.textContent = "Enter a title."; return; }
+  if (!date) { err.textContent = "Choose a date."; return; }
+  btn.disabled = true;
+  const payload = {title, body, notice_date: date, active};
+  const res = id
+    ? await api(`/api/admin/sign-in/notices/${id}`, {method: "PATCH", body: payload})
+    : await api("/api/admin/sign-in/notices", {method: "POST", body: payload});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, id ? "Notice saved" : "Notice added");
+  closeDrawer(); loadSigninAdmin(true);
+}
+async function deleteSigninNotice(id) {
+  if (!confirm("Delete this notice? It disappears from the sign-in page.")) return;
+  const res = await api(`/api/admin/sign-in/notices/${id}`, {method: "DELETE"});
+  toast(res, "Notice deleted");
+  if (res.ok) loadSigninAdmin(true);
+}
+function signinContactForm(id) {
+  const row = id ? signinAdmin.data.contacts.find(c => c.id === id) : null;
+  openDrawer(row ? "Edit contact box" : "Add contact box",
+    "The boxes appear under the sign-in form. At least one contact value is required.", `
+    <form id="signinContactForm" data-id="${row ? row.id : ""}" novalidate>
+      <label>Box label <input name="label" maxlength="60" value="${esc(row ? row.label : "")}" required></label>
+      <label>Detail (optional) <input name="detail" maxlength="160" value="${esc(row ? row.detail || "" : "")}"></label>
+      <div class="row2">
+        <label>Phone (optional) <input name="phone" maxlength="40" value="${esc(row ? row.phone || "" : "")}"></label>
+        <label>Email (optional) <input name="email" maxlength="160" type="email" value="${esc(row ? row.email || "" : "")}"></label>
+      </div>
+      <div class="row2">
+        <label>Sort order <input name="sort_order" type="number" step="1" value="${row ? row.sort_order : 0}"></label>
+        <div><label class="check" style="margin-bottom:0"><input type="checkbox" name="active" ${!row || row.active ? "checked" : ""}> Show on the sign-in page</label></div>
+      </div>
+      <div class="actions"><button class="btn" type="submit">${row ? "Save box" : "Add box"}</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+      <div class="err"></div>
+    </form>`);
+}
+async function saveSigninContact(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const id = form.dataset.id ? Number(form.dataset.id) : null;
+  const label = form.elements.label.value.trim();
+  const detail = form.elements.detail.value.trim() || null;
+  const phone = form.elements.phone.value.trim() || null;
+  const email = form.elements.email.value.trim() || null;
+  const sort = Number(form.elements.sort_order.value || 0);
+  const active = form.elements.active.checked;
+  if (!label) { err.textContent = "Enter a box label."; return; }
+  btn.disabled = true;
+  const payload = {label, detail, phone, email, sort_order: sort, active};
+  const res = id
+    ? await api(`/api/admin/sign-in/contacts/${id}`, {method: "PATCH", body: payload})
+    : await api("/api/admin/sign-in/contacts", {method: "POST", body: payload});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, id ? "Contact box saved" : "Contact box added");
+  closeDrawer(); loadSigninAdmin(true);
+}
+async function deleteSigninContact(id) {
+  if (!confirm("Delete this contact box? Its details disappear from the sign-in page.")) return;
+  const res = await api(`/api/admin/sign-in/contacts/${id}`, {method: "DELETE"});
+  toast(res, "Contact box deleted");
+  if (res.ok) loadSigninAdmin(true);
+}
+function signinLegalForm(key) {
+  const row = signinAdmin.data.legal.find(d => d.key === key)
+    || {key, title: key === "privacy" ? "Privacy Policy" : "Terms & Conditions", body: "", published: false};
+  openDrawer(row.title || "Legal page",
+    "The published text opens from the sign-in footer. Nothing is invented: an empty page shows “Not published yet”.", `
+    <form id="signinLegalForm" data-key="${esc(key)}" novalidate>
+      <label>Title <input name="title" maxlength="120" value="${esc(row.title)}" required></label>
+      <label>Text <textarea name="body" maxlength="20000" rows="14">${esc(row.body || "")}</textarea></label>
+      <label class="check"><input type="checkbox" name="published" ${row.published ? "checked" : ""}> Publish this document</label>
+      <div class="note">Publishing is refused while the text is empty.</div>
+      <div class="actions"><button class="btn" type="submit">Save text</button>
+        <button class="btn ghost" type="button" data-act="close">Cancel</button></div>
+      <div class="err"></div>
+    </form>`, true);
+}
+async function saveSigninLegal(form) {
+  const err = $(".err", form), btn = $("button[type=submit]", form);
+  err.textContent = "";
+  const key = form.dataset.key;
+  const title = form.elements.title.value.trim();
+  const body = form.elements.body.value.trim();
+  const published = form.elements.published.checked;
+  if (!title) { err.textContent = "Enter a title."; return; }
+  btn.disabled = true;
+  const res = await api(`/api/admin/sign-in/legal/${key}`,
+    {method: "PATCH", body: {title, body: body || null, published}});
+  btn.disabled = false;
+  if (!res.ok) { err.textContent = detail(res.body); return; }
+  toast(res, published ? "Document published" : "Document saved");
+  closeDrawer(); loadSigninAdmin(true);
+}
+
 function renderSettings() {
   if (!$("#setEmprows")) return;
   const panel = $("#emailPanel");
@@ -7275,6 +7911,12 @@ function renderSettings() {
     if (showEmail) renderEmailSettings();
   }
   renderDbResetPanel();
+  const signinPanel = $("#signinAdminPanel");
+  if (signinPanel) {
+    const showSignin = signinAdminVisible();
+    signinPanel.classList.toggle("hide", !showSignin);
+    if (showSignin && !signinAdmin.loaded && !signinAdmin.loading) loadSigninAdmin();
+  }
   $("#setEmprows").innerHTML = state.employees.slice(0, 50).map(e => `<tr><td class="strong">${esc(e.code)}</td><td>${esc(e.full_name)}</td>
     <td>${esc(e.department || "–")}</td><td>${esc(e.designation || "–")}</td><td><span class="chip ${e.status === "active" ? "ok" : "off"}">${esc(e.status)}</span></td></tr>`).join("");
 }
@@ -10526,6 +11168,16 @@ document.addEventListener("click", e => {
   if (a && a.dataset.act === "dbreset-verify") return dbResetVerify();
   if (a && a.dataset.act === "dbreset-cancel") return dbResetCancel();
   if (a && a.dataset.act === "new-entry") return entryForm(a.dataset.kind || "receipt");
+  if (a && a.dataset.act === "signin-banner-new") return signinBannerForm();
+  if (a && a.dataset.act === "signin-banner-edit") return signinBannerForm(Number(a.dataset.id));
+  if (a && a.dataset.act === "signin-banner-delete") return deleteSigninBanner(Number(a.dataset.id));
+  if (a && a.dataset.act === "signin-notice-new") return signinNoticeForm();
+  if (a && a.dataset.act === "signin-notice-edit") return signinNoticeForm(Number(a.dataset.id));
+  if (a && a.dataset.act === "signin-notice-delete") return deleteSigninNotice(Number(a.dataset.id));
+  if (a && a.dataset.act === "signin-contact-new") return signinContactForm();
+  if (a && a.dataset.act === "signin-contact-edit") return signinContactForm(Number(a.dataset.id));
+  if (a && a.dataset.act === "signin-contact-delete") return deleteSigninContact(Number(a.dataset.id));
+  if (a && a.dataset.act === "signin-legal-edit") return signinLegalForm(a.dataset.key);
   if (a && a.dataset.act === "load-gst") return loadGstRegister();
   if (a && a.dataset.act === "load-entries") return loadEntriesWindow();
   if (a && a.dataset.act === "load-tb") return loadTrialBalance();
@@ -10862,6 +11514,10 @@ document.addEventListener("submit", e => {
   else if (f.id === "expReverseForm") saveExpenseReverse(f);
   else if (f.id === "expHeadForm") saveExpenseHead(f);
   else if (f.id === "expSettingsForm") saveExpenseSettings(f);
+  else if (f.id === "signinBannerForm") saveSigninBanner(f);
+  else if (f.id === "signinNoticeForm") saveSigninNotice(f);
+  else if (f.id === "signinContactForm") saveSigninContact(f);
+  else if (f.id === "signinLegalForm") saveSigninLegal(f);
   else if (f.id === "focForm") saveFocNote(f);
   else if (f.id === "focReasonForm") saveFocReason(f);
   else if (f.id === "leadForm") saveLead(f);
@@ -10931,9 +11587,6 @@ document.addEventListener("change", e => {
   }
   if (e.target.id === "rpCategory") { state.rpCategory = e.target.value; drawRpTabs(); }
   if (e.target.id === "em-type") applyEmailType(true);
-  if (e.target.id === "dashFrom" || e.target.id === "dashTo") {
-    applyDashDates($("#dashFrom").value, $("#dashTo").value, "");
-  }
   if (e.target.id === "cmpMonth") setCompareMonth(e.target.value);
   if (e.target.id === "geoFrom" || e.target.id === "geoTo") {
     applyGeoDates($("#geoFrom").value, $("#geoTo").value);
@@ -11138,5 +11791,7 @@ try {
 } catch (e) { /* storage blocked */ }
 applyTheme(startTheme === "dark" ? "dark" : "light");
 
+bindSignInPage();
+bindDashRange();
 boot();
 })();

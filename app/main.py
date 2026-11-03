@@ -12,7 +12,7 @@ from .core.limiter import limiter
 from .api import (accounts, admin, approvals, audit, auth, costs, credit_notes, dashboard,
                   debit_notes, db_reset, distributors, email_reports, email_settings,
                   employees, expenses, features, foc, gst, hr, inventory, invoices, ledger, leads, modules, periods, printing, products,
-                  purchase_orders, reports, roles, sales_orders, suppliers, tax, users)
+                  purchase_orders, reports, roles, sales_orders, signin, suppliers, tax, users)
 
 app = FastAPI(title="HERBANOVA Business Control System")
 app.state.limiter = limiter
@@ -121,6 +121,8 @@ app.include_router(reports.router)
 app.include_router(email_reports.router)
 app.include_router(email_reports.public_router)
 app.include_router(email_settings.router)
+app.include_router(signin.router)
+app.include_router(signin.admin_router)
 
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles

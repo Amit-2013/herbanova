@@ -29,7 +29,7 @@ The browser talks to the API through one helper, `api()` at `static/js/app.js:36
 
 | Surface | Count | Source |
 |---|---|---|
-| API routes under `/api/` | 255 paths / 327 methods (3 Nov 2026, `APIRoute`s excluding HEAD/OPTIONS) | introspected from `app.main:app` |
+| API routes under `/api/` | 267 paths / 343 methods (4 Nov 2026, `APIRoute`s excluding HEAD/OPTIONS) | introspected from `app.main:app` |
 | Browser views (`#/…`) | 20 | `static/js/app.js:200-208` |
 | Report catalogue entries | 25 | `app/services/reports.py` `CATALOG` |
 | Request schemas with a JSON body | 64 | `app/api/**` |
@@ -62,6 +62,24 @@ The SPA is a single page with hash routes. Visibility of a view is decided in th
 
 **Login behaviour:** case-insensitive usernames, lockout after repeated failures, the per-IP rate limit, the forced change on the next request and session revocation through `token_version` are VERIFIED (code) in `app/api/auth.py` and `app/core/rbac.py`. The forced-change branch, including the block, the policy checks and token revocation, is now covered by `tests/test_authz.py::test_forced_password_change_gates_data_and_revokes_the_old_token`; the basic boot path is covered by `tests/test_smoke.py:1`.
 
+### 1.1 Sign-in page content
+
+The signed-out screen renders only what the server supplies. There are no fixed banners, notices, phone numbers or policy text in `index.html` or `app.js`; an empty table produces a neutral "No data yet" row.
+
+| UI element | UI source | API | Fields | Effect | Perm |
+|---|---|---|---|---|---|
+| Whole page on load | `loadSignIn()` / `renderPromo()`, `renderNotices()`, `renderContacts()`, `renderLegalLinks()` in `app.js` | `GET /api/public/sign-in` | `company{name,trade_name}`, `banners[]`, `notices[]`, `contacts[]`, `legal[]` | One unauthenticated read; active rows only; notices capped at 5, newest date first | none (60/min per IP) |
+| Promotion banner image | `<img>` inside `.promo-slide` | `GET /api/public/sign-in/banners/{id}/image` | bytes | JPEG/PNG/WebP served from `var/signin_banners`; `Cache-Control: public, no-cache`; 404 when inactive or the file is missing | none (240/min per IP) |
+| Legal dialog | footer buttons `[data-legal]`, `openLegal()` | `GET /api/public/sign-in/legal/{privacy\|terms}` | `key`, `title`, `published`, `body` | `body` is `null` and `published` is `false` until the Administrator writes and publishes text; the dialog then says "Not published yet" | none (60/min per IP) |
+| Save ID (`#saveId`) | `applySavedId()` on boot, `saveLoginId()` after a successful login | — | `hb.savedUser` in `localStorage` | The User ID, never the password, is remembered after a successful sign-in and refilled on the next visit; clearing the box removes it | none |
+| Forgot Password | `#forgotBtn` panel | — | uses the `contacts[]` row labelled Customer Support | Names the Administrator and shows the configured support box; sends no e-mail and reveals no account state | none |
+| Banner list / upload / replace / remove | Settings → Sign-in page (`#signinAdminPanel`, `#signinBannerForm`) | `GET /api/admin/sign-in`; `POST /api/admin/sign-in/banners` (multipart `file`, `title`, `link_url`, `sort_order`, `active`); `POST …/banners/{id}/image`; `PATCH …/banners/{id}`; `DELETE …/banners/{id}`; `GET …/banners/{id}/image` | `title` ≤120, `link_url` ≤500 and only `http(s)://` or a single-slash path, `sort_order`, `active`; file checked with PIL and capped at 2,000,000 bytes | A replaced image's old file is deleted; the value stored is a file name, not a path | `user:manage` |
+| Notice list / edit | admin panel | `POST /api/admin/sign-in/notices`; `PATCH`/`DELETE …/notices/{id}` | `title` ≤160, `body` ≤2000, `notice_date`, `active` | Order on the public page is `notice_date` descending | `user:manage` |
+| Help-line boxes (Sales, Service, Customer Support) | admin panel | `POST /api/admin/sign-in/contacts`; `PATCH`/`DELETE …/contacts/{id}` | `label` ≤60 required, `detail` ≤160, `phone` ≤40, `email` ≤160, `sort_order`, `active` | At least one of detail/phone/e-mail is required; the e-mail must look like an address | `user:manage` |
+| Legal text editor | admin panel | `PATCH /api/admin/sign-in/legal/{key}` | `title` ≤120, `body` ≤20,000, `published` | Publishing with an empty or blank body is refused with `422` "Write the document text before publishing it"; `privacy` and `terms` are the only keys | `user:manage` |
+
+**No invented content.** `tests/test_signin.py::test_the_public_page_never_invents_content` pins the empty payload, and `test_unpublished_legal_text_is_not_returned` pins the withheld body. The server gates every write through `require_admin("user:manage")`; the browser hiding the panel is a convenience only. Migration `0030_sign_in_content` creates the four tables and seeds the two legal rows unpublished; downgrade drops them and leaves any banner file on disk for an operator to remove.
+
 **M-01 (High) — FIXED 31 October 2026.** The server blocks every endpoint except `/api/auth/me`, `/api/auth/logout` and `/api/auth/change-password` while `must_change_password` is true (`app/core/rbac.py:27-29, 74-100`). The SPA now shows a blocking **Set a new password** screen (`index.html:43-59`; `showPasswordChange` at `static/js/app.js:116-125`) whenever the identity reports `must_change_password`, hides the shell and login form, validates the policy and confirmation in the browser, posts to the endpoint, and only then enters the shell with the fresh identity (`app.js:126-146`). Sign out remains available from the screen. Verified in an in-app browser against a throwaway database: sign-in with a temporary password showed the screen, a mismatched confirmation was rejected locally, the correct change loaded the shell, and the spurious 403 banner formerly caused by loading the approvals queue without `approval:read` was removed (`app.js:170-175, 222`).
 
 ---
@@ -72,7 +90,7 @@ The SPA is a single page with hash routes. Visibility of a view is decided in th
 
 | UI element | API | Permission | Content |
 |---|---|---|---|
-| Period strip (From/To dates; presets 7D, 30D, 90D, This month, Last month, This FY), all tiles and panels | `GET /api/dashboard?from_date=&to_date=` | `require_login`, then per section | Payload as at §2.1; the browser sends dates, and the legacy `range=` parameter is still accepted for older callers but limited to 7/30/90 (422 otherwise). `to_date` in the future or `from_date` after `to_date` → **422**. Sections the role cannot read are `null`, never `0`. |
+| Period control: one trigger (`#dashRangeLabel`, e.g. `Oct 5, 2026 - Nov 3, 2026`) opens a popover with presets `1D` `7D` `30D` `Month to date` `Last month` `90D` `This FY` and a two-month calendar (first click start, second end, backwards pair swapped), all tiles and panels | `GET /api/dashboard?from_date=&to_date=` | `require_login`, then per section | Payload as at §2.1; the browser sends calendar dates, and the legacy `range=` parameter is still accepted for older callers but limited to 7/30/90 (422 otherwise). `to_date` in the future or `from_date` after `to_date` → **422**. `from_date`/`to_date` persist in `localStorage` (`hb.dashFrom`, `hb.dashTo`, `hb.dashPreset`); a stored preset that no longer matches today is dropped from the highlight, not from the window. Sections the role cannot read are `null`, never `0`. |
 | Stock KPIs, expiry watch, warehouses, open POs | same payload | `stock:read` | `stock`, `purchase_orders`, `stock_by_warehouse`, `expiry_watch`, `open_pos`, stock KPI tiles |
 | Sales KPIs, top products, category panel | same payload | `sales:read` | `orders_ready`, `top_products`, `category_sales`; sales side of `sales_vs_purchases` is masked server-side without it |
 | Receivables ageing | same payload | `accounts:read` | `receivables_ageing`, from `ledger.ageing_rows` (same function as the report) |

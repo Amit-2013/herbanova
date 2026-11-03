@@ -26,12 +26,11 @@ are **PARTIAL** and say so. Every requirement that is not met is listed in §5.
 
 | Status | Count | Meaning |
 |---|---:|---|
-| MET | 88 | Exercised by a test or a live check, as cited. |
-| MET (test mode) | 1 | Works end-to-end but delivery is deliberately redirected. |
+| MET | 123 | Exercised by a test or a live check, as cited. Includes the one test-mode delivery row and rows whose status cell qualifies the evidence (API only, browser only). |
 | PARTIAL | 8 | Works with the stated limitation; no dedicated test or an unrun path. |
 | NOT VERIFIED | 2 | Exists but was not executed (destructive or environment-bound). |
-| NOT BUILT | 3 | In scope of the audit, not implemented. |
-| **Total requirements** | **102** | 12 governing + 90 functional. |
+| NOT BUILT | 2 | In scope of the audit, not implemented. |
+| **Total requirements** | **135** | 12 governing + 123 functional. |
 
 A feature can be MET while a related capability is NOT BUILT; for example
 payroll preparation is MET while payroll posting to the ledger is not built
@@ -71,6 +70,7 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | R-21 | Database reset behind a secondary password | AUDIT | `/api/db/reset` | code read; destructive, not run | NOT VERIFIED |
 | R-131 | The password policy is enforced and the temporary password is generated on the server; the browser holds no policy, no generator and no password after the one-time display | BRIEF (new) | `validate_password`, `generate_temp_password`; `ChangePassword` validator; `/api/users` | `test_authz.py` (400 wrong current, 422 too-short, 400 unchanged, token revocation); code review of `app/api/users.py` | MET |
 | R-132 | Administrator and Super Administrator accounts must present a 6-digit TOTP code (30-second step, no SMS/e-mail/network) after the password; the server issues no session before it, refuses a session without the `otp` claim, seals the secret, blocks replay, issues 10 single-use recovery codes and locks code entry after five failures; every other role is unchanged | BRIEF (new) | `app/services/totp.py`; `/api/auth/login`, `/2fa/setup`, `/2fa/confirm`, `/2fa/verify`, `/2fa/status`; migration `0029_totp` | `tests/test_totp.py` (8 tests); browser enrollment walk 3 Nov 2026; `docs/ADMIN_2FA.md` | MET (API and tests); migration `0029_totp` not applied to development |
+| R-134 | The sign-in page's promotion banners, dated notices, three help-line boxes and two legal pages are managed by the Administrator from the database, not fixed in the frontend; an empty box shows "No data yet" and an unwritten legal page "Not published yet"; uploaded banner files are type- and size-checked and served only through the public image route; every write is Administrator-only | BRIEF (new) | `app/api/signin.py`; `app/models/signin.py`; Settings → Sign-in page in `app.js`; migration `0030_sign_in_content` | `tests/test_signin.py` (8 tests); browser walk 4 Nov 2026 at 1440/768/390 in both themes; `docs/VERIFICATION_REPORT.md` §27 | MET (API, tests and browser); migration `0030_sign_in_content` applied to the test database only |
 
 ### 4.2 Masters
 
@@ -149,6 +149,7 @@ payroll preparation is MET while payroll posting to the ledger is not built
 | R-51 | Reconciliation checks on financial reports | REG MOD-08 | `app/services/reports.py` | `test_report_reconciliation.py` | MET |
 | R-52 | Overview KPIs, search, activity, system health | REG MOD-08 | `/api/dashboard` | `test_dashboard.py`, `test_dashboard_phase2.py` | MET |
 | R-53 | Period selector, permission-masked sections, drill-downs | AUDIT | `/api/dashboard`, `/expiry`, `/activity` | `test_dashboard_phase2.py` | MET |
+| R-135 | The Overview period is chosen from one trigger showing the current window, presets `1D 7D 30D Month to date Last month 90D This FY` and a two-month calendar (start, then end; a backwards pair swapped); the pair survives a reload, the dates are sent to the server as `from_date`/`to_date`, and an invalid or future window is refused with the server's message | BRIEF (new) | `renderDashRange`, `drawDashCalendar`, `pickDashDay`, `bindDashRange`, `applyDashDates` in `app.js`; `/api/dashboard` | browser walk 4 Nov 2026 at 1440/768/390 in both themes, preset and custom-range requests logged (`docs/VERIFICATION_REPORT.md` §27.3) | MET (browser); the control has no unit test — the server window is covered by `test_dashboard_phase2.py` and `test_dashboard_phase3.py` |
 | R-54 | Sales/purchase series and approvals card | AUDIT | `/api/dashboard` | `test_dashboard_v2.py` | MET |
 | R-55 | Month-to-date, projection, 12-month trend, breakdowns | AUDIT | `/api/dashboard/compare` | `test_dashboard_compare.py` | MET |
 | R-56 | State geography from frozen invoice snapshots | AUDIT | `/api/dashboard/geo` | `test_dashboard_geo.py` | MET |
@@ -255,9 +256,9 @@ payroll preparation is MET while payroll posting to the ledger is not built
 
 | Check | Command / source | Result |
 |---|---|---|
-| Route count | `app.routes` | 327 API operations across 255 paths (3 Nov 2026, after the Administrator second factor; `APIRoute`s excluding HEAD/OPTIONS) |
-| Test count | `python -m pytest -q` | 446 passed (3 Nov 2026, after the second factor, note print, KPI-card and e-mail fixes) |
-| Schema | `alembic current` / `heads` | head `0029_totp`; both the disposable test database and the development database are at it (dev applied 3 November 2026 after a verified backup and explicit approval); production is not migrated |
+| Route count | `app.routes` | 343 API operations across 267 paths (4 Nov 2026, after the sign-in content routes; `APIRoute`s excluding HEAD/OPTIONS) |
+| Test count | `python -m pytest -q` | 454 passed (4 Nov 2026, after the sign-in page, its reset-regression seeds and the period control) |
+| Schema | `alembic current` / `heads` | head `0030_sign_in_content`; the disposable test database is at it (recreated by the 4 November suite); development is at `0029_totp` and production at `0028_advances` — neither is migrated to 0030 |
 | Migration round-trip | upgrade → downgrade 0018 → upgrade head | pass (verification report §3) |
 | Live smoke | 75 GET routes as Administrator | all 200 |
 | Roles | read-only `roles` query + live matrix | 44 keys for Administrator; HR role sets as documented |
