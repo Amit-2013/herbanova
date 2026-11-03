@@ -31,6 +31,7 @@ from ..core.rbac import is_admin, require
 from ..core.rules import PO_RATE_REMARKS
 from ..models.core import (Batch, Product, PurchaseOrder, PurchaseOrderLine, Warehouse)
 from ..models.suppliers import GoodsReceipt, GoodsReceiptLine, Supplier
+from ..services import advances
 from ..services.audit import audit
 from ..services.inventory import post_movement
 
@@ -403,9 +404,15 @@ def receive_po(po_id: int, body: ReceiveIn, db: Session = Depends(get_db),
     status = "received" if all(received.get(pid, Decimal(0)) >= qty
                                for pid, qty in ordered.items()) else "partially_received"
     po.status = status
+    # Goods just received create the payable; an advance already held by the
+    # supplier settles it now, dated on the receipt and never counted as cost.
+    db.flush()
+    applied = advances.apply_to_purchase_order(db, po, on_date=date.today(), actor_id=user.id)
     audit(db, user.id, "po.receive", f"po:{po.id}",
           {"po_number": po.po_number, "grn": grn.grn_number, "warehouse_id": warehouse.id,
            "owner": body.owner, "status": status, "delivery_note": body.delivery_note,
+           "advance_applied": [{"payment_id": a["payment_id"], "number": a["number"],
+                                "amount": str(a["amount"])} for a in applied],
            "lines": [{"sku": r.sku, "batch_no": r.batch_no, "qty": str(r.qty)} for r in out_lines]})
     if (warehouse.capacity_units is not None
             and projected > warehouse.capacity_units and body.allow_over_capacity):

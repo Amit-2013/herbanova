@@ -43,6 +43,15 @@ class User(Base):
     reset_key_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     db_reset_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     db_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Google Authenticator (TOTP) for the Administrator roles. The secret is
+    # sealed with APP_SECRET; recovery codes are argon2 hashes and single-use.
+    totp_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    totp_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    totp_last_counter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    totp_failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    totp_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    totp_recovery_hashes: Mapped[list | None] = mapped_column(JSON, nullable=True)
     role_rel = relationship("Role", foreign_keys=[role_id], lazy="selectin")
 
 class Product(Base):
@@ -52,9 +61,13 @@ class Product(Base):
                       # portable so the model can also be created in SQLite)
                       CheckConstraint("hsn IS NULL OR length(hsn) BETWEEN 4 AND 8",
                                       name="ck_product_hsn"),
+                      CheckConstraint("reorder_level IS NULL OR reorder_level >= 0",
+                                      name="ck_products_reorder_nonneg"),
                       # Names match the migration-created indexes (schema parity).
                       Index("ix_products_status", "status"),
-                      Index("ix_products_hsn", "hsn"))
+                      Index("ix_products_hsn", "hsn"),
+                      Index("ix_products_category", "category"),
+                      Index("ix_products_brand", "brand"))
     id: Mapped[int] = mapped_column(primary_key=True)
     sku: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
@@ -66,6 +79,12 @@ class Product(Base):
     # the business enters them (no code assumes a rate or a unit).
     hsn: Mapped[str | None] = mapped_column(String(8))
     uqc: Mapped[str | None] = mapped_column(String(3))
+    # Grouping and replenishment. Every value is entered by the user: a blank
+    # category is reported as uncategorised and a blank reorder level as "not
+    # set", never as zero or as an invented grouping.
+    category: Mapped[str | None] = mapped_column(String(60))
+    brand: Mapped[str | None] = mapped_column(String(60))
+    reorder_level: Mapped[Decimal | None] = mapped_column(QTY)
 
 class Warehouse(Base):
     __tablename__ = "warehouses"
@@ -108,7 +127,7 @@ class StockMovement(Base):
         Index("ix_stock_movements_invoice", "invoice_id"),
         CheckConstraint(
             "cost_source IS NULL OR cost_source IN "
-            "('po_receipt','weighted_average','partial','return','uncosted')",
+            "('po_receipt','weighted_average','partial','return','uncosted','foc')",
             name="ck_stock_movement_cost_source"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -222,7 +241,13 @@ class SalesOrder(Base):
     submitted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     dispatched_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Stamped when the order becomes approved, whether the checks passed outright
+    # or an approver decided it. Null on orders approved before this column.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The date promised to the buyer. Null means no promise was recorded, so no
+    # lateness is claimed for that order.
+    expected_delivery_date: Mapped[date | None] = mapped_column(Date)
     cancel_reason: Mapped[str | None] = mapped_column(String(300))
     lines: Mapped[list["SalesOrderLine"]] = relationship(
         back_populates="order", lazy="selectin", cascade="all, delete-orphan")
@@ -330,7 +355,10 @@ class Invoice(Base):
     __table_args__ = (
         UniqueConstraint("invoice_number", "financial_year", name="uq_invoice_number_fy"),
         CheckConstraint("status IN ('issued','cancelled')", name="ck_invoice_status"),
+        CheckConstraint("payment_terms_days IS NULL OR payment_terms_days >= 0",
+                        name="ck_invoice_payment_terms"),
         Index("ix_invoices_invoice_date", "invoice_date"),
+        Index("ix_invoices_due_date", "due_date"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     invoice_number: Mapped[str] = mapped_column(String(16), index=True)
@@ -380,6 +408,11 @@ class Invoice(Base):
     transporter_name: Mapped[str | None] = mapped_column(String(120))
     eway_bill_number: Mapped[str | None] = mapped_column(String(30))
     eway_bill_date: Mapped[date | None] = mapped_column(Date)
+    # Payment terms are copied from the distributor when the invoice is issued,
+    # not read from the master later, so a term change cannot rewrite the due
+    # date of a document already sent to the buyer (GAP-A04).
+    payment_terms_days: Mapped[int | None] = mapped_column(Integer)
+    due_date: Mapped[date | None] = mapped_column(Date)
     issued_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     cancel_reason: Mapped[str | None] = mapped_column(String(300))

@@ -28,6 +28,9 @@ class ProductIn(BaseModel):
     mrp: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
     hsn: str = Field(pattern=r"^[0-9]{4,8}$")
     uqc: str | None = Field(default=None, max_length=3)
+    category: str | None = Field(default=None, max_length=60)
+    brand: str | None = Field(default=None, max_length=60)
+    reorder_level: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=3)
 
     @field_validator("sku")
     @classmethod
@@ -41,6 +44,10 @@ class ProductIn(BaseModel):
     @classmethod
     def uqc_norm(cls, v): return v.strip().upper() if isinstance(v, str) and v.strip() else None
 
+    @field_validator("category", "brand")
+    @classmethod
+    def label_norm(cls, v): return v.strip() if isinstance(v, str) and v.strip() else None
+
 
 class ProductPatch(BaseModel):
     """A product may be corrected; the SKU is fixed because other records use it."""
@@ -50,6 +57,9 @@ class ProductPatch(BaseModel):
     status: str | None = Field(default=None, max_length=20)
     hsn: str | None = Field(default=None, pattern=r"^[0-9]{4,8}$")
     uqc: str | None = Field(default=None, max_length=3)
+    category: str | None = Field(default=None, max_length=60)
+    brand: str | None = Field(default=None, max_length=60)
+    reorder_level: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=3)
 
     @field_validator("hsn")
     @classmethod
@@ -58,6 +68,10 @@ class ProductPatch(BaseModel):
     @field_validator("uqc")
     @classmethod
     def uqc_norm(cls, v): return v.strip().upper() if isinstance(v, str) and v.strip() else None
+
+    @field_validator("category", "brand")
+    @classmethod
+    def label_norm(cls, v): return v.strip() if isinstance(v, str) and v.strip() else None
 
 
 class ProductOut(BaseModel):
@@ -69,6 +83,9 @@ class ProductOut(BaseModel):
     status: str
     hsn: str | None
     uqc: str | None
+    category: str | None = None
+    brand: str | None = None
+    reorder_level: Decimal | None = None
     model_config = {"from_attributes": True}
 
 
@@ -82,13 +99,28 @@ def list_products(response: Response, q: str | None = None,
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Product.sku.ilike(like), Product.name.ilike(like),
-                              Product.hsn.ilike(like)))
+                              Product.hsn.ilike(like), Product.category.ilike(like),
+                              Product.brand.ilike(like)))
     if status:
         stmt = stmt.where(Product.status == status)
     stmt = stmt.order_by(sort_column(Product, "sku", {
         "sku": Product.sku, "name": Product.name, "hsn": Product.hsn, "mrp": Product.mrp,
+        "category": Product.category, "brand": Product.brand,
+        "reorder_level": Product.reorder_level,
         "status": Product.status}, Product.sku))
     return paginate(db, stmt, response, page, page_size)
+
+
+@router.get("/catalog")
+def catalog_values(db: Session = Depends(get_db), _=Depends(require("product:read"))):
+    """Distinct grouping values already in the master, for the form's suggestions.
+
+    Reading them back keeps the vocabulary consistent without inventing a fixed
+    list of categories or brands.
+    """
+    def distinct(column):
+        return sorted(v for v in db.scalars(select(column).distinct()).all() if v)
+    return {"categories": distinct(Product.category), "brands": distinct(Product.brand)}
 
 
 @router.get("/options")

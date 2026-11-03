@@ -32,8 +32,8 @@ from ..models.tax import CompanyProfile
 from ..api.dashboard import (_period_stats as period_stats,
                              _purchases_by_day as purchases_by_day,
                              _sales_by_day as sales_by_day)
-from ..services import (accounting, capacity, exports, ledger, profit_loss, reports,
-                        reports_pdf)
+from ..services import (accounting, balance_sheet, capacity, exports, ledger,
+                        profit_loss, reports, reports_pdf)
 
 ZERO = Decimal("0.00")
 IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -149,12 +149,18 @@ def _profit_data(statement: dict | None) -> dict | None:
         "invoices_costed": statement["cogs"]["invoices_costed"],
         "invoices_total": statement["cogs"]["invoices_total"],
         "expenses": (s(statement["expenses"]["total"])
-                     if statement["expenses"]["complete"] else None),
+                     if statement["expenses"]["complete"]
+                     or statement["expenses"]["total"] > 0 else None),
         "expenses_complete": statement["expenses"]["complete"],
+        "expenses_partial": (not statement["expenses"]["complete"]
+                             and statement["expenses"]["total"] > 0),
         "expenses_tracked_from": statement["expenses"]["tracked_from"],
         "payroll": (s(statement["payroll"]["total"])
-                    if statement["payroll"]["complete"] else None),
+                    if statement["payroll"]["complete"]
+                    or statement["payroll"]["periods"] else None),
         "payroll_complete": statement["payroll"]["complete"],
+        "payroll_partial": (not statement["payroll"]["complete"]
+                            and bool(statement["payroll"]["periods"])),
         "net_profit": (s(statement["net_profit"]["value"])
                        if statement["net_profit"]["available"] else None),
         "net_profit_available": statement["net_profit"]["available"],
@@ -368,6 +374,7 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
     accounts = (accounting.window(db, start, end)
                 if include_accounts and meta["accounts"] else None)
     profit = profit_loss.statement(db, start, end) if accounts else None
+    balance = balance_sheet.balance_sheet(db, end) if accounts else None
     prev_profit = profit_loss.statement(db, *previous) if profit else None
     year_profit = profit_loss.statement(db, *last_year) if profit else None
     ageing_window = accounts["outstanding"] if accounts else _ageing(db, end)
@@ -496,7 +503,9 @@ def build(db: Session, pack_key: str, start: date, end: date, *,
         "credit": accounts["credit"] if accounts else None,
         "position": position,
         "unavailable": accounting.UNAVAILABLE if include_accounts else [],
-        "notes": ((accounts["notes"] + (profit["notes"] if profit else []))
+        "balance_sheet": balance,
+        "notes": ((accounts["notes"] + (profit["notes"] if profit else [])
+                   + (balance["warnings"] if balance else []))
                   if accounts else [
                       "Sales are tax-inclusive; purchases are valued at order cost, "
                       "exclusive of tax.",
@@ -596,6 +605,12 @@ def _summary_rep(data: dict) -> dict:
         profit = data.get("profit") or {}
         gaps = profit.get("gaps") or []
         first_gap = gaps[0]["code"] if gaps else "GAP-P01"
+        sheet = data.get("balance_sheet") or {}
+        totals = sheet.get("totals") or {}
+        assets = totals.get("asset")
+        owed = (None if assets is None else
+                totals["liability"] + totals["equity"]
+                + totals["retained_earnings"])
 
         def shown(key):
             return profit.get(key) if profit.get(key) is not None else "No data yet"
@@ -609,6 +624,10 @@ def _summary_rep(data: dict) -> dict:
                            {"metric": "Collections", "value": acc["collections"]["total"], "gap": ""},
                            {"metric": "Returns", "value": acc["returns"]["value"], "gap": ""},
                            {"metric": "Output GST", "value": acc["output_gst"]["total"], "gap": ""},
+                           {"metric": "Net GST payable",
+                            "value": (acc["net_gst"]["net_total"]
+                                      if acc["net_gst"]["available"] else "No data yet"),
+                            "gap": ""},
                            {"metric": "Receivables outstanding", "value": acc["outstanding"]["total"], "gap": ""},
                            {"metric": "Payables outstanding", "value": acc["payables"]["total"], "gap": ""},
                            {"metric": profit.get("gross_profit_label", "Gross profit"),
@@ -621,7 +640,18 @@ def _summary_rep(data: dict) -> dict:
                            {"metric": "Net profit", "value": shown("net_profit"),
                             "gap": ("" if profit.get("net_profit") is not None
                                     else first_gap)},
-                           {"metric": "Balance sheet", "value": "No data yet", "gap": "GAP-A10"},
+                           {"metric": "Balance sheet · total assets",
+                            "value": _money(assets) if assets is not None else "No data yet",
+                            "gap": "" if assets is not None else "GAP-A10"},
+                           {"metric": "Balance sheet · liabilities, equity and earnings",
+                            "value": _money(owed) if owed is not None else "No data yet",
+                            "gap": "" if owed is not None else "GAP-A10"},
+                           {"metric": "Balance sheet · difference",
+                            "value": (_money(totals["difference"])
+                                      if totals.get("difference") is not None
+                                      else "No data yet"),
+                            "gap": ("" if totals.get("balanced") is not False
+                                    else "Partial")},
                        ], "totals": None})
 
     checks = []
@@ -658,9 +688,9 @@ def _summary_rep(data: dict) -> dict:
             "checks": checks,
             "tables": tables,
             "limitations": data["notes"] + [
-                "A locked accounting month refuses cost corrections and expense "
-                "creation or reversal; invoice changes, credit notes, receipts, "
-                "payments and year-end close are not covered (GAP-A03)."]}
+                "A closed financial year refuses dated documents until the "
+                "Administrator reopens it; a locked accounting month stays the "
+                "narrower gate for corrections."]}
 
 
 def build_attachments(db: Session, data: dict, pack_key: str) -> list[dict]:

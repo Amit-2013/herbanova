@@ -53,6 +53,7 @@ MODES = ("business", "full")
 # in-database audit trail.
 BUSINESS_TABLES = (
     "approval_requests",
+    "bank_statement_lines", "bank_statements",
     "batches",
     "cost_corrections",
     "credit_note_lines", "credit_notes",
@@ -61,6 +62,7 @@ BUSINESS_TABLES = (
     "expenses",
     "foc_note_lines", "foc_notes",
     "goods_receipt_lines", "goods_receipts",
+    "gst_returns",
     "hr_announcements",
     "hr_attendance", "hr_attendance_corrections", "hr_import_batches",
     "hr_leave_applications", "hr_leave_balances",
@@ -69,11 +71,16 @@ BUSINESS_TABLES = (
     "hr_payroll_periods",
     "invoice_lines", "invoices",
     "lead_activities", "leads",
+    "opening_balances",
+    "payment_allocations",
     "payments",
     "print_logs",
+    "purchase_invoices",
     "purchase_order_lines", "purchase_orders",
     "sales_order_lines", "sales_orders",
+    "statutory_challans",
     "stock_movements",
+    "voucher_lines", "vouchers",
 )
 
 # Kept by a business reset. Listed so the screen and the documentation can state
@@ -82,12 +89,15 @@ KEPT_TABLES = (
     "company_profile", "discount_slabs", "distributors", "document_sequences",
     "email_recipients", "email_schedule_recipients", "email_schedules",
     "email_settings", "feature_flags", "expense_heads", "expense_settings",
+    "financial_year_closes",
     "hr_approval_workflows", "hr_attendance_rules", "hr_branches", "hr_departments",
     "hr_employee_assets", "hr_employee_documents", "hr_holidays", "hr_leave_types",
     "hr_letter_templates", "hr_period_locks", "hr_salary_components",
     "hr_salary_structure_lines", "hr_salary_structures", "hr_saved_filters",
     "hr_shifts", "hr_work_locations",
-    "products", "roles", "suppliers",
+    "ledger_accounts", "legal_documents",
+    "products", "roles", "sign_in_banners", "sign_in_contacts", "sign_in_notices",
+    "suppliers",
     "tax_rates", "users", "warehouses", "employees", "audit_log",
 )
 

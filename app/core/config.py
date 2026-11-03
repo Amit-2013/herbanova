@@ -8,6 +8,13 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     demo_mode: bool = False
     log_level: str = "INFO"
+    # Connection pool. The API and the email worker share one PostgreSQL
+    # server, so the pool must be bounded and its idle connections recycled
+    # before the server or a firewall drops them.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout: int = 30
+    db_pool_recycle: int = 1800
     # Telegram notifications. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env only;
     # never put real values here (empty = disabled).
     telegram_bot_token: str = ""

@@ -31,6 +31,7 @@ from ..models.core import ApprovalRequest
 from ..models.expenses import (APPROVED, PENDING, REJECTED, REVERSED, STATUSES,
                                Expense, ExpenseHead, ExpenseSettings,
                                SYSTEM_PAYROLL_HEAD)
+from ..services import periods
 from ..services.audit import audit
 from ..services.hr import active_period_lock
 
@@ -193,6 +194,12 @@ def _refuse_locked_month(db: Session, day: date, action: str) -> None:
             423,
             f"The accounting period {lock.year}-{lock.month:02d} is locked, so an "
             f"expense cannot be {action}. Unlock the month first.")
+    close = periods.active_close(db, day)
+    if close is not None:
+        raise HTTPException(
+            423,
+            f"Financial year {close.financial_year} is closed, so an expense cannot "
+            f"be {action}. The Administrator can reopen the year with a reason.")
 
 
 def _head(db: Session, head_id: int) -> ExpenseHead:

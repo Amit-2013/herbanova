@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -74,6 +74,10 @@ class BatchOut(BaseModel):
     expiry: date | None
     owner: str
     on_hand: Decimal
+    # The product's company-wide balance and its configured reorder point, so
+    # the stock screen can flag a low line. Null reorder_level means not set.
+    product_on_hand: Decimal = Decimal(0)
+    reorder_level: Decimal | None = None
 
 
 class MovementOut(BaseModel):
@@ -151,10 +155,14 @@ def list_batches(warehouse_id: int | None = None, product_id: int | None = None,
         q = q.where(Batch.on_hand > 0)
     # first-expiry-first-out order; batches without an expiry date go last
     q = q.order_by(Batch.expiry.asc().nulls_last(), Product.sku, Batch.batch_no)
+    totals = {pid: qty for pid, qty in db.execute(
+        select(Batch.product_id, func.coalesce(func.sum(Batch.on_hand), 0))
+        .group_by(Batch.product_id)).all()}
     return [BatchOut(id=b.id, product_id=p.id, sku=p.sku, product_name=p.name,
                      pack_size=p.pack_size, warehouse_id=w.id, warehouse=w.name,
                      batch_no=b.batch_no, expiry=b.expiry, owner=b.owner,
-                     on_hand=b.on_hand)
+                     on_hand=b.on_hand, product_on_hand=totals.get(p.id, Decimal(0)),
+                     reorder_level=p.reorder_level)
             for b, p, w in db.execute(q).all()]
 
 

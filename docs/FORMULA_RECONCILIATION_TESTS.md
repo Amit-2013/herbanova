@@ -180,7 +180,7 @@ These reports call `_empty_reconciled()` without a `source_count`. Their only ch
 | FEFO allocation and stock movements | F-28–F-32 | Dispatch through `_invoice_for`; stock report vs ledger | VERIFIED (code) |
 | Invoice numbering and immutability | F-17–F-19, F-33–F-36 | Not directly tested; `alembic check` only | UNVERIFIED |
 | Credit/debit note caps and stock return | F-37–F-38 | No note test | UNVERIFIED |
-| Payables and receivables | F-39–F-45 | Report reconciliation | VERIFIED |
+| Payables and receivables | F-39–F-45, F-43A, F-43B | Report reconciliation; `tests/test_accounts_advances.py` (8 tests: settlement order, settlement-date limits, excess and draw-down, supplier settlement, advance read-down) | VERIFIED |
 | Trial balance | F-46 | Direct debit/credit test | VERIFIED |
 | Payroll gross/deductions/net | F-51–F-58 | `test_payroll_prepare_submit_approve_process` | VERIFIED (one structure) |
 | HR late/early/geofence | F-59–F-62 | `test_general_shift...`, `test_staff_can_check_in...` | VERIFIED |
@@ -199,7 +199,6 @@ These are workflows with **no executable test**. They are not known to be broken
 
 | Gap | Why it matters | Suggested first test |
 |---|---|---|
-| Accounts receipt/payment entry | The only financial write with no test; M-02 shows the UI path can fail | Post a receipt against an issued invoice, assert the ledger and `payments` row; post an unallocated receipt and assert 422 |
 | Credit and debit notes | Caps, tax reversal and return-to-stock are untested | Issue a full-value credit note; assert invoice outstanding becomes zero, stock returns to the original batches, and over-credit is refused |
 | Invoice cancellation and movement | Immutability and audit are core controls | Cancel an issued invoice; assert number retained, payments refused, ledger excludes it |
 | Goods receipt | Stock affordability downstream depends on it | Receive against a PO; assert batch, movement, GRN and status transition |

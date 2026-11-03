@@ -125,7 +125,25 @@ def load_row(db: Session | None) -> EmailSettings | None:
     try:
         return db.get(EmailSettings, 1)
     except SQLAlchemyError:
+        # A failed read leaves the session unusable until it is rolled back;
+        # without this every later statement on the worker's session raised
+        # PendingRollbackError and the delivery could not be recorded.
+        db.rollback()
         return None
+
+
+def _transport(port: int, security: str) -> str:
+    """The transport the port actually speaks.
+
+    465 is implicit TLS and 587 is STARTTLS. A saved choice that contradicts a
+    well-known port is the usual reason a correct password still cannot sign
+    in, so the port wins; the settings screen reports the transport in use.
+    """
+    if port == 465:
+        return "ssl"
+    if port == 587:
+        return "starttls"
+    return security
 
 
 def effective(db: Session | None = None) -> Effective:
@@ -147,14 +165,15 @@ def effective(db: Session | None = None) -> Effective:
         readable = True
 
     stored_mode = pick("mode", env_mode)
+    port = int(pick("port", settings.smtp_port, treat_zero=True))
     return Effective(
         stored=row is not None,
         enabled=row.enabled if row is not None else settings.email_send_enabled,
         mode="live" if stored_mode == "live" and live_allowed else "test",
         live_allowed=live_allowed,
         host=pick("host", settings.smtp_host),
-        port=int(pick("port", settings.smtp_port, treat_zero=True)),
-        security=pick("security", env_security),
+        port=port,
+        security=_transport(port, pick("security", env_security)),
         username=pick("username", settings.smtp_user),
         password=password,
         password_saved=bool(row is not None and row.password_enc),

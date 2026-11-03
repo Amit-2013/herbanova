@@ -55,7 +55,7 @@ COST_BACKFILL_AUDIT = "accounts.cost_backfill"
 
 
 class LockedPeriodError(Exception):
-    """An accounting month is locked, so the correction must not run."""
+    """An accounting month is locked, or its financial year is closed."""
 
 
 class StaleAttributionPlanError(Exception):
@@ -656,14 +656,7 @@ def apply_cost_backfill(db: Session, *, expected_fingerprint: str,
                 if i["cogs_before"] != i["cogs_after"]
                 or i["costed_before"] != i["costed_after"]]
     if affected:
-        from .hr import active_period_lock
-        locked: dict[tuple[int, int], list[str]] = {}
-        for invoice_id, number, day in db.execute(
-                select(Invoice.id, Invoice.invoice_number, Invoice.invoice_date)
-                .where(Invoice.id.in_(affected))).all():
-            lock = active_period_lock(db, "accounting", day)
-            if lock is not None:
-                locked.setdefault((lock.year, lock.month), []).append(number)
+        locked, closed = _blocked_invoice_periods(db, affected)
         if locked:
             periods = "; ".join(
                 f"{year}-{month:02d} ({', '.join(sorted(numbers))})"
@@ -671,6 +664,12 @@ def apply_cost_backfill(db: Session, *, expected_fingerprint: str,
             raise LockedPeriodError(
                 "The accounting period is locked, so this backfill cannot move "
                 f"cost of goods in: {periods}. Unlock the month first.")
+        if closed:
+            years = "; ".join(f"{label} ({', '.join(sorted(numbers))})"
+                              for label, numbers in sorted(closed.items()))
+            raise LockedPeriodError(
+                "The financial year is closed, so this backfill cannot move cost "
+                f"of goods in: {years}. Reopen the year first.")
 
     costs = []
     changed_total = 0
@@ -919,6 +918,29 @@ def apply_attribution(db: Session, *, expected_fingerprint: str,
             "audit_rows": 1, "plan_fingerprint": current, "links": links}
 
 
+def _blocked_invoice_periods(db: Session, invoice_ids) -> tuple[dict, dict]:
+    """Locked months and closed years touched by a set of invoices.
+
+    A correction rewrites cost of goods on these invoices, so it must not move
+    figures in a month or a year the books have already been closed on.
+    """
+    from .hr import active_period_lock
+    from .periods import active_close
+
+    locked: dict[tuple[int, int], list[str]] = {}
+    closed: dict[str, list[str]] = {}
+    for _invoice_id, number, day in db.execute(
+            select(Invoice.id, Invoice.invoice_number, Invoice.invoice_date)
+            .where(Invoice.id.in_(invoice_ids))).all():
+        lock = active_period_lock(db, "accounting", day)
+        if lock is not None:
+            locked.setdefault((lock.year, lock.month), []).append(number)
+        close = active_close(db, day)
+        if close is not None:
+            closed.setdefault(close.financial_year, []).append(number)
+    return locked, closed
+
+
 def correct_po_cost(db: Session, *, po_line_id: int, new_unit_cost: Decimal,
                     reason: str, actor_id: int) -> dict:
     """Apply a late purchase rate, replay the product and report what changed.
@@ -965,14 +987,7 @@ def correct_po_cost(db: Session, *, po_line_id: int, new_unit_cost: Decimal,
                        or before.get(iid, {"cogs": ZERO, "clean": False})["clean"]
                        != after.get(iid, {"cogs": ZERO, "clean": False})["clean"])]
     if changed_ids:
-        from .hr import active_period_lock
-        locked: dict[tuple[int, int], list[str]] = {}
-        for invoice_id, number, day in db.execute(
-                select(Invoice.id, Invoice.invoice_number, Invoice.invoice_date)
-                .where(Invoice.id.in_(changed_ids))).all():
-            lock = active_period_lock(db, "accounting", day)
-            if lock is not None:
-                locked.setdefault((lock.year, lock.month), []).append(number)
+        locked, closed = _blocked_invoice_periods(db, changed_ids)
         if locked:
             periods = "; ".join(
                 f"{year}-{month:02d} ({', '.join(sorted(numbers))})"
@@ -980,6 +995,12 @@ def correct_po_cost(db: Session, *, po_line_id: int, new_unit_cost: Decimal,
             raise LockedPeriodError(
                 "The accounting period is locked, so this correction cannot move "
                 f"cost of goods in: {periods}. Unlock the month first.")
+        if closed:
+            years = "; ".join(f"{label} ({', '.join(sorted(numbers))})"
+                              for label, numbers in sorted(closed.items()))
+            raise LockedPeriodError(
+                "The financial year is closed, so this correction cannot move cost "
+                f"of goods in: {years}. Reopen the year first.")
 
     old_cost = money(line.unit_cost) if line.unit_cost is not None else None
     old_remark = line.rate_remark

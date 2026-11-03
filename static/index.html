@@ -13,31 +13,87 @@
 
 <!-- Sign in -->
 <section id="login">
-  <div class="brand">
-    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
-    <div>
-      <h1>One controlled record of products, stock and orders.</h1>
-      <ul class="assure">
-        <li>Every change is checked by the server before it is saved.</li>
-        <li>Each entry is tied to a person and written to an audit trail.</li>
-        <li>Duplicate receipts and negative stock are refused.</li>
-      </ul>
+  <div class="signin-shell">
+    <header class="signin-head">
+      <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+      <span class="signin-head-sub">Business Control System</span>
+    </header>
+
+    <div class="signin-grid">
+      <div class="signin-left">
+        <section class="promo" id="promo" aria-roledescription="carousel" aria-label="Promotions">
+          <div class="promo-track" id="promoTrack"><p class="signin-empty">No data yet</p></div>
+          <div class="promo-controls hide" id="promoControls">
+            <button type="button" class="promo-arrow" id="promoPrev" aria-label="Previous banner">&#8249;</button>
+            <div class="promo-dots" id="promoDots" role="tablist" aria-label="Choose a banner"></div>
+            <button type="button" class="promo-arrow" id="promoNext" aria-label="Next banner">&#8250;</button>
+          </div>
+        </section>
+
+        <section class="signin-panel" aria-labelledby="noticeTitle">
+          <header class="signin-panel-h">
+            <h2 id="noticeTitle">Notices</h2>
+            <span class="signin-panel-sub" id="noticeCount"></span>
+          </header>
+          <div class="notice-list" id="noticeList"><p class="signin-empty">No data yet</p></div>
+        </section>
+      </div>
+
+      <div class="signin-right">
+        <form class="formbox" id="loginForm" novalidate>
+          <h2>Sign in</h2>
+          <p class="sub">Use the account issued to you.</p>
+          <label for="u">User ID</label>
+          <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false">
+          <label for="p">Password</label>
+          <input id="p" name="password" type="password" autocomplete="current-password">
+          <div class="login-actions">
+            <label class="check" for="saveId"><input type="checkbox" id="saveId"> Save ID</label>
+            <button class="link-btn" id="forgotBtn" type="button">Forgot Password?</button>
+          </div>
+          <button class="btn block" id="loginBtn" type="submit">Login</button>
+          <div class="err" id="lerr" role="alert"></div>
+        </form>
+
+        <section class="signin-panel" aria-labelledby="helpTitle">
+          <header class="signin-panel-h">
+            <h2 id="helpTitle">Help line</h2>
+            <span class="signin-panel-sub">Contact the right team</span>
+          </header>
+          <div class="contact-grid" id="contactList"><p class="signin-empty">No data yet</p></div>
+        </section>
+      </div>
     </div>
-    <small>Internal system. Demonstration data is fictional.</small>
-  </div>
-  <div class="formside">
-    <form class="formbox" id="loginForm" novalidate>
-      <h2>Sign in</h2>
-      <p class="sub">Use the account issued to you.</p>
-      <label for="u">Username</label>
-      <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false">
-      <label for="p">Password</label>
-      <input id="p" name="password" type="password" autocomplete="current-password">
-      <button class="btn block" id="loginBtn" type="submit">Sign in</button>
-      <div class="err" id="lerr" role="alert"></div>
-    </form>
+
+    <footer class="signin-footer">
+      <span id="copyright"></span>
+      <nav aria-label="Legal">
+        <button class="link-btn hide" type="button" data-legal="privacy">Privacy Policy</button>
+        <span class="signin-footer-sep hide" data-legal-sep>·</span>
+        <button class="link-btn hide" type="button" data-legal="terms">Terms &amp; Conditions</button>
+      </nav>
+    </footer>
   </div>
 </section>
+
+<dialog id="legalDialog" class="login-dialog" aria-labelledby="legalTitle">
+  <div class="login-dialog-h">
+    <h2 id="legalTitle"></h2>
+    <button class="x" id="legalClose" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div class="login-dialog-b" id="legalBody" tabindex="0"></div>
+</dialog>
+
+<dialog id="forgotDialog" class="login-dialog" aria-labelledby="forgotTitle">
+  <div class="login-dialog-h">
+    <h2 id="forgotTitle">Forgot password</h2>
+    <button class="x" id="forgotClose" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div class="login-dialog-b">
+    <p class="forgot-note">Password resets are handled by your Administrator. This page does not send email or reset a password.</p>
+    <div id="forgotContacts"></div>
+  </div>
+</dialog>
 
 <!-- Forced password change -->
 <section id="mustChange" class="hide" aria-labelledby="mcTitle">
@@ -58,10 +114,50 @@
   </form>
 </section>
 
+<!-- Second factor for Administrator accounts -->
+<section id="totp" class="hide" aria-labelledby="totpTitle">
+  <form class="formbox" id="totpForm" novalidate>
+    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+    <h2 id="totpTitle">Two-step verification</h2>
+    <p class="sub" id="totpHint">Administrator accounts sign in with a password and a code from Google Authenticator.</p>
+    <div id="totpSetup" class="hide">
+      <div class="note">In Google Authenticator (or any authenticator app), choose <b>Add account</b> and <b>Enter a setup key</b>. Type this key; it is shown once.</div>
+      <label>Setup key</label>
+      <div class="setup-key" id="totpSecret" aria-live="polite"></div>
+      <div class="note">Account <b id="totpAccount"></b> · issuer Herbanova · SHA1 · six digits · 30 seconds.</div>
+    </div>
+    <label for="totpCode" id="totpCodeLabel">Six-digit code from the app</label>
+    <input id="totpCode" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" spellcheck="false">
+    <button class="btn block" id="totpBtn" type="submit">Verify and continue</button>
+    <div class="err" id="totpErr" role="alert"></div>
+    <p class="sub totp-alt"><button class="link-btn" id="totpRecoveryToggle" type="button">Use a recovery code instead</button></p>
+    <p class="sub totp-alt"><button class="link-btn" id="totpOut" type="button">Sign out</button></p>
+  </form>
+  <form class="formbox hide" id="totpRecoveryBox" novalidate>
+    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
+    <h2>Save your recovery codes</h2>
+    <p class="sub">Each code works once if the phone is lost. Keep them somewhere offline; this is the only time they are shown.</p>
+    <div class="codes" id="totpCodes"></div>
+    <button class="btn block" id="totpDone" type="button">I have saved them — continue</button>
+  </form>
+</section>
+
 <!-- App shell -->
 <div id="shell" class="hide">
+  <header class="appbar">
+    <a class="appbar-brand" href="#/dash" aria-label="Herbanova, go to Overview">
+      <span class="logo" aria-hidden="true">H</span><span class="appbar-name">HERBANOVA</span>
+    </a>
+    <button class="appbar-search" type="button" data-act="open-search" aria-label="Search pages and records, keyboard shortcut Control or Command and K">
+      <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
+      <span>Search pages and records</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+    <div class="appbar-tools">
+      <button class="appbar-btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
+    </div>
+  </header>
   <aside class="side">
-    <div class="mark"><span class="logo" aria-hidden="true">H</span>HERBANOVA</div>
     <nav aria-label="Modules">
       <div class="nav-group">
         <a class="nav on" href="#/dash" data-v="dash">Overview</a>
@@ -102,10 +198,8 @@
     <div class="who">
       <div class="who-id"><b id="who"></b><span class="pill" id="role"></span></div>
       <div class="who-actions">
-        <button class="link-btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
         <button class="link-btn" id="out" type="button">Sign out</button>
       </div>
-      <div class="env" id="env">Demo build</div>
     </div>
   </aside>
 
@@ -125,28 +219,49 @@
           <h1 class="dash-greet" id="dashGreet">Overview</h1>
           <p class="dash-date" id="dashDate"></p>
         </div>
-        <div class="dash-tools">
-          <button class="dash-search" type="button" data-act="open-search" aria-label="Search everything, keyboard shortcut Control or Command and K">
-            <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg>
-            <span>Search everything</span>
-            <kbd>Ctrl K</kbd>
-          </button>
-          <div class="dash-dates" role="group" aria-label="Date range">
-            <label for="dashFrom">From <input id="dashFrom" type="date" aria-label="From date"></label>
-            <label for="dashTo">To <input id="dashTo" type="date" aria-label="To date"></label>
-          </div>
-          <div class="seg compact" role="group" aria-label="Date presets">
-            <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
-            <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
-            <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
-            <button type="button" data-dash-preset="month" aria-pressed="true">This month</button>
-            <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
-            <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
-          </div>
-          <button class="btn ghost hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
-          <button class="btn ghost" id="dashTheme" type="button" aria-pressed="false">Dark theme</button>
+        <div class="dash-actions">
           <a class="btn" id="dashCompare" href="#/compare">MoM &amp; YoY dashboard</a>
         </div>
+      </div>
+      <div class="dash-filters" role="group" aria-label="Dashboard period">
+        <div class="dash-range" id="dashRangeWrap">
+          <button type="button" class="dash-range-btn" id="dashRangeBtn" aria-haspopup="dialog"
+                  aria-expanded="false" aria-controls="dashRangePop">
+            <svg class="dash-range-cal" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/>
+            </svg>
+            <span id="dashRangeLabel"></span>
+            <svg class="dash-range-caret" viewBox="0 0 10 6" width="9" height="6" aria-hidden="true">
+              <path d="M1 1l4 4 4-4"/>
+            </svg>
+          </button>
+          <div class="dash-range-pop hide" id="dashRangePop" role="dialog" aria-label="Choose a date range">
+            <div class="drp-cal">
+              <div class="drp-cal-top">
+                <span class="drp-hint" id="dashCalHint">Choose the start date</span>
+                <div class="drp-nav">
+                  <button type="button" id="dashCalPrev" aria-label="Show the previous months">‹</button>
+                  <button type="button" id="dashCalNext" aria-label="Show the next months">›</button>
+                </div>
+              </div>
+              <div class="drp-months" id="dashCalMonths"></div>
+            </div>
+            <div class="drp-foot">
+              <span class="drp-preview" id="dashRangePreview"></span>
+              <button class="btn ghost sm" type="button" id="dashRangeCancel">Cancel</button>
+            </div>
+          </div>
+        </div>
+        <div class="dash-presets" role="group" aria-label="Date presets">
+          <button type="button" data-dash-preset="1d" aria-pressed="false">1D</button>
+          <button type="button" data-dash-preset="7d" aria-pressed="false">7D</button>
+          <button type="button" data-dash-preset="30d" aria-pressed="false">30D</button>
+          <button type="button" data-dash-preset="month" aria-pressed="true">Month to date</button>
+          <button type="button" data-dash-preset="last_month" aria-pressed="false">Last month</button>
+          <button type="button" data-dash-preset="90d" aria-pressed="false">90D</button>
+          <button type="button" data-dash-preset="fy" aria-pressed="false">This FY</button>
+        </div>
+        <button class="btn ghost sm hide" id="dashReset" data-act="reset-db" type="button">Reset database</button>
       </div>
       <p class="dash-updated" id="dashUpdated">Loading figures…</p>
       <p class="dash-dateerr hide" id="dashDateErr" role="alert"></p>
@@ -176,7 +291,7 @@
 
         <div class="kpis" id="stats"></div>
 
-        <div class="panel flush hide" id="accOverviewPanel">
+        <div class="panel hide" id="accOverviewPanel">
           <div class="panel-h"><h2>Accounts</h2><span class="muted" id="accOverviewNote"></span></div>
           <div class="kpis" id="accOverview"></div>
         </div>
@@ -235,7 +350,7 @@
             <ul class="rows" id="topProducts"></ul>
           </div>
           <div class="panel dash-panel">
-            <div class="panel-h"><h2>Sales by category</h2><span class="muted">Not available</span></div>
+            <div class="panel-h"><h2>Sales by category</h2><span class="muted" id="categoryMeta">As printed on issued invoices</span></div>
             <div id="category"></div>
           </div>
         </div>
@@ -446,7 +561,7 @@
           <input id="pq" type="search" placeholder="Search by SKU or name" aria-label="Search products">
         </div>
         <div class="tw"><table>
-          <thead><tr><th>HSN code</th><th>SKU</th><th>Name</th><th>Pack size</th><th class="n">MRP (₹)</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>HSN code</th><th>SKU</th><th>Name</th><th>Category / brand</th><th>Pack size</th><th class="n">MRP (₹)</th><th class="n">Reorder level</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody id="prows"></tbody>
         </table></div>
         <div class="empty hide" id="pempty"></div>
@@ -468,7 +583,7 @@
           <label class="check"><input type="checkbox" id="sin" checked> Hide empty batches</label>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>Product</th><th>Batch</th><th>Warehouse</th><th>Shelf life</th><th>Owner</th><th class="n">On hand</th></tr></thead>
+          <thead><tr><th>Product</th><th>Batch</th><th>Warehouse</th><th>Shelf life</th><th>Owner</th><th class="n">On hand</th><th class="n">Reorder level</th></tr></thead>
           <tbody id="srows"></tbody>
         </table></div>
         <div class="empty hide" id="sempty"></div>
@@ -589,7 +704,7 @@
       <div class="panel flush">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Credit and debit notes</h2><span class="muted">A note is linked to the invoice it corrects and cannot exceed it. Neither note can be edited after issue.</span></div>
         <div class="tw"><table>
-          <thead><tr><th>Document</th><th>Invoice</th><th>Date</th><th>Kind</th><th class="n">Value (₹)</th><th>Status</th></tr></thead>
+          <thead><tr><th>Document</th><th>Invoice</th><th>Date</th><th>Kind</th><th class="n">Value (₹)</th><th>Status</th><th></th></tr></thead>
           <tbody id="noterows"></tbody>
         </table></div>
         <div class="empty hide" id="noteempty"></div>
@@ -598,10 +713,13 @@
 
     <!-- Accounting and finance -->
     <section id="v-accounts" class="view hide">
+      <nav class="acc-nav" id="accNav" aria-label="Accounting and Finance sections"></nav>
+
       <div class="panel hide" id="accPerfPanel">
         <div class="panel-h"><h2>Accounts performance</h2><span class="muted" id="accPerfNote">Loading figures…</span></div>
         <div class="toolbar">
           <label for="accFrom">From <input id="accFrom" type="date" aria-label="From date"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
           <label for="accTo">To <input id="accTo" type="date" aria-label="To date"></label>
           <select id="accState" aria-label="Filter by buyer state"><option value="">All states</option></select>
           <button class="btn ghost" type="button" data-act="load-acc-report">Refresh</button>
@@ -639,19 +757,18 @@
         <div id="accStates"></div>
       </div>
 
-      <div class="panel flush hide" id="accDrillPanel">
-        <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables by distributor</h2><span class="muted" id="accDrillNote"></span></div>
-        <div id="accDrill"></div>
-      </div>
-
       <div class="panel hide" id="accGapPanel">
-        <div class="panel-h"><h2>Data gaps</h2><span class="muted">What Accounts cannot report yet, and why. Each gap links to the screen that fixes it.</span></div>
+        <div class="panel-h"><h2>Data gaps</h2><span class="muted">What Accounts cannot report yet, and why. Each gap names the missing input, so no figure is guessed.</span></div>
         <div id="accGaps"></div>
       </div>
 
       <div id="accStatements">
-      <div class="panel flush">
+      <div class="panel flush hide" data-acc-sec="receivables">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables</h2><span class="muted" id="recvSub">What distributors still owe on issued invoices.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <button class="btn ghost" type="button" data-act="export-ar">Export CSV</button>
+          <span class="muted">Only invoices with a balance are listed.</span>
+        </div>
         <div class="tw"><table>
           <thead><tr><th>Invoice</th><th>Date</th><th>Distributor</th><th class="n">Value (₹)</th><th class="n">Received (₹)</th><th class="n">Outstanding (₹)</th></tr></thead>
           <tbody id="arows"></tbody>
@@ -659,31 +776,64 @@
         <div class="empty hide" id="aempty"></div>
       </div>
 
-      <div class="panel flush">
+      <div class="panel flush hide" data-acc-sec="receivables-by-distributor">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Receivables by distributor</h2><span class="muted" id="rbdNote">Choose a From – To date range and click Apply. Opening plus the window's movements equals closing for every party.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="rbdFrom">From <input id="rbdFrom" type="date" aria-label="From date"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="rbdTo">To <input id="rbdTo" type="date" aria-label="To date"></label>
+          <button class="btn ghost" type="button" data-act="load-rbd">Apply</button>
+          <button class="btn ghost" type="button" data-act="export-rbd">Export CSV</button>
+        </div>
+        <p class="err hide" id="rbdErr" role="alert"></p>
+        <div class="tw"><table>
+          <thead><tr><th>Distributor</th><th>State</th><th class="n">Opening (₹)</th><th class="n">Invoiced (₹)</th><th class="n">Credit notes (₹)</th><th class="n">Debit notes (₹)</th><th class="n">Received (₹)</th><th class="n">Closing (₹)</th><th class="n">Overdue (₹)</th><th class="n">Open invoices</th><th></th></tr></thead>
+          <tbody id="rbdRows"></tbody>
+          <tfoot id="rbdFoot"></tfoot>
+        </table></div>
+        <div class="empty hide" id="rbdEmpty"></div>
+        <p class="muted panel-note" id="rbdFootnote"></p>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="ageing">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Ageing of outstanding invoices</h2><span class="muted" id="ageSub">Days since each invoice date, in 0-30, 31-60, 61-90 and 90+ buckets.</span></div>
-        <div class="toolbar" style="padding:12px 18px 0">
-          <input id="ageAsOf" type="date" aria-label="Ageing as at">
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="ageAsOf">As at <input id="ageAsOf" type="date" aria-label="Ageing as at"></label>
           <button class="btn ghost" type="button" data-act="load-ageing">Rebuild ageing</button>
+          <button class="btn ghost" type="button" data-act="export-ageing">Export CSV</button>
           <span class="muted" id="ageTot"></span>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>Invoice</th><th>Date</th><th>Distributor</th><th class="n">Days</th><th>Bucket</th><th class="n">Outstanding (₹)</th></tr></thead>
+          <thead><tr><th>Invoice</th><th>Date</th><th>Distributor</th><th class="n">Days</th><th>Bucket</th><th>Due date</th><th class="n">Overdue (days)</th><th class="n">Outstanding (₹)</th></tr></thead>
           <tbody id="agerows"></tbody>
         </table></div>
         <div class="empty hide" id="ageempty"></div>
+        <p class="muted panel-note" id="ageDue"></p>
       </div>
 
-      <div class="panel flush">
+      <div class="panel flush hide" data-acc-sec="payables">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Payables</h2><span class="muted" id="paySub">What the business still owes suppliers for goods received.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <button class="btn ghost" type="button" data-act="export-ap">Export CSV</button>
+          <span class="muted">Only orders with a balance are listed.</span>
+        </div>
         <div class="tw"><table>
-          <thead><tr><th>Order</th><th>Supplier</th><th class="n">Received value (₹)</th><th class="n">Paid (₹)</th><th class="n">Outstanding (₹)</th></tr></thead>
+          <thead><tr><th>Order</th><th>Supplier</th><th class="n">Received value (₹)</th><th class="n">Paid (₹)</th><th>Due (est.)</th><th class="n">Outstanding (₹)</th></tr></thead>
           <tbody id="payrows"></tbody>
         </table></div>
         <div class="empty hide" id="payempty"></div>
       </div>
 
-      <div class="panel flush">
+      <div class="panel flush hide" data-acc-sec="cash">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Receipts and payments</h2><span class="muted">An entry is never edited: a mistake is corrected by recording the opposite one.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="enFrom">From <input id="enFrom" type="date" aria-label="Entries from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="enTo">To <input id="enTo" type="date" aria-label="Entries to"></label>
+          <button class="btn ghost" type="button" data-act="load-entries">Apply</button>
+          <button class="btn ghost" type="button" data-act="export-entries">Export CSV</button>
+          <span class="muted">Allocated and unapplied money is shown separately. Leave the dates blank for every entry.</span>
+        </div>
         <div class="tw"><table>
           <thead><tr><th>Entry</th><th>Date</th><th>Kind</th><th>Party</th><th>Against</th><th class="n">Amount (₹)</th><th>Mode</th></tr></thead>
           <tbody id="enrows"></tbody>
@@ -691,12 +841,14 @@
         <div class="empty hide" id="enempty"></div>
       </div>
 
-      <div class="panel flush">
-        <div class="panel-h" style="padding:14px 18px 0"><h2>GST register — outward supplies</h2><span class="muted">From the issued invoices, credit and debit notes. Input tax is not captured yet, and this is not a filing file.</span></div>
-        <div class="toolbar" style="padding:12px 18px 0">
-          <input id="gstFrom" type="date" aria-label="Register from">
-          <input id="gstTo" type="date" aria-label="Register to">
+      <div class="panel flush hide" data-acc-sec="gst-out">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>GST register — outward supplies</h2><span class="muted">From the issued invoices, credit and debit notes. Outward supplies only: input tax and net payable are built from supplier bills in the input register below, and this is not a filing file.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="gstFrom">From <input id="gstFrom" type="date" aria-label="Register from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="gstTo">To <input id="gstTo" type="date" aria-label="Register to"></label>
           <button class="btn ghost" type="button" data-act="load-gst">Build register</button>
+          <button class="btn ghost" type="button" data-act="export-gst-out">Export CSV</button>
           <span class="muted" id="gstTot"></span>
         </div>
         <div class="tw"><table>
@@ -706,11 +858,72 @@
         <div class="empty hide" id="gstempty"></div>
       </div>
 
-      <div class="panel flush">
+      <div class="panel flush hide" data-acc-sec="gst-in">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Input GST — supplier bills</h2><span class="muted" id="igSub">Tax the supplier charged, head by head. This is the only source of input credit; payables stay the cost of goods received.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="igFrom">From <input id="igFrom" type="date" aria-label="Supplier bills from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="igTo">To <input id="igTo" type="date" aria-label="Supplier bills to"></label>
+          <button class="btn ghost" type="button" data-act="load-input-gst">Build input register</button>
+          <button class="btn ghost" type="button" data-act="export-gst-in">Export CSV</button>
+          <button class="btn hide" id="piNewBtn" type="button" data-act="new-purchase-invoice">Capture supplier bill</button>
+          <span class="muted" id="igTot"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Bill</th><th>Date</th><th>Supplier</th><th>Supplier number</th><th class="n">Taxable (₹)</th><th class="n">CGST (₹)</th><th class="n">SGST (₹)</th><th class="n">IGST (₹)</th><th class="n">Cess (₹)</th><th class="n">Total (₹)</th><th>ITC</th><th>Status</th><th></th></tr></thead>
+          <tbody id="igrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="igempty"></div>
+        <p class="muted panel-note" id="igNet"></p>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="gst-returns">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>GST returns and reconciliation</h2><span class="muted" id="recSub">Compare what the practitioner reported as filed with the registers. The application never files and never reads the portal.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="recYear">Year <input id="recYear" type="number" min="2000" max="2100" step="1" aria-label="Return year"></label>
+          <label for="recMonth">Month <select id="recMonth" aria-label="Return month"></select></label>
+          <button class="btn ghost" type="button" data-act="load-reconciliation">Compare</button>
+          <button class="btn hide" id="grNewBtn" type="button" data-act="new-gst-return">Record filed figures</button>
+          <span class="muted" id="recNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Form</th><th>Check</th><th class="n">Filed (₹)</th><th class="n">Computed (₹)</th><th class="n">Difference (₹)</th><th>Result</th></tr></thead>
+          <tbody id="recrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="recempty"></div>
+        <p class="muted panel-note" id="recGap"></p>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="statutory">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>TDS and statutory dues</h2><span class="muted" id="sdSub">Withheld from supplier bills and approved payroll, less the challans recorded. A deduction is a liability from the month it was withheld.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="sdFrom">From <input id="sdFrom" type="date" aria-label="Statutory dues from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="sdTo">To <input id="sdTo" type="date" aria-label="Statutory dues to"></label>
+          <button class="btn ghost" type="button" data-act="load-dues">Build dues</button>
+          <button class="btn ghost" type="button" data-act="export-statutory">Export CSV</button>
+          <button class="btn hide" id="chNewBtn" type="button" data-act="new-challan">Record challan</button>
+          <span class="muted" id="sdNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Head</th><th class="n">Withheld to date (₹)</th><th class="n">Deposited to date (₹)</th><th class="n">Deposited in window (₹)</th><th class="n">Outstanding (₹)</th><th>State</th></tr></thead>
+          <tbody id="sdrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="sdempty"></div>
+        <div class="tw"><table>
+          <thead><tr><th>Challan</th><th>Head</th><th>Paid on</th><th>Period</th><th>Section</th><th class="n">Amount (₹)</th></tr></thead>
+          <tbody id="chrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="chempty"></div>
+        <p class="muted panel-note" id="sdDetail"></p>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="trial-balance">
         <div class="panel-h" style="padding:14px 18px 0"><h2>Trial balance</h2><span class="muted">Built from the documents, so both sides must agree. A difference is shown, never hidden.</span></div>
-        <div class="toolbar" style="padding:12px 18px 0">
-          <input id="tbAsOf" type="date" aria-label="Trial balance as at">
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="tbAsOf">As at <input id="tbAsOf" type="date" aria-label="Trial balance as at"></label>
           <button class="btn ghost" type="button" data-act="load-tb">Build trial balance</button>
+          <button class="btn ghost" type="button" data-act="export-tb">Export CSV</button>
           <span class="muted" id="tbBal"></span>
         </div>
         <div class="tw"><table>
@@ -718,6 +931,142 @@
           <tbody id="tbrows"></tbody>
         </table></div>
         <div class="empty hide" id="tbempty"></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="ledger-heads">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Ledger heads</h2><span class="muted" id="ledgerHeadNote">The chart of accounts the stored ledger posts to. A seeded head carries the role that links it to the document trial balance.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <button class="btn ghost" type="button" data-act="load-ledger-heads">Refresh</button>
+          <button class="btn ghost" type="button" data-act="export-ledger-heads">Export CSV</button>
+          <button class="btn ghost hide" id="lhNewBtn" type="button" data-act="new-ledger-head">New head</button>
+          <span class="muted" id="lhTot"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Head</th><th>Type</th><th>Role</th><th>State</th><th>Note</th><th></th></tr></thead>
+          <tbody id="lhrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="lhempty"></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="openings">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Opening balances</h2><span class="muted" id="obSub">What the books already held at the start of a financial year. An opening trial balance may be saved unbalanced; the difference is reported, never plugged.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="obFy">Financial year <input id="obFy" type="text" placeholder="2025-26" aria-label="Financial year" size="9"></label>
+          <button class="btn ghost" type="button" data-act="load-openings">Load openings</button>
+          <button class="btn ghost" type="button" data-act="export-openings">Export CSV</button>
+          <span class="muted" id="obNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Code</th><th>Head</th><th>Type</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th><th>Note</th><th></th></tr></thead>
+          <tbody id="obrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="obempty"></div>
+        <p class="muted panel-note">An opening balance is a statement about the year, not a document dated inside a month, so a month lock does not apply. A closed year refuses the change until the Administrator reopens it.</p>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="balance-sheet">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Balance sheet</h2><span class="muted">Openings, posted vouchers and the document trial balance, merged by head. What the records cannot prove is named below, not filled in.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="bsAsOf">As at <input id="bsAsOf" type="date" aria-label="Balance sheet as at"></label>
+          <button class="btn ghost" type="button" data-act="load-bs">Build balance sheet</button>
+          <button class="btn ghost" type="button" data-act="export-balance-sheet">Export CSV</button>
+          <span class="muted" id="bsBal"></span>
+        </div>
+        <p class="muted panel-note" id="bsOpening"></p>
+        <div class="tw"><table>
+          <thead><tr><th>Account</th><th class="n">Opening (₹)</th><th class="n">Vouchers (₹)</th><th class="n">Documents (₹)</th><th class="n">Balance (₹)</th></tr></thead>
+          <tbody id="bsrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="bsempty"></div>
+        <div class="tw"><table>
+          <thead><tr><th>Cash and bank closing</th><th class="n">Balance (₹)</th></tr></thead>
+          <tbody id="bscash"></tbody>
+        </table></div>
+        <div class="panel-note"><b>What this sheet does not claim</b><ul class="gaps" id="bsWarnings"></ul></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="vouchers">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Vouchers and journal</h2><span class="muted" id="vSub">A voucher is a person's double-entry posting. A draft may be unbalanced while it is typed; it enters the books only when posted, and a posted voucher is corrected by a reversing mirror.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="vFrom">From <input id="vFrom" type="date" aria-label="Vouchers from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="vTo">To <input id="vTo" type="date" aria-label="Vouchers to"></label>
+          <label for="vStatus">Status <select id="vStatus" aria-label="Voucher status">
+            <option value="">All states</option><option value="draft">Draft</option>
+            <option value="posted">Posted</option><option value="reversed">Reversed</option>
+          </select></label>
+          <button class="btn ghost" type="button" data-act="load-vouchers">Refresh</button>
+          <button class="btn ghost" type="button" data-act="export-vouchers">Export CSV</button>
+          <button class="btn ghost hide" id="vNewBtn" type="button" data-act="new-voucher">New voucher</button>
+          <span class="muted" id="vNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Number</th><th>Date</th><th>Type</th><th>Narration</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th><th>State</th><th></th></tr></thead>
+          <tbody id="vrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="vempty"></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="day-book">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Day book</h2><span class="muted">Posted vouchers in date order. A reversed voucher and its mirror both stay, so the trail is never erased.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="dbFrom">From <input id="dbFrom" type="date" aria-label="Day book from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="dbTo">To <input id="dbTo" type="date" aria-label="Day book to"></label>
+          <button class="btn ghost" type="button" data-act="load-daybook">Build day book</button>
+          <button class="btn ghost" type="button" data-act="export-daybook">Export CSV</button>
+          <span class="muted" id="dbNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Date</th><th>Number</th><th>Type</th><th>Narration</th><th class="n">Debit (₹)</th><th class="n">Credit (₹)</th><th>State</th><th></th></tr></thead>
+          <tbody id="dbrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="dbempty"></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="bank">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Bank reconciliation</h2><span class="muted" id="bankSub">A captured bank statement beside the book. Each line is matched to one receipt, payment or posted voucher line; the proof keeps the opening difference apart from the closing difference.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <button class="btn ghost" type="button" data-act="load-bank-statements">Refresh</button>
+          <button class="btn ghost" type="button" data-act="export-bank">Export CSV</button>
+          <button class="btn ghost hide" id="bankNewBtn" type="button" data-act="new-bank-statement">New statement</button>
+          <span class="muted" id="bankNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Bank head</th><th>Period</th><th class="n">Opening (₹)</th><th class="n">Closing (₹)</th><th class="n">Lines</th><th class="n">Matched</th><th></th></tr></thead>
+          <tbody id="bankStatements"></tbody>
+        </table></div>
+        <div class="empty hide" id="bankEmpty"></div>
+        <div id="bankDetail"></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="years">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Financial years</h2><span class="muted" id="fySub">April to March. Closing a year refuses every dated document inside it until the Administrator reopens it.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <button class="btn ghost" type="button" data-act="periods-refresh">Refresh</button>
+          <button class="btn ghost" type="button" data-act="export-years">Export CSV</button>
+          <span class="muted" id="periodNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Financial year</th><th>From</th><th>To</th><th>State</th><th>Closed by</th><th>Reason</th><th></th></tr></thead>
+          <tbody id="fyrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="fyempty"></div>
+      </div>
+
+      <div class="panel flush hide" data-acc-sec="locks">
+        <div class="panel-h" style="padding:14px 18px 0"><h2>Accounting month locks</h2><span class="muted">A locked month refuses expenses, receipts, payments, notes, dispatches and cost corrections dated in it.</span></div>
+        <div class="toolbar" style="padding:12px 18px">
+          <label for="lockMonth">Month <input id="lockMonth" type="month" aria-label="Month to lock"></label>
+          <button class="btn ghost hide" id="lockMonthBtn" type="button" data-act="lock-month">Lock month</button>
+          <button class="btn ghost" type="button" data-act="export-locks">Export CSV</button>
+          <span class="muted" id="lockNote"></span>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Month</th><th>State</th><th>Reason</th><th>Locked by</th><th></th></tr></thead>
+          <tbody id="lockrows"></tbody>
+        </table></div>
+        <div class="empty hide" id="lockempty"></div>
       </div>
       </div>
     </section>
@@ -728,6 +1077,8 @@
         <div class="panel-h"><h2>Free samples (FOC)</h2><span class="muted" id="focNote"></span></div>
         <div class="toolbar">
           <button class="btn ghost" type="button" data-act="foc-refresh">Refresh</button>
+          <button class="btn ghost" type="button" data-act="foc-export-stock">Export stock CSV</button>
+          <button class="btn ghost" type="button" data-act="foc-export-notes">Export notes CSV</button>
           <button class="btn hide" id="focNewBtn" type="button" data-act="new-foc">New free-sample note</button>
         </div>
         <p class="err hide" id="focErr" role="alert"></p>
@@ -758,6 +1109,11 @@
       <div class="panel" id="expPanel">
         <div class="panel-h"><h2>Expenses</h2><span class="muted" id="expSettingsNote"></span></div>
         <div class="toolbar">
+          <input id="expq" type="search" placeholder="Search reference or note" aria-label="Search expenses">
+          <select id="expHead" aria-label="Filter by expense head"><option value="">All heads</option></select>
+          <label for="expFrom">From <input id="expFrom" type="date" aria-label="Expenses from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="expTo">To <input id="expTo" type="date" aria-label="Expenses to"></label>
           <div class="seg compact" role="group" aria-label="Filter expenses by status">
             <button type="button" data-exp-status="" aria-pressed="true">All</button>
             <button type="button" data-exp-status="pending_approval" aria-pressed="false">Waiting</button>
@@ -765,8 +1121,6 @@
             <button type="button" data-exp-status="reversed" aria-pressed="false">Reversed</button>
             <button type="button" data-exp-status="rejected" aria-pressed="false">Rejected</button>
           </div>
-          <select id="expHead" aria-label="Filter by expense head"><option value="">All heads</option></select>
-          <input id="expq" type="search" placeholder="Search reference or note" aria-label="Search expenses">
           <button class="btn ghost" type="button" data-act="exp-refresh">Refresh</button>
           <button class="btn ghost hide" id="expHeadsBtn" type="button" data-act="exp-heads">Expense heads</button>
           <button class="btn ghost hide" id="expSettingsBtn" type="button" data-act="exp-settings">Settings</button>
@@ -1012,9 +1366,9 @@
         </div>
         <div class="toolbar hr-saved">
           <select id="hrSaved" aria-label="Saved filters"><option value="">Saved filters</option></select>
-          <button class="btn ghost sm" type="button" data-act="hr-filter-apply">Apply</button>
-          <button class="btn ghost sm" type="button" data-act="hr-filter-save">Save current</button>
-          <button class="btn ghost sm" type="button" data-act="hr-filter-delete">Delete</button>
+          <button class="btn ghost" type="button" data-act="hr-filter-apply">Apply</button>
+          <button class="btn ghost" type="button" data-act="hr-filter-save">Save current</button>
+          <button class="btn ghost" type="button" data-act="hr-filter-delete">Delete</button>
         </div>
         <div id="hrSavedBox"></div>
         <div class="tw"><table>
@@ -1033,7 +1387,8 @@
           <button class="btn ghost" type="button" data-act="hr-od">On duty</button>
           <button class="btn ghost hide" type="button" data-act="hr-payroll">Payroll</button>
           <button class="btn ghost hide" type="button" data-act="hr-shifts">Shift settings</button>
-          <button class="btn ghost hide" type="button" data-act="hr-sites">Branches, offices &amp; attendance policy</button>
+          <button class="btn ghost hide" type="button" data-act="hr-sites">Branches &amp; locations</button>
+          <button class="btn ghost hide" type="button" data-act="hr-masters">HR masters</button>
           <button class="btn ghost hide" type="button" data-act="hr-reports">HR reports</button>
           <button class="btn ghost hide" type="button" data-act="hr-notices">Announcements</button>
           <button class="btn ghost hide" type="button" data-act="hr-locks">Period locks</button>
@@ -1079,6 +1434,10 @@
         <div class="panel-h"><h2>Email and SMTP</h2><span class="muted" id="emStatus">Administrator only.</span></div>
         <div id="emBody"><p class="muted">Loading email settings…</p></div>
       </div>
+      <div class="panel hide" id="signinAdminPanel">
+        <div class="panel-h"><h2>Sign-in page</h2><span class="muted" id="signinAdminState">Administrator only.</span></div>
+        <div id="signinAdminBody"><p class="muted">Loading sign-in content…</p></div>
+      </div>
       <div class="panel flush">
         <div class="panel-h"><h2>Employees</h2><span class="muted">The same master used by HR.</span></div>
         <div class="tw"><table>
@@ -1098,8 +1457,9 @@
         <div class="seg compact" role="group" aria-label="Choose a report" id="rpTabs"></div>
         <p class="sub" id="rpDesc" style="margin:10px 0 0"></p>
         <div class="toolbar hide" id="rpPeriod" style="margin-top:12px;padding:0">
-          <label for="rpFrom" style="margin:0">From</label><input id="rpFrom" type="date" style="max-width:160px">
-          <label for="rpTo" style="margin:0">To</label><input id="rpTo" type="date" style="max-width:160px">
+          <label for="rpFrom">From <input id="rpFrom" type="date" aria-label="Report from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="rpTo">To <input id="rpTo" type="date" aria-label="Report to"></label>
           <div class="seg compact" role="group" aria-label="Quick periods">
             <button type="button" data-rpp="all" aria-pressed="true">All time</button>
             <button type="button" data-rpp="month" aria-pressed="false">This month</button>
@@ -1182,8 +1542,9 @@
         <div class="toolbar">
           <select id="audAction" aria-label="Filter by action"><option value="">All actions</option></select>
           <select id="audActor" aria-label="Filter by user"><option value="">All users</option></select>
-          <label for="audFrom" style="margin:0">From</label><input id="audFrom" type="date" style="max-width:150px">
-          <label for="audTo" style="margin:0">To</label><input id="audTo" type="date" style="max-width:150px">
+          <label for="audFrom">From <input id="audFrom" type="date" aria-label="Audit from"></label>
+          <span class="muted sep" aria-hidden="true">–</span>
+          <label for="audTo">To <input id="audTo" type="date" aria-label="Audit to"></label>
           <span class="muted" id="audNote"></span>
           <a class="link-btn hide" id="audExport" href="/api/audit/export" download>Download CSV</a>
         </div>
@@ -1248,7 +1609,7 @@
               <option value="skipped">Skipped</option>
             </select>
             <select id="srLogPack" aria-label="Filter by report pack"><option value="">All packs</option></select>
-            <button class="btn ghost sm" data-act="sr-refresh-log" type="button">Refresh</button>
+            <button class="btn ghost" data-act="sr-refresh-log" type="button">Refresh</button>
             <span class="muted" id="srLogNote"></span>
           </div>
           <div class="tw"><table>
@@ -1260,6 +1621,13 @@
       </section>
     </section>
   </main>
+
+  <footer class="statusbar">
+    <span class="statusbar-mark" aria-hidden="true"></span>
+    <span>Every figure is counted by the server</span>
+    <span class="statusbar-sp"></span>
+    <span id="env">Demo build</span>
+  </footer>
 </div>
 
 <div id="scrim" class="hide"></div>

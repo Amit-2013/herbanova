@@ -29,7 +29,7 @@ from ..models.core import (
     StockMovement,
     Warehouse,
 )
-from ..models.accounts import RECEIPT, Payment
+from ..models.accounts import RECEIPT, Payment, PaymentAllocation
 from ..models.expenses import APPROVED, Expense
 from ..models.hr import (
     Attendance,
@@ -499,6 +499,13 @@ def _source_receivables(db: Session, date_from: date | None = None,
         select(Payment.invoice_id, func.coalesce(func.sum(Payment.amount), 0))
         .where(Payment.kind == RECEIPT, Payment.invoice_id.in_(ids))
         .group_by(Payment.invoice_id)).all()}
+    # A receipt recorded in the two-mode form names no invoice on the payment;
+    # its settlement lives in payment_allocations and must reduce the balance.
+    applied = {i: ledger.money(v) for i, v in db.execute(
+        select(PaymentAllocation.invoice_id,
+               func.coalesce(func.sum(PaymentAllocation.amount), 0))
+        .where(PaymentAllocation.invoice_id.in_(ids))
+        .group_by(PaymentAllocation.invoice_id)).all()}
     credit = per_invoice(CreditNote, CreditNote.grand_total)
     debit = per_invoice(DebitNote, DebitNote.grand_total)
 
@@ -506,7 +513,7 @@ def _source_receivables(db: Session, date_from: date | None = None,
     for inv_id, grand in invoices.items():
         outstanding = ledger.money(
             grand - credit.get(inv_id, ledger.ZERO) + debit.get(inv_id, ledger.ZERO)
-            - received.get(inv_id, ledger.ZERO))
+            - received.get(inv_id, ledger.ZERO) - applied.get(inv_id, ledger.ZERO))
         total = ledger.money(total + outstanding)
         if outstanding > 0:
             open_total = ledger.money(open_total + outstanding)
@@ -564,7 +571,11 @@ def _source_payables(db: Session, po_ids: list[int]) -> dict:
     paid = db.execute(
         select(func.coalesce(func.sum(Payment.amount), 0))
         .where(Payment.kind == "payment", Payment.purchase_order_id.in_(po_ids))).scalar()
-    return {"received_value": ledger.money(received), "paid": ledger.money(paid)}
+    allocated = db.execute(
+        select(func.coalesce(func.sum(PaymentAllocation.amount), 0))
+        .where(PaymentAllocation.purchase_order_id.in_(po_ids))).scalar()
+    return {"received_value": ledger.money(received),
+            "paid": ledger.money(Decimal(paid or 0) + Decimal(allocated or 0))}
 
 
 def _empty_reconciled(key, date_from, date_to, table, source_count=None, extra=None):
@@ -878,13 +889,20 @@ def build(
         rows = []
         for product in products:
             qty = quantities.get(product.id, Decimal("0.00"))
+            reorder = product.reorder_level
             rows.append({
                 "product_id": product.id,
                 "sku": product.sku,
                 "name": product.name,
+                "category": product.category,
+                "brand": product.brand,
                 "pack_size": product.pack_size,
                 "status": product.status,
                 "quantity": _num(qty),
+                "reorder_level": _num(reorder) if reorder is not None else None,
+                # Null means no reorder level is set; false means it is set and
+                # the balance is at or above it. Never confuse the two.
+                "below_reorder": (None if reorder is None else qty < reorder),
                 "batch_count": counts.get(product.id, 0),
             })
         total_qty = sum((_decimal(r["quantity"]) for r in rows), Decimal("0.00"))
@@ -892,7 +910,8 @@ def build(
             select(func.coalesce(func.sum(StockMovement.qty_delta), 0))))
         table = _table(
             "stock", "Stock on Hand", rows,
-            ["product_id", "sku", "name", "pack_size", "status", "quantity", "batch_count"],
+            ["product_id", "sku", "name", "category", "brand", "pack_size", "status",
+             "quantity", "reorder_level", "below_reorder", "batch_count"],
             {"quantity": _num(total_qty)},
         )
         return _envelope(
@@ -1013,21 +1032,29 @@ def build(
                 "note": (f"{head['count']} approved entrie(s); non-creditable GST "
                          f"{head['gst_noncreditable']} is included in cost."),
             })
+        expenses_known = pl["expenses"]["complete"] or pl["expenses"]["total"] > 0
         rows.append({
             "section": "Expenses", "line": "Total expenses",
-            "amount": (_num(_decimal(pl["expenses"]["total"]))
-                       if pl["expenses"]["complete"] else None),
+            "amount": _num(_decimal(pl["expenses"]["total"])) if expenses_known else None,
             "note": ("No approved expenses in this window." if not pl["expenses"]["count"]
-                     else "Approved, non-reversed entries by head.") if pl["expenses"]["complete"]
+                     else "Approved, non-reversed entries by head.") if expenses_known
             else "Not available: expenses are not tracked for the whole window (GAP-P02).",
         })
+        if expenses_known and not pl["expenses"]["complete"]:
+            rows[-1]["note"] = (
+                "Partial: only entries from "
+                f"{pl['expenses']['tracked_from'] or 'the tracking start'} are recorded "
+                "(GAP-P02).")
+        payroll_known = pl["payroll"]["complete"] or bool(pl["payroll"]["periods"])
         rows.append({
             "section": "Payroll", "line": "Payroll (gross)",
-            "amount": (_num(_decimal(pl["payroll"]["total"]))
-                       if pl["payroll"]["complete"] else None),
+            "amount": _num(_decimal(pl["payroll"]["total"])) if payroll_known else None,
             "note": ("Gross salary of approved, processed or paid monthly periods."
                      if pl["payroll"]["complete"]
-                     else "Not available: a month is missing or only partly in the window (GAP-P03)."),
+                     else "Partial: only approved months are counted (GAP-P03)."
+                     if payroll_known
+                     else "Not available: no month in the window has an approved "
+                          "payroll period (GAP-P03)."),
         })
         rows.append({
             "section": "Profit", "line": "Net profit",
@@ -1065,7 +1092,14 @@ def build(
             .where(Expense.status == APPROVED, Expense.entry_date >= start,
                    Expense.entry_date <= end)).scalar()
         payroll_src = Decimal("0")
+        allocated_months = []
         for item in pl["payroll"]["periods"]:
+            if item.get("prorated"):
+                # A cut month is a working-day share of its approved gross, so the
+                # record side is the labelled allocation, not the whole month.
+                payroll_src += Decimal(item["allocated"])
+                allocated_months.append(f"{item['year']}-{item['month']:02d}")
+                continue
             period = db.scalar(select(PayrollPeriod).where(
                 PayrollPeriod.year == item["year"],
                 PayrollPeriod.month == item["month"]))
@@ -1073,6 +1107,10 @@ def build(
                 payroll_src += Decimal(db.scalar(
                     select(func.coalesce(func.sum(PayrollEntry.gross), 0))
                     .where(PayrollEntry.period_id == period.id)) or 0)
+        payroll_label = ("Approved or later payroll periods summed; working-day share "
+                         f"for {', '.join(allocated_months)}"
+                         if allocated_months else
+                         "Approved or later payroll periods summed")
 
         checks = [
             _check("revenue", "Statement revenue", _decimal(pl["revenue"]["taxable"]),
@@ -1094,7 +1132,7 @@ def build(
             _check("expenses", "Total expenses", _decimal(pl["expenses"]["total"]),
                    "Approved entries summed in the database", _decimal(expenses_src)),
             _check("payroll", "Payroll gross", _decimal(pl["payroll"]["total"]),
-                   "Approved or later payroll periods summed", _decimal(payroll_src)),
+                   payroll_label, _decimal(payroll_src)),
             _check("invoice_count", "Invoices in the statement", pl["cogs"]["invoices_total"],
                    "Issued invoices in the database", int(invoice_count), "records"),
         ]
@@ -1116,7 +1154,8 @@ def build(
                        ["check", "report", "records", "result"])
 
         limitations = list(pl["notes"]) + [
-            "Payroll months only partly inside the window are excluded, never prorated.",
+            "A month the window cuts short counts its approved gross by working-day "
+            "share; a month with no approved payroll is excluded, never estimated.",
             "This statement reads the records; it is not a statutory filing.",
         ]
         for gap in pl["gaps"]:

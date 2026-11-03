@@ -11,8 +11,8 @@ browser only hides affordances; every rule here is enforced by `require(...)`,
 The earlier target statements (`S-01`–`S-11`) are closed; the proof for each is
 listed in §8 and in [`VERIFICATION_REPORT.md`](VERIFICATION_REPORT.md).
 
-Route counts were read from the running FastAPI app on 1 November 2026:
-**92 `/api/hr` routes + 4 legacy `/api/employees` routes = 96 path/method
+Route counts were read from the running FastAPI app on 3 November 2026:
+**101 `/api/hr` routes + 4 legacy `/api/employees` routes = 105 path/method
 pairs**. "Route" below means one method on one path.
 
 ---
@@ -29,7 +29,7 @@ pairs**. "Route" below means one method on one path.
 - The MD has no separate role in the live data (D-02). The MD is represented by
   the Administrator, or by a custom role granted `hr:confidential` plus the
   payroll/HR read keys it needs.
-- The 96 routes use four gate types:
+- The 105 routes use four gate types:
   - `require("key")` — one catalogue key;
   - `require_admin("key")` — key plus the `admin` role (used only where the
     brief reserves an action to the Administrator);
@@ -125,9 +125,9 @@ Applying an `employee_id` in a request body does not widen scope. A manager can
 raise leave or OD for a team member because the team is already inside their
 scope; a staff member cannot raise one for a colleague.
 
-## 5. Endpoint matrix (96 routes)
+## 5. Endpoint matrix (105 routes)
 
-### 5.1 Dashboard, directory and profile (37 HR routes + 4 legacy)
+### 5.1 Dashboard, directory and profile (39 HR routes + 4 legacy)
 
 | Route | Method | Gate | Scope |
 |---|---|---|---|
@@ -163,8 +163,10 @@ scope; a staff member cannot raise one for a colleague.
 | `/api/hr/attendance-rules/resolve` | GET | logged in + `_require_hr_view` | own record, or any employee inside the caller's scope |
 | `/api/hr/shifts` | GET / POST | `hr:read` / `hr:write` | all |
 | `/api/hr/shifts/{id}` | PATCH | `hr:write` | all |
-| `/api/hr/holidays` | GET / POST | `hr:read` / `hr:write` | all |
+| `/api/hr/holidays` | GET / POST | `hr:read` / `hr:write` | all; an office must belong to the chosen branch |
+| `/api/hr/holidays/{id}` | PATCH | `hr:write` | all; date and name cannot be cleared |
 | `/api/hr/departments` | GET / POST | `hr:read` / `hr:write` | all |
+| `/api/hr/departments/{id}` | PATCH | `hr:write` | all; a rename propagates to employees linked by `department_id` |
 | `/api/hr/announcements` | GET | logged in | active rows; inactive only with `hr:write` |
 | `/api/hr/announcements` | POST | `hr:write` | all |
 | `/api/hr/announcements/{id}` | PATCH | `hr:write` | all |
@@ -340,7 +342,7 @@ Segregation of duties:
 
 | Claim | Evidence | Status |
 |---|---|---|
-| 96 HR/employee routes exist | route dump from the running app, 1 Nov 2026 | VERIFIED |
+| 105 HR/employee routes exist | route dump from the running app, 3 Nov 2026 | VERIFIED |
 | Every HR route has a key or an explicit scope check | §5 matrix + route walk in `VERIFICATION_REPORT.md` §4–5 | VERIFIED |
 | Scope chain: manager sees own chain, staff sees self | `test_reporting_manager_sees_only_their_chain`, `test_bulk_marking_stays_inside_the_reporting_chain`, `test_team_leave_calendar_is_scoped`, `test_staff_self_service_reads_are_scoped_to_their_own_record`, `test_dashboard_is_scoped_to_the_reporting_chain` | VERIFIED |
 | Bank/ID masked without the right | `test_bank_and_id_are_masked_without_the_confidential_right`, `test_export_keeps_confidential_columns_masked` | VERIFIED |

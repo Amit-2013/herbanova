@@ -187,7 +187,12 @@ def test_insight_card_shapes_are_stable(client, world):
     assert set(pipeline) == {"sales", "leads"}
     for row in pipeline["sales"]["rows"]:
         assert set(row) == {"status", "label", "count", "value"}
-    assert set(pipeline["sales"]["dispatch"]) == {"measured", "average_days", "note"}
+    assert set(pipeline["sales"]["dispatch"]) == {
+        "measured", "average_days", "approval_measured", "approval_average_days",
+        "after_approval_measured", "after_approval_average_days", "delivery",
+        "overdue_open", "note"}
+    assert set(pipeline["sales"]["dispatch"]["delivery"]) == {
+        "measured", "on_time", "late", "average_days_late"}
     for row in insights["purchasing"]["rows"]:
         assert set(row) == {"key", "label", "count", "value"}
     for key in ("credit_notes", "debit_notes"):

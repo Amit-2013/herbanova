@@ -223,7 +223,7 @@ def test_reconciliation_ties_register_lines_and_bank_file(client, world):
     assert Decimal(body["bank_file"]["held_back"]) >= INVENTORY_NET
     assert body["bank_file"]["skipped"] >= 1
     assert any("not recorded" in g for g in body["gaps"])
-    assert "GAP-A08" in body["accounts_note"]
+    assert "not posted as a voucher automatically" in body["accounts_note"]
     assert "GAP-A01" not in body["accounts_note"]
     assert client.as_user("staff").get(
         f"/api/hr/payroll/periods/{period_id}/reconciliation").status_code == 403

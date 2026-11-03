@@ -6,7 +6,7 @@ March); cancelled numbers are never reused. Every financial field is a frozen
 snapshot, so a later change to a product, a distributor or the company profile
 cannot alter a document that has already been issued (FR-14).
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -15,10 +15,11 @@ from sqlalchemy.orm import Session
 
 from ..models.core import Distributor, Invoice, InvoiceLine, Product, SalesOrder
 from ..models.tax import CompanyProfile
-from ..services.numbering import next_document_number
-from ..services.order_tax import discount_pct
-from ..services.tax import line_tax, money, place_of_supply, resolve_rate
-from ..services.words import amount_in_words
+from . import advances
+from .numbering import next_document_number
+from .order_tax import discount_pct
+from .tax import line_tax, money, place_of_supply, resolve_rate
+from .words import amount_in_words
 
 
 def _seller(db: Session, dist: Distributor) -> tuple[CompanyProfile | SimpleNamespace, list[str]]:
@@ -49,6 +50,12 @@ def create_invoice_for_order(db: Session, order: SalesOrder, issued_by: int) -> 
 
     invoice_date = date.today()
     inv_num, fy = next_document_number(db, "invoice", "INV", invoice_date)
+    # The distributor's terms are snapshotted onto the invoice, never read back
+    # from the master, so changing the master later cannot move a due date the
+    # buyer has already seen. No terms means no due date, and the ageing report
+    # lists the invoice as having none rather than assuming one.
+    terms = dist.payment_terms_days
+    due_date = invoice_date + timedelta(days=terms) if terms is not None else None
 
     pids = {ln.product_id for ln in order.lines}
     products = {p.id: p for p in db.scalars(select(Product).where(Product.id.in_(pids))).all()} if pids else {}
@@ -60,6 +67,8 @@ def create_invoice_for_order(db: Session, order: SalesOrder, issued_by: int) -> 
         distributor_id=dist.id,
         status="issued",
         invoice_date=invoice_date,
+        payment_terms_days=terms,
+        due_date=due_date,
         place_of_supply_state_code=buyer_state,
         place_of_supply_kind=split["kind"],
         reverse_charge=False,
@@ -176,4 +185,8 @@ def create_invoice_for_order(db: Session, order: SalesOrder, issued_by: int) -> 
     invoice.notes = notes or None
     invoice.copy_designation = "ORIGINAL"
     db.flush()
+    # Money the distributor already holds as an advance settles this bill now;
+    # it is dated on the invoice and never posted to Sales a second time. The
+    # applied rows are carried for the dispatch audit, not stored on the column.
+    invoice.advance_applied = advances.apply_to_invoice(db, invoice, actor_id=issued_by)
     return invoice
