@@ -96,6 +96,7 @@ KEPT_TABLES = (
     "hr_salary_structure_lines", "hr_salary_structures", "hr_saved_filters",
     "hr_shifts", "hr_work_locations",
     "ledger_accounts", "legal_documents",
+    "nav_nodes", "feature_registry",
     "products", "roles", "sign_in_banners", "sign_in_contacts", "sign_in_notices",
     "suppliers",
     "tax_rates", "users", "warehouses", "employees", "audit_log",

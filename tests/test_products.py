@@ -50,6 +50,29 @@ def test_product_list_is_paginated(client):
     assert int(r.headers["X-Total-Count"]) >= 3
 
 
+def test_product_list_pages_and_server_filters(client):
+    """The list screen contract: X-Total-Count is the full match count, a page
+    is a slice, omitting page is the export read, and filters run on the server."""
+    for _ in range(4):
+        _, body = _valid()
+        assert client.post("/api/products", json=body).status_code == 201
+    first = client.get("/api/products", params={"page": 1, "page_size": 2})
+    second = client.get("/api/products", params={"page": 2, "page_size": 2})
+    assert first.status_code == second.status_code == 200
+    assert len(first.json()) == len(second.json()) == 2
+    assert {p["id"] for p in first.json()}.isdisjoint({p["id"] for p in second.json()})
+    total = int(first.headers["X-Total-Count"])
+    assert total >= 4
+    assert total == int(second.headers["X-Total-Count"])
+
+    everything = client.get("/api/products", params={"q": "TP-"})
+    assert len(everything.json()) == int(everything.headers["X-Total-Count"])
+
+    off = client.get("/api/products", params={"status": "discontinued"})
+    assert off.status_code == 200
+    assert all(p["status"] == "discontinued" for p in off.json())
+
+
 def test_product_write_needs_permission(client, world):
     sales = client.as_user("sales")
     _, body = _valid()

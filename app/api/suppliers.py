@@ -164,12 +164,15 @@ def _can_bank(db: Session, user) -> bool:
 
 @router.get("", response_model=list[SupplierOut])
 def list_suppliers(response: Response, status: str | None = None, q: str | None = None,
+                   incomplete: bool | None = None,
                    paging=Depends(page_params), db: Session = Depends(get_db),
                    user=Depends(require("supplier:read"))):
     page, page_size = paging
     stmt = select(Supplier)
     if status:
         stmt = stmt.where(Supplier.status == status)
+    if incomplete is not None:
+        stmt = stmt.where(Supplier.needs_completion.is_(incomplete))
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(Supplier.code.ilike(like) | Supplier.name.ilike(like)

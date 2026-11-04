@@ -157,43 +157,14 @@
       <button class="appbar-btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
     </div>
   </header>
+  <div class="tabbar" id="tabbar">
+    <div class="tabstrip" id="tabstrip" role="tablist" aria-label="Open screens"></div>
+    <button class="tab-more" id="tabMore" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="tabMenu" aria-label="More tabs and session options">⋯</button>
+    <div class="tab-menu hide" id="tabMenu" role="menu" aria-label="Tab options"></div>
+  </div>
   <aside class="side">
-    <nav aria-label="Modules">
-      <div class="nav-group">
-        <a class="nav on" href="#/dash" data-v="dash">Overview</a>
-      </div>
-      <div class="nav-group">
-        <p class="nav-grp">Sales and customers</p>
-        <a class="nav" href="#/leads" data-v="leads" id="navLeads">Leads<span class="count hide" id="ldCount"></span></a>
-        <a class="nav" href="#/lost" data-v="lost">Lost leads</a>
-        <a class="nav" href="#/followups" data-v="followups">Today's follow-ups</a>
-        <a class="nav" href="#/customers" data-v="customers">Customers &amp; distributors</a>
-        <a class="nav" href="#/sales" data-v="sales">Sales orders<span class="count hide" id="soCount"></span></a>
-        <a class="nav hide" href="#/billing" data-v="billing" id="navBilling">Billing</a>
-        <a class="nav" href="#/approvals" data-v="approvals">Approvals<span class="count hide" id="apCount"></span></a>
-      </div>
-      <div class="nav-group">
-        <p class="nav-grp">Stock and supply</p>
-        <a class="nav" href="#/purchasing" data-v="purchasing">Purchases<span class="count hide" id="poCount"></span></a>
-        <a class="nav" href="#/products" data-v="products">Products</a>
-        <a class="nav" href="#/inventory" data-v="inventory">Inventory</a>
-        <a class="nav" href="#/foc" data-v="foc">Free samples</a>
-        <a class="nav hide" href="#/suppliers" data-v="suppliers" id="navSuppliers">Suppliers</a>
-      </div>
-      <div class="nav-group">
-        <p class="nav-grp">Finance and insight</p>
-        <a class="nav hide" href="#/accounts" data-v="accounts" id="navAccounts">Accounting &amp; Finance</a>
-        <a class="nav hide" href="#/expenses" data-v="expenses" id="navExpenses">Expenses</a>
-        <a class="nav" href="#/reports" data-v="reports" id="navReports">Reports</a>
-        <a class="nav hide" href="#/geo" data-v="geo" id="navGeo">Geography</a>
-      </div>
-      <div class="nav-group">
-        <p class="nav-grp">People and admin</p>
-        <a class="nav hide" href="#/hr" data-v="hr" id="navHr">HR Management</a>
-        <a class="nav hide" href="#/roles" data-v="roles" id="navRoles">Roles &amp; Permissions</a>
-        <a class="nav hide" href="#/settings" data-v="settings" id="navSettings">Settings &amp; Administration</a>
-        <a class="nav hide" href="#/scheduled" data-v="scheduled" id="navScheduled">Scheduled reports</a>
-      </div>
+    <nav id="sideNav" aria-label="Modules">
+      <div class="nav-extra" id="navExtra"></div>
     </nav>
     <div class="who">
       <div class="who-id"><b id="who"></b><span class="pill" id="role"></span></div>
@@ -204,9 +175,13 @@
   </aside>
 
   <main class="main" id="main">
+    <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
     <header class="page-head">
       <div>
-        <h1 id="title">Overview</h1>
+        <div class="head-line">
+          <h1 id="title">Overview</h1>
+          <button class="fav-btn hide" id="favBtn" type="button" aria-pressed="false" aria-label="Add this screen to favourites" title="Add to favourites">★</button>
+        </div>
         <p id="subtitle"></p>
       </div>
       <div class="head-actions" id="actions"></div>
@@ -557,13 +532,30 @@
     <!-- Products -->
     <section id="v-products" class="view hide">
       <div class="panel flush">
-        <div class="toolbar">
-          <input id="pq" type="search" placeholder="Search by SKU or name" aria-label="Search products">
+        <div class="toolbar" role="search">
+          <input id="pq" type="search" placeholder="Search SKU, name or HSN" aria-label="Search products">
+          <select id="pstat" aria-label="Filter by status">
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="discontinued">Discontinued</option>
+          </select>
+          <button class="btn sm" data-act="search-products" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-products" type="button">Clear</button>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>HSN code</th><th>SKU</th><th>Name</th><th>Category / brand</th><th>Pack size</th><th class="n">MRP (₹)</th><th class="n">Reorder level</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr>
+            <th data-col="hsn"><button class="th-sort" type="button" data-act="sort-products" data-sort="hsn">HSN code<span class="sort-mark"></span></button></th>
+            <th data-col="sku"><button class="th-sort" type="button" data-act="sort-products" data-sort="sku">SKU<span class="sort-mark"></span></button></th>
+            <th data-col="name"><button class="th-sort" type="button" data-act="sort-products" data-sort="name">Name<span class="sort-mark"></span></button></th>
+            <th data-col="category"><button class="th-sort" type="button" data-act="sort-products" data-sort="category">Category / brand<span class="sort-mark"></span></button></th>
+            <th>Pack size</th>
+            <th class="n" data-col="mrp"><button class="th-sort" type="button" data-act="sort-products" data-sort="mrp">MRP (₹)<span class="sort-mark"></span></button></th>
+            <th class="n" data-col="reorder_level"><button class="th-sort" type="button" data-act="sort-products" data-sort="reorder_level">Reorder level<span class="sort-mark"></span></button></th>
+            <th data-col="status"><button class="th-sort" type="button" data-act="sort-products" data-sort="status">Status<span class="sort-mark"></span></button></th>
+            <th>Actions</th></tr></thead>
           <tbody id="prows"></tbody>
         </table></div>
+        <div class="pager" id="ppager" aria-live="polite"></div>
         <div class="empty hide" id="pempty"></div>
       </div>
     </section>
@@ -623,11 +615,14 @@
             <button type="button" data-pf="received" aria-pressed="false">Received</button>
             <button type="button" data-pf="cancelled" aria-pressed="false">Cancelled</button>
           </div>
+          <button class="btn sm" data-act="search-list" data-list="purchasing" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="purchasing" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>PO number</th><th>Supplier</th><th>Created</th><th class="n">Lines</th><th class="n">Receipts</th><th class="n">Value (₹)</th><th>Status</th></tr></thead>
           <tbody id="orows"></tbody>
         </table></div>
+        <div class="pager" id="poPager" aria-live="polite"></div>
         <div class="empty hide" id="oempty"></div>
       </div>
     </section>
@@ -644,11 +639,14 @@
             <button type="button" data-sf2="blocked" aria-pressed="false">Blocked</button>
             <button type="button" data-sf2="incomplete" aria-pressed="false">Needs completion</button>
           </div>
+          <button class="btn sm" data-act="search-list" data-list="suppliers" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="suppliers" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>Code</th><th>Supplier</th><th>GSTIN</th><th>State</th><th>Kind</th><th class="n">Terms</th><th class="n">Orders</th><th>Status</th></tr></thead>
           <tbody id="suprows"></tbody>
         </table></div>
+        <div class="pager" id="supPager" aria-live="polite"></div>
         <div class="empty hide" id="supempty"></div>
       </div>
 
@@ -674,11 +672,14 @@
             <button type="button" data-sf="approved" aria-pressed="false">To dispatch</button>
             <button type="button" data-sf="dispatched" aria-pressed="false">Dispatched</button>
           </div>
+          <button class="btn sm" data-act="search-list" data-list="sales" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="sales" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>Order</th><th>Distributor</th><th>Created</th><th class="n">Lines</th><th class="n">Value (₹)</th><th>Status</th></tr></thead>
           <tbody id="sorows"></tbody>
         </table></div>
+        <div class="pager" id="soPager" aria-live="polite"></div>
         <div class="empty hide" id="soempty"></div>
       </div>
     </section>
@@ -693,11 +694,14 @@
             <button type="button" data-if="issued" aria-pressed="false">Issued</button>
             <button type="button" data-if="cancelled" aria-pressed="false">Cancelled</button>
           </div>
+          <button class="btn sm" data-act="search-list" data-list="billing" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="billing" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>Invoice</th><th>Date</th><th>Buyer</th><th class="n">Value (₹)</th><th class="n">Credited (₹)</th><th>Status</th><th></th></tr></thead>
           <tbody id="invrows"></tbody>
         </table></div>
+        <div class="pager" id="invPager" aria-live="polite"></div>
         <div class="empty hide" id="invempty"></div>
       </div>
 
@@ -1147,16 +1151,20 @@
     <section id="v-approvals" class="view hide">
       <div class="panel flush">
         <div class="toolbar">
+          <input id="apq" type="search" placeholder="Search request or document" aria-label="Search approval requests">
           <div class="seg compact" role="group" aria-label="Filter requests">
             <button type="button" data-af="pending" aria-pressed="true">Waiting</button>
             <button type="button" data-af="decided" aria-pressed="false">Decided</button>
             <button type="button" data-af="all" aria-pressed="false">All</button>
           </div>
+          <button class="btn sm" data-act="search-list" data-list="approvals" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="approvals" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>Request</th><th>Type</th><th>Document</th><th>Requester</th><th>Submitted</th><th>Status</th><th>Decision remarks</th></tr></thead>
           <tbody id="aprows"></tbody>
         </table></div>
+        <div class="pager" id="apPager" aria-live="polite"></div>
         <div class="empty hide" id="apempty"></div>
       </div>
     </section>
@@ -1242,11 +1250,14 @@
             <button type="button" data-lf="closed" aria-pressed="false">Closed</button>
             <button type="button" data-lf="all" aria-pressed="false">All</button>
           </div>
+          <button class="btn sm" data-act="search-list" data-list="leads" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="leads" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>Lead</th><th>Owner</th><th>Source</th><th>Status</th><th>Next follow-up</th><th>Last activity</th></tr></thead>
           <tbody id="ldrows"></tbody>
         </table></div>
+        <div class="pager" id="ldPager" aria-live="polite"></div>
         <div class="empty hide" id="ldempty"></div>
       </div>
     </section>
@@ -1297,11 +1308,14 @@
             <option value="blocked">Blocked</option>
             <option value="inactive">Inactive</option>
           </select>
+          <button class="btn sm" data-act="search-list" data-list="customers" type="button">Search</button>
+          <button class="btn ghost sm" data-act="clear-list" data-list="customers" type="button">Clear</button>
         </div>
         <div class="tw"><table>
           <thead><tr><th>Code</th><th>Customer / distributor</th><th class="n">Credit limit (₹)</th><th class="n">In use (₹)</th><th class="n">Available (₹)</th><th>Status</th><th></th></tr></thead>
           <tbody id="curows"></tbody>
         </table></div>
+        <div class="pager" id="cuPager" aria-live="polite"></div>
         <div class="empty hide" id="cuempty"></div>
       </div>
     </section>
@@ -1651,6 +1665,7 @@
   </div>
 </div>
 
+<script src="js/workspace.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

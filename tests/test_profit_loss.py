@@ -538,13 +538,17 @@ def test_profit_and_loss_needs_accounts_reports_and_export(client, full_month):
 
 # ------------------------------------------------------- expenses menu/roles
 def test_expenses_menu_follows_the_central_permission_map(client):
-    js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    model = (ROOT / "static" / "js" / "workspace.js").read_text(encoding="utf-8")
+    app = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'expenses: "accounts"' in js                     # feature switch
-    assert 'expenses: "expense:read"' in js                 # route permission
-    assert 'showView("expenses", can("expense:read"))' in js  # sidebar entry
-    assert 'data-v="expenses"' in html
-    assert 'id="navExpenses"' in html
+    # The maps moved into the shared workspace module in WP-2; the rules did not.
+    assert 'expenses: "accounts"' in model                  # feature switch
+    assert 'expenses: "expense:read"' in model              # route permission
+    assert 'views: ["expenses"]' in model                   # one entry in the hierarchy
+    # Active hierarchy: the built-in NAV, or the server tree once Batch 4c is on.
+    assert "WS.navTree().forEach" in app                    # rail rendered from the hierarchy
+    assert 'data-v="${esc(v)}"' in app                      # every row is a routable view
+    assert 'id="sideNav"' in html                           # the rail the renderer fills
 
     for role in ("admin", "sales", "viewer", "staff"):
         me = client.as_user(role).get("/api/auth/me")

@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import String, cast, exists, func, select
+from sqlalchemy import String, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -186,7 +186,8 @@ def _notes_totals(db: Session, invoice_ids: list[int]) -> dict[int, tuple[Decima
 
 @router.get("", response_model=list[InvoiceOut])
 def list_invoices(response: Response, distributor_id: int | None = None,
-                  status: str | None = None, paging=Depends(page_params),
+                  status: str | None = None, q: str | None = None,
+                  paging=Depends(page_params),
                   db: Session = Depends(get_db), _=Depends(require("sales:read"))):
     page, page_size = paging
     stmt = select(Invoice)
@@ -194,6 +195,11 @@ def list_invoices(response: Response, distributor_id: int | None = None,
         stmt = stmt.where(Invoice.distributor_id == distributor_id)
     if status:
         stmt = stmt.where(Invoice.status == status)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.outerjoin(SalesOrder, Invoice.sales_order_id == SalesOrder.id).where(
+            or_(Invoice.invoice_number.ilike(like), Invoice.buyer_name.ilike(like),
+                Invoice.buyer_gstin.ilike(like), SalesOrder.so_number.ilike(like)))
     invoices = paginate(db, stmt.order_by(Invoice.id.desc()), response, page, page_size)
     if not invoices:
         return []

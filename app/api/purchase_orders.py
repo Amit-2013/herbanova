@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -247,6 +247,7 @@ def _supplier_codes(db: Session) -> dict[int, str]:
 
 @router.get("", response_model=list[POOut])
 def list_pos(response: Response, supplier_id: int | None = None, status: str | None = None,
+             q: str | None = None,
              paging=Depends(page_params), db: Session = Depends(get_db),
              _=Depends(require("stock:read"))):
     page, page_size = paging
@@ -256,6 +257,12 @@ def list_pos(response: Response, supplier_id: int | None = None, status: str | N
         stmt = stmt.where(PurchaseOrder.supplier_id == supplier_id)
     if status:
         stmt = stmt.where(PurchaseOrder.status == status)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        # Outer join: a legacy order with no supplier must still match its own number.
+        stmt = stmt.outerjoin(Supplier, PurchaseOrder.supplier_id == Supplier.id).where(
+            or_(PurchaseOrder.po_number.ilike(like), Supplier.code.ilike(like),
+                Supplier.name.ilike(like)))
     pos = paginate(db, stmt.order_by(PurchaseOrder.id.desc()), response, page, page_size)
     receipts = _receipts_by_po(db, [po.id for po in pos], sku_by_id)
     received: dict[int, dict[int, Decimal]] = {}

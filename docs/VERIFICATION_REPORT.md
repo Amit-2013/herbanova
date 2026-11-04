@@ -1662,3 +1662,1382 @@ Applied on 4 November 2026 after a verified dump and the owner's explicit
 The long-running development server on `:8000` (started before this code existed)
 still answers 404 for the new routes until it is restarted from the current
 checkout. Production remains at `0028_advances`.
+
+## 28. WP-3 batch 1 — Products list standard — 4 November 2026
+
+**Scope.** The pilot for the shared list-screen standard: server-side paging
+with the true `X-Total-Count`, an explicit Search/Clear filter band with a
+status select, a footer pager (25/50/100/200 rows per page, first/previous/
+next/last, `Page n of m`) and a CSV export of every matching row. No schema
+change; `app/api/products.py` already used `app/core/pagination.py`. The
+200-row `state.products` cache that feeds order, invoice and product forms was
+left untouched — the screen uses a separate `state.plist`.
+
+**Environment.** A temporary `uvicorn` on `127.0.0.1:8011` against
+`herbanova_bcs_test` (52 products, all active) and `scripts/run_frontend.py` on
+`127.0.0.1:3011` proxying to it. Headless Chrome over CDP, signed in with a
+token minted for the test database's administrator. Both temporary servers were
+stopped afterwards. The development database and production were not written
+to.
+
+### 28.1 What the automated test proves
+
+`tests/test_products.py::test_product_list_pages_and_server_filters` creates
+four products and asserts that page 1 and page 2 at `page_size=2` are disjoint
+slices of two rows, that `X-Total-Count` is identical on both pages and at
+least four, that omitting `page` returns exactly `X-Total-Count` rows for a
+search (the export read), and that `status=discontinued` returns only
+discontinued products. `python -m pytest -q tests/test_products.py` —
+**5 passed**.
+
+### 28.2 Browser walk
+
+| Check | Observed |
+|---|---|
+| Initial load | 52 products; 50 rows; `1–50 of 52`; `Page 1 of 2`; `«` and `‹` disabled |
+| Page 2 | 2 rows; `51–52 of 52`; `Page 2 of 2`; `›` and `»` disabled |
+| Open from page 2 | Drawer titled `Open TP-DE67D9` for a row that exists only on page 2 |
+| Search `COST` | 30 matching rows on page 1; count and page bounds recomputed by the server |
+| Search with no match | 0 rows; **No product matches these filters** with the change-or-clear sentence; pager `0 of 0` |
+| Clear | 50 rows restored; search box and status select emptied |
+| Status `discontinued` | 0 rows (every test product is active) |
+| Rows per page 25 | 25 rows; `1–25 of 52`; 3 pages |
+| Last page | 2 rows; `›` and `»` disabled; `‹` and `«` enabled |
+| Previous | 25 rows on the middle page |
+| Navigate to `#/dash` and back | Products returns on page 2 with 2 rows — the page is held per screen, not globally |
+| Export CSV | Download intercepted at `HTMLAnchorElement.prototype.click`: `HERBANOVA_Products_2026-11-04.csv`; toast **Exported 52 products**; the file's header block records search `all`, status `all`, rows `52` |
+
+Screenshots: `var/shots/wp-products-1440-light.png`,
+`wp-products-1440-dark.png`, `wp-products-768-light.png`,
+`wp-products-390-light.png`, `wp-products-390-dark.png` and the matching
+`-foot` files with the pager scrolled into view. At 1440 the pager sits above
+the status bar on one line; at 390 it wraps its navigation row under the count
+and keeps every button.
+
+### 28.3 Regression run
+
+`python -m pytest -q` on 4 November 2026 against the isolated test database:
+**455 passed** (454 before this batch plus the new list test), 693 warnings,
+exit 0. The run left the test database at `0030_sign_in_content`; the harness
+drops and recreates `herbanova_bcs_test` and upgrades it to head at the start of
+each session (`tests/conftest.py:30-54`).
+
+### 28.4 What was not verified
+
+| Item | Why |
+|---|---|
+| Out-of-order response guard and the page-1 retry when a filter empties the current page | Code-reviewed only. Every filter control reloads page 1 by design, so the browser walk never produced a stranded page or a delayed older response |
+| Sortable column headers | Not implemented in batch 1. Batch 2 added server sorting and clickable headers on Products (§29.2) |
+| The other seven paginated lists | Not changed in this batch |
+| Export permission | The export uses the existing `GET /api/products` permission (`product:read`); no new route or permission was added, so there is no new refusal path to exercise |
+| Excel (`.xlsx`) export | The shipped export is CSV; the format was called out as a separate decision |
+| Real tablet and phone, screen readers | Desktop-emulated widths only; no assistive tooling in this workspace |
+| Production | Not touched; no schema change, so there is nothing to migrate |
+
+## 29. WP-3 batch 2 — the other seven lists on the shared standard — 4 November 2026
+
+**Scope.** Suppliers, customers, sales orders, purchases, billing, approvals and
+leads moved onto the batch-1 contract through one shared layer: `LIST_SPEC`,
+`listState`, `loadList` (newest-request-wins guard and a page-1 retry when a
+filter empties the page), `pagerHtml`/`paintListPager`, `searchList`,
+`clearList` and `exportListCsv`. Every screen keeps its existing server filters,
+permissions and row order; no route, payload shape or business rule changed and
+there is no schema change. Batch 2 also added server sorting (`sort` +
+`direction`, NULLS LAST) and clickable headers on Products, the only list whose
+API sorts.
+
+The page head now states the server's `X-Total-Count` and shows a status
+breakdown only when the rows in hand cover that total and the screen is on its
+default filter with no search. Before this pass a searched customer list read
+"1 record … Active: 30": a filtered total beside an unfiltered breakdown. That
+mismatch is what the head rule removes, and the walk below checks both states
+on every screen.
+
+**Environment.** A temporary `uvicorn` on `127.0.0.1:8011` against
+`herbanova_bcs_test` and `scripts/run_frontend.py` on `127.0.0.1:3011`
+proxying to it. Headless Chrome over CDP, signed in with a token minted for the
+test database's administrator (the token was never printed). Marked probe rows
+were seeded first (20 products, 25 suppliers, 24 buyers, 29 leads, 22 purchase
+orders, 20 small and 20 large sales orders) through the real APIs. The
+development database and production were not written to.
+
+### 29.1 Automated tests
+
+`tests/test_list_standard.py` — **12 passed**:
+
+| Test | Contract |
+|---|---|
+| `test_products_sort_and_direction` | Whitelisted sort, asc/desc, unknown column falls back, bad direction is 422 |
+| `test_supplier_incomplete_filter_and_search` | `incomplete=true/false` and `q` change rows and total |
+| `test_distributor_incomplete_filter` | Same for the customer master |
+| `test_sales_order_search_and_page_total` | Search by number and buyer; total agrees with the page |
+| `test_purchase_order_search_and_page_total` | Same for purchases |
+| `test_invoice_search_and_page_total` | Same for billing |
+| `test_approvals_decided_filter` | `decided=true/false` partitions the list; total agrees |
+| `test_approval_total_matches_visible_rows_for_restricted_role` | The total counts only rows the role may see |
+| `test_approval_detail_uses_the_list_visibility` | Opening by id cannot bypass list visibility |
+| `test_export_read_is_unpaged_on_every_list` | Omitting `page` returns every match |
+| `test_lead_server_filters_match_the_screen` | `due` and `status` filters |
+| `test_every_list_pages_on_the_server` | All seven endpoints: page 1, page 2 and the unpaged read share one total, pages are disjoint, `page_size=200` is accepted and `201` is refused |
+
+Isolation fix: `test_approval_total_matches_visible_rows_for_restricted_role`
+and `test_approval_detail_uses_the_list_visibility` used hard-coded approval
+`record_id` values (999 999 and 999 998). `test_hr_dashboard.py:102` creates an
+`hr_leave` approval with `record_id=999998` in the same run, and a pending
+approval is unique per `(record_type, record_id)`, so the order of tests decided
+whether the suite collided. Both ids are now derived per run
+(`uuid4().int % 10**9 + 1_000_000_000`); the file was run twice in a row
+(12 passed, 12 passed) before the full suite.
+
+Full suite, exact command and result:
+
+```
+python -m pytest -q -rs --junitxml=var/reports/pytest-wp3b2.xml
+exit 0 — 467 passed, 0 failed, 0 skipped, 695 warnings in 241.32 s
+```
+
+`var/reports/pytest-wp3b2.xml` records `tests=467 failures=0 errors=0
+skipped=0`; the raw log is `var/reports/pytest-wp3b2.log`. No test was skipped.
+
+### 29.2 Browser walk
+
+Machine-readable evidence: `var/reports/wp3b2-browser.json` (plus the log next
+to it). For each screen the probe loaded page 1, changed the page size to 25,
+paged forward and back, searched for the first row's own identifier, cleared,
+exported, applied the screen's narrowest filter, restored it, and recorded the
+pager text, the head text and the network URL of the export.
+
+| Screen | Page 1 | Next page | Search | Filter | Export toast |
+|---|---|---|---|---|---|
+| Suppliers | 27, `1–27 of 27` | `26–27 of 27`, page 2 of 2 | `1–1 of 1` | Needs completion → 1 | `Exported 27 suppliers` |
+| Customers | 30, `1–30 of 30` | `26–30 of 30` | `1–1 of 1` | Incomplete → 25 | `Exported 30 records` |
+| Sales orders | 95, `1–50 of 95` | at 25: `26–50 of 95`, page 2 of 4 | `1–1 of 1` | Draft → 45 | `Exported 95 orders` |
+| Purchases | 27, `1–27 of 27` | `26–27 of 27` | `1–1 of 1` | Received → 2 | `Exported 27 orders` |
+| Billing | 26, `1–26 of 26` | `26–26 of 26` | `1–1 of 1` | Issued → 26 | `Exported 26 invoices` |
+| Approvals | pending 23, `1–23 of 23` | All, 25 rows: `26–27 of 27`, page 2 of 2 | `1–1 of 1` | Decided → 4 | `Exported 23 requests` |
+| Leads | 30, `1–30 of 30` | `26–30 of 30` | `1–1 of 1` | Closed → `0 of 0` | `Exported 30 leads` |
+
+Head counts under the same states (text read from `#subtitle`):
+
+| Screen | Default | Search | Filter |
+|---|---|---|---|
+| Suppliers | `27 suppliers. 0 bank changes awaiting approval, 1 still to be completed.` | `1 supplier.` | `1 supplier.` |
+| Customers | `30 records … Active: 30, Blocked: 0, needing details: 25.` | `1 record …` (no breakdown) | `25 records …` (no breakdown) |
+| Sales orders | `3 ready to dispatch, 21 awaiting approval, 45 draft.` | `1 sales order.` | `45 sales orders.` |
+| Purchases | `25 open, 0 part received, 2 received, 0 cancelled.` | `1 purchase order.` | `2 purchase orders.` |
+| Billing | `26 tax invoices, 26 live. 0 credit or debit notes.` | `1 tax invoice. …` | `26 tax invoices. …` |
+| Approvals | `23 waiting for a decision. …` | `1 request in this view. …` | `4 requests in this view. …` |
+| Leads | `0 overdue and 30 due today across the team. …` | `1 lead. …` | `0 leads. …` |
+
+Other checks:
+
+| Check | Observed |
+|---|---|
+| Export URL | Each export requested the list endpoint with `q`/filter and **no** `page`/`page_size`, and the toast count equalled the head total |
+| Clear | Each screen restored its default filter, emptied the search box and reloaded page 1 (`1–25 of 27` etc. at size 25) |
+| Empty filtered state | Leads with Closed showed `0 of 0` and the filtered empty message, not a blank table |
+| Products sort | MRP ascending `100.00 → 900.00`, descending `900.00 → 100.00`; requests carried `sort=mrp&direction=asc|desc`; `aria-sort` moved with the click |
+| Open from page 2 | Sales page 2 row `SO-20261104-A152CE` opened from the cache (`ensureCached`); the drawer named the same order and the Catalog buyer |
+| Console | No errors or unhandled rejections were recorded by the injected listener |
+
+Screenshots: 35 files `var/shots/wp3b2-<screen>-{page1,page2,search,cleared,filter}-1440.png`
+for the seven screens, at 1440×900 in the dark theme. They show the count, the
+pager and the head text on the same frame, for example
+`wp3b2-customers-search-1440.png` (`1–1 of 1`, `1 record …` with no breakdown)
+and `wp3b2-suppliers-page2-1440.png` (`26–27 of 27`, page 2 of 2, previous and
+next disabled).
+
+### 29.3 What was not verified
+
+| Item | Why |
+|---|---|
+| Real tablet and phone widths for the seven screens | The walk ran at 1440 only; the shared pager already has 768/390 evidence from batch 1 |
+| Screen readers and keyboard traversal of the new headers | No assistive tooling in this workspace; the pager and headers are native buttons |
+| Sorting on the seven batch-2 lists | Not offered, because those endpoints do not sort; the screen must not imply otherwise |
+| Excel (`.xlsx`) export and column configuration | Out of scope, unchanged from batch 1 |
+| A fourth page of data on the smaller lists | The probe's pages cover 2–4 pages depending on size; the disjoint-page contract is also pinned by `test_every_list_pages_on_the_server` |
+| Production | Not touched; no schema change and no migration |
+
+### 29.4 Backup and rollback
+
+Before this batch the working tree was captured at `eaf38d2` with the source
+and development dump in `var/backups/baseline-20261103T175350` (see the project
+memory). Batch 2 changes no schema and no route signature, so rollback is a
+source revert of `static/js/app.js`, `static/index.html` (batch 1 controls),
+`tests/test_list_standard.py`, `var/probe/listwalk.py` and these documents.
+The list endpoints keep their previous behaviour when `page` is omitted, so a
+partial revert of one screen cannot strand the others.
+
+## 30. WP-2 — workspace tabs, breadcrumbs and navigation — 4 November 2026
+
+Scope: the workspace shell described in
+[NAVIGATION_AND_TAB_DESIGN.md](NAVIGATION_AND_TAB_DESIGN.md) §10. No schema
+change, no migration, no route or endpoint change. All evidence below was
+produced in this working tree (`feature/gap-closure`, HEAD `eaf38d2`, changes
+uncommitted).
+
+### 30.1 What was built
+
+| Piece | Where |
+|---|---|
+| Navigation hierarchy, titles, permission and feature maps, tab model, breadcrumbs, favourites and recents | new `static/js/workspace.js` (376 lines, UMD; pure functions, no DOM or network) |
+| Tab strip, overflow menu, keyboard handling, breadcrumb and rail rendering, favourite button, palette screen group, unsaved-drawer guard | `static/js/app.js` |
+| Tab bar, breadcrumb, favourite star, four-row grid shell, 820/600 px behaviour, print suppression | `static/css/styles.css`, `static/index.html` |
+| 18 model tests run from `pytest` | `tests/js/workspace.test.cjs`, `tests/test_workspace_model.py` |
+| Collection guard so probe servers under `var/` are not imported | new `pytest.ini` (`testpaths = tests`) |
+
+The single visibility predicate `viewAllowed` (menu, route, breadcrumb, tab
+restore, favourites, recents and palette) is defined once in `workspace.js`.
+The server is unchanged and remains the authority.
+
+### 30.2 Automated tests
+
+| Run | Result |
+|---|---|
+| `node --test tests/js/workspace.test.cjs` | 18 passed, 0 failed (the 18th added after the walk; see §30.4) |
+| `python -m pytest -q -rs` (runs the Node file through `tests/test_workspace_model.py`) | **468 passed, 0 failed, 0 skipped in 239.05 s**, exit 0, run after the 20-tab eviction fix; XML at `var/reports/wp2b-pytest.xml` |
+
+The 18 model tests assert: every routed view has a path and a title; hash
+parsing keeps sections and queries; inventory/scheduled sub-tabs stay one tab;
+the same screen opens once; Home is first and unclosable; closing the active
+tab activates its right neighbour then its left; close-others and close-all
+record closed tabs; restore drops screens the role may no longer open; the
+session round-trips without Home; a stale duplicate in storage does not
+duplicate a tab; permission and feature rules match the route; menu visibility
+is narrower than route access where the app says so; breadcrumbs follow the
+hierarchy and skip empty levels; breadcrumb ancestors only target openable
+screens; favourites toggle in order and never include Home; recents are newest
+first, unique and bounded; the strip stops at 20 tabs and the evicted screen is
+recoverable through the reopen list.
+
+### 30.3 Browser walk
+
+Stack: temporary backend on `127.0.0.1:8011` over `herbanova_bcs_test`
+(`var/probe/serve_test.py`), temporary frontend on `127.0.0.1:3011`
+(`scripts/run_frontend.py`), headless Chrome over CDP on `:9223` with a
+throwaway profile. Session cookies were minted in-process for the `admin` and a
+`viewer`-role account. The walk is `var/shots/wp2walk.py`; its result is
+`var/reports/wp2-browser.json`.
+
+**42 of 42 checks passed.** No page error and no unhandled rejection was
+recorded. During the signed-in admin phase, **227 API calls were made and every
+one returned 200** (`main_api_status_counts {"200": 227}`), with zero refusals
+(`refused_calls: []`).
+
+| Area | Checks (all passed) |
+|---|---|
+| Home and hierarchy | Starts with one pinned Home tab; Home trail `Overview › Dashboard › Overview`; the rail renders the five modules from the hierarchy |
+| Opening screens | Products adds a second tab; its trail is `Stock and supply › Inventory › Masters › Products`; the tab's `aria-controls` is `v-products` |
+| Accounting | Sections are separate tabs keyed `accounts/gst-out`; the tab title is the section label; the trail ends in the section label |
+| Switching | Clicking a tab activates it and only the active view is visible; re-opening the same screen does not duplicate its tab |
+| Overflow | With 19 tabs the strip overflows; the menu lists every open screen plus Close current, Close others, Close all except Home and Reopen |
+| Closing | Close current keeps the rest and activates a neighbour; close-others leaves Home and the current screen; close-all leaves Home; reopen restores the last closed tab |
+| Keyboard | Arrow key moves to the next tab and activates it; Delete closes the focused tab while Home stays protected |
+| Favourites and recents | The star stores `products` for `admin`, reports `aria-pressed="true"` and writes only `hb.*` keys; recents record `products, sales, inventory, scheduled`; a reload restores tabs and the favourite |
+| Refresh and deep links | The address survives a reload (`#/products`); `#/accounts/gst-out?due=week` opens its own tab and survives refresh |
+| Unsaved form | Closing a dirty drawer asks once and stays open on cancel; closing its tab is guarded the same way; accepting the warning closes the tab |
+| Palette | Opens on the screen list; typing keeps screen results beside records |
+| Responsive | At 768 the rail is the horizontal strip and the tab row stays above it; at 390 the tab strip stays visible with the module strip under it |
+| Permissions (backend) | A viewer's menu offers only `dash, sales, billing, customers, purchasing, products, inventory, foc, reports, geo, hr`; a stored tab for a forbidden screen is pruned; a direct link to a forbidden screen falls back to `#/dash` and the address is rewritten; the breadcrumb links no forbidden screen |
+| Session change | Swapping the cookie mid-session produced 14 refusals — all **403**, all accounts reads fired by the still-live document after the role changed. The viewer page rendered no accounts content (`#shell.dataset.view == "dash"`), and a steady viewer session made **no refused call** |
+
+Screenshots (both themes where noted): `var/shots/wp2-tabs-1440-light.png`,
+`wp2-tabs-1440-dark.png`, `wp2-tabs-768-light.png`, `wp2-tabs-390-light.png`.
+They show the pinned Home tab, the active-tab line, breadcrumbs, the
+Favourites/Recently opened groups, the `⋯` overflow button and the mobile
+module strip.
+
+### 30.4 Defects found and fixed during this verification
+
+| Defect | Root cause | Fix |
+|---|---|---|
+| `TypeError: Cannot set properties of null (setting 'textContent')` at `renderApprovals` for a viewer | `#apCount`, `#soCount`, `#poCount`, `#ldCount` were updated directly, but a badge exists only when its menu row renders for the role | Null-safe `setBadge()` helper in `app.js`; all four call sites converted. Re-walk: zero page errors |
+| `pytest` stalled at "collecting …" after WP-2 | `var/probe/serve_test.py` matches pytest's default `*_test.py` pattern and calls `uvicorn.run()` at import time, so collection blocked on a probe server | New `pytest.ini` with `testpaths = tests`. Bare `python -m pytest -q` now collects 468 tests in about 3 s |
+| `test_profit_loss.py::test_expenses_menu_follows_the_central_permission_map` failed | It asserted the old hard-coded strings in `app.js`/`index.html`; WP-2 moved the maps into `workspace.js` and renders the rail from `WS.NAV` | Test updated to assert the same intent in the new home: `expenses: "accounts"` and `expenses: "expense:read"` in `workspace.js`, one `views: ["expenses"]` entry, `WS.NAV.forEach` and the `data-v` row template in `app.js`, `id="sideNav"` in the HTML. Passes; full suite 468/468 |
+| The 20-tab bound dropped the oldest tab without any way back | `openTab` spliced the oldest screen after Home and did not record it, and `reopenClosed` discarded the list `openTab` returned | The evicted tab now goes to the top of the reopen list, so *Reopen closed tab* restores it, and `reopenClosed` keeps that list. New Node test `the strip keeps 20 tabs and evicts the oldest into the reopen list` (18th). Found while documenting WP-2, after the browser walk; the walk reached 19 tabs, so the bound itself was not exercised in the browser |
+
+The badge defect was latent before WP-2 and was exposed by walking a viewer
+role; it is fixed here rather than deferred. The tab-bound fix is verified by
+the Node model test and the full suite; the browser path for the 21st tab was
+not re-walked.
+
+### 30.5 What was not verified
+
+| Item | Why |
+|---|---|
+| Screen readers (NVDA/JAWS/VoiceOver) and physical touch devices | No assistive tooling or devices in this workspace; the ARIA attributes and keyboard path were exercised by script |
+| Safari and Firefox | Only headless Chrome was driven |
+| Session restoration across a full browser restart | Tabs are `sessionStorage`; the walk proved reload restoration, not browser-restart behaviour (by design a new login starts with Home) |
+| Favourites across devices | Device-local by design until WP-4; recorded as a deviation, not a pass |
+| Two browser tabs reading `sessionStorage` concurrently | Not exercised |
+
+### 30.6 Rollback
+
+Source-only. Revert `static/js/workspace.js` (delete),
+`static/js/app.js`, `static/css/styles.css`, `static/index.html`,
+`tests/js/workspace.test.cjs`, `tests/test_workspace_model.py`, `pytest.ini` and
+the test edit in `tests/test_profit_loss.py`. No database object, migration,
+route, permission key or endpoint is involved, so a revert cannot strand data.
+The previous suite baseline (467 passed at `eaf38d2`) is unaffected by reverting
+the frontend files.
+
+## 31. WP-4 approval-readiness review — 4 November 2026
+
+Scope: re-verify WP-2 and WP-3 in the running application, then audit the WP-4
+Feature Registry design against the code and the live schema. No application
+code, schema, migration, database record or production setting was changed; no
+migration was created or executed; nothing was committed or pushed. The full
+report, including the 88-table classification, the risk register and the five
+approval answers, is [WP4_APPROVAL_READINESS.md](WP4_APPROVAL_READINESS.md).
+
+Current tree: branch `feature/gap-closure`, HEAD
+`77f5a96e4182af7a67eea95405d4c03fc66820e6`, 22 modified and 10 untracked files
+preserved and captured in `var/backups/wp4-review-20261104T122641/`. The earlier
+sections of this report record HEAD `eaf38d2`; that was the state when WP-2 and
+WP-3 were written, and it is left as the historical record.
+
+### 31.1 Automated suites
+
+| Run | Result |
+|---|---|
+| `node --test tests/js/workspace.test.cjs` | **18 passed, 0 failed, 0 skipped** (72.7 ms) |
+| `python -m pytest -q -rs` | **468 passed, 0 failed, 0 skipped, 695 warnings in 227.65 s**, exit 0 |
+
+Evidence: `var/reports/wp4r-node.log`, `var/reports/wp4r-pytest.xml` and
+`wp4r-pytest.log` (the XML is generated by `--junitxml` and records 468 tests).
+
+### 31.2 WP-2 re-verification, including the 21st tab
+
+Phase A replayed the unchanged WP-2 walk: **42/42 passed**. Phase B adds the flow
+§30.4 said was not re-walked: **20/20 passed**. With 20 tabs open (Home pinned
+plus 19, the oldest being `#/accounts/gst-out?due=week`), opening `#/users` as
+the 21st keeps the strip at 20 and evicts the oldest; *Reopen closed tab*
+restores it as the active tab with the exact hash and query and the
+`GST outward` breadcrumb; the reopen at the bound evicts the next screen, which
+is itself recoverable, and a second reopen brings it back. Home has no close
+button, the menu's close action is disabled for it, and Delete is a no-op. A
+second query on the same screen updates its tab address rather than duplicating
+it, and no page error or unhandled rejection was recorded. This supersedes the
+WP-2 gap noted in §30.4; §30 is otherwise unchanged.
+
+Phase A/B result: **113/113 checks passed** (`var/reports/wp4r-browser.json`,
+`wp4r-browser.log`; phases A=42, B=20).
+
+### 31.3 WP-3 eight-list preservation
+
+Phase C: **51/51 passed**, read-only. Server totals and pager text were correct
+on all eight lists (Products 58, Suppliers 6, Customers 47, Sales 93, Purchases
+56, Billing 85, Approvals 14, Leads 2); search sent `q` and the server answered
+with zero rows; Clear restored the base total; filters were applied by the
+server; CSV export requests carried no `page=`. Products offered 7 sort buttons
+and sorted on `mrp` ascending then descending with `aria-sort` following; the
+other seven lists offered **0** sort controls. The shared list infrastructure
+was not rewritten.
+
+### 31.4 WP-4 audit findings
+
+Measured: 5 modules, 14 categories, 20 groups, 25 screens, 25 titles, 4 hidden,
+1 alias, 14 features, 49 permissions, 18 delivery modules, 344 `APIRoute`s over
+267 distinct paths (229 owned / 38 unowned), 88 live tables and 182 foreign keys
+at `0030_sign_in_content`. Sources: `var/reports/wp4r-audit.json`,
+`wp4r-hierarchy.json`, `wp4r-tables.json`.
+
+Corrections to the design: the route baseline is **344**, not 348 (the 348
+included four framework routes and the static mount); `Feature.views` holds
+**22** strings — 21 screens plus the `distributors` alias — and `expenses`/`roles`
+are indeed missing (D-01 confirmed). New gap: the registry models screens but
+not the **19 accounting sub-sections** (`ACC_SECTIONS`, `app.js:4371`), which
+must stay code-driven through 4c.
+
+Blocking finding **R-01**: `feature_registry.feature_key` and
+`nav_nodes.feature_key` are proposed as foreign keys to `feature_flags.key`,
+while `tests/test_feature_switches.py:32` deletes every flag row after each test
+and `feature_flags` is deliberately sparse (absent = ON). After 0031 the fixture
+would raise a foreign-key violation, and a future feature with no flag row could
+not be registered. Recommended fix: drop both foreign keys and validate
+`feature_key` against `FEATURES` in the service. The full register (R-01–R-12)
+is in the readiness report §5.
+
+### 31.5 Business-data blast radius
+
+The four proposed tables reference only KEEP tables (`users`, `feature_flags`,
+`nav_nodes`). No foreign key points at any of the 46 CLEAR tables, so 0031
+cannot cascade into a document, stock, money or HR-transaction row, and the
+downgrade drops only the new tables. The business-reset CASCADE guard cannot
+reach them because no BUSINESS table references them. The only destructive
+interaction found is R-01, and it is a test-fixture failure, not data loss.
+
+### 31.6 What was not verified
+
+Screen readers and physical devices; Safari and Firefox; the 21st-tab flow at
+768/390 and in the dark theme; two concurrent browser tabs; session restoration
+across a full browser restart; a real business reset after the classification
+was read; production and staging. No migration exists to apply, so none of these
+gaps affects the code shipped today.
+
+### 31.7 Verdict
+
+**Conditional GO for batch 4a only; NO-GO for 4b–4d.** Conditions C1–C6 are in
+the readiness report §8. The migration must not be written until the owner
+answers design §12 and R-01 is resolved.
+
+---
+
+## 32. WP-4 design corrections and Batch 4a preparation — 4 November 2026
+
+Scope: correct the WP-4 design for **R-01** and for table necessity, then prepare
+Batch 4a without executing it. No migration was run against any database; no
+business table, business row or production setting was touched; nothing was
+committed or pushed. The corrected design is
+[FEATURE_REGISTRY_DESIGN.md](FEATURE_REGISTRY_DESIGN.md); the corrected review is
+[WP4_APPROVAL_READINESS.md](WP4_APPROVAL_READINESS.md) §11.
+
+Current tree: branch `feature/gap-closure`, HEAD
+`77f5a96e4182af7a67eea95405d4c03fc66820e6`, 22 modified and 18 untracked entries
+(40 total). The 4a work adds eight files, seven as new git entries because
+`tests/js/emit_nav_manifest.cjs` sits inside the already-untracked `tests/js/`;
+they are listed in §32.3.
+
+### 32.1 Automated suites
+
+| Run | Result |
+|---|---|
+| `python -m pytest -q -rs --junitxml=var/reports/wp4c-pytest.xml` | **496 passed, 3 skipped, 0 failed, 695 warnings in 225.06 s**, exit 0 |
+| `python -m pytest tests/test_navigation_registry.py -q` | **28 passed, 3 skipped in 4.71 s** |
+| `node --test tests/js/` | **18 passed, 0 failed, 0 skipped** (95 ms, workspace suite; the parity emitter is exercised from Python, not as its own Node suite) |
+| `python scripts/generate_navigation_seed.py --check` | **seed block is current (78 rows)** — 64 nav nodes + 14 features |
+| `python scripts/verify_navigation_migration.py` (dry run) | prints `0028_advances -> 0031_navigation_registry -> 0030_sign_in_content -> 0031_navigation_registry`; **does not connect** |
+
+The three skips are the DB-backed checks in `tests/test_navigation_registry.py`
+(lines 407, 423, 442): they are gated on
+`alembic/versions/0031_navigation_registry.py` existing, which it does not — the
+file is `.py.draft`. That is deliberate: `tests/conftest.py` runs `alembic
+upgrade head`, so an active draft would migrate the test database during every
+suite run.
+
+Relative to §31's 468, the suite gained 28 registry tests (468 + 28 = 496).
+No existing test was modified or removed.
+
+### 32.2 What the registry tests prove
+
+- **R-01, five ways:** a registered feature with no switch row is ON; a disabled
+  switch row hides its nodes but keeps the registry row; deleting every
+  `feature_flags` row raises no foreign-key error (the models have none); an
+  unknown feature key is rejected; registry membership neither enables nor
+  disables a switch. `test_registry_has_no_foreign_key_to_feature_flags` asserts
+  the FK sets directly — `FeatureRegistry` has none, `NavNode` has only
+  `nav_nodes.id`.
+- **Parity with the shipped browser:** `tests/js/emit_nav_manifest.cjs` loads
+  `static/js/workspace.js` and emits the real `NAV`, `TITLES`, `VIEW_PERM`,
+  `VIEW_FEATURE`, routes, alias and per-role visibility; the Python test compares
+  those with `app/services/navigation_catalog.py` — counts, labels, order,
+  permissions, menu rules, feature keys.
+- **Validation:** mutation tests cover a duplicate `node_key`, a duplicate screen
+  view, a duplicate route, a duplicate sibling `sort_order`, an invalid
+  depth/kind, a parent that does not exist, a parent cycle, a missing or second
+  Home, a permission-gated Home, an alias that collides with a node key, an
+  alias used twice, a `component_key` that differs from `view`, an unknown
+  permission, an unknown feature reference, a dependency cycle, feature rows that
+  differ from `features.py` (permissions, lock, API prefixes), and a screen whose
+  feature contradicts `Feature.views`. `validate_catalog` additionally refuses a
+  route that is not `#/` + view, a `menu_any` rule with no keys, and an inactive
+  or renamed Home; those three are covered by the rule inventory in design §7.
+- **ETag:** changing the enabled-feature set changes the hash; changing
+  permissions, favourites or recent keys changes it; an unchanged input returns
+  the same value.
+
+### 32.3 Batch 4a artifacts (inert)
+
+`alembic/versions/0031_navigation_registry.py.draft`,
+`app/models/navigation.py`, `app/services/navigation_catalog.py`,
+`app/services/navigation_registry.py`, `scripts/generate_navigation_seed.py`,
+`scripts/verify_navigation_migration.py`, `tests/test_navigation_registry.py`,
+`tests/js/emit_nav_manifest.cjs`.
+
+`0031` creates **two** tables (`nav_nodes`, `feature_registry`), 64 seeded nodes,
+14 seeded features, one protected Home, one inline alias (`distributors`), and has
+a full downgrade. It contains **no foreign key to `feature_flags`**.
+
+### 32.4 Route and path counts, re-measured
+
+344 `APIRoute` objects; 268 distinct paths (267 `/api` plus `/`); 229 owned by a
+feature prefix; 39 unowned (38 `/api` plus the root redirect). `len(app.routes)`
+is 349: the 344, four framework routes and the `/ui` mount. The earlier 348 was
+an overcount and the earlier 267 omitted the root path. `PROJECT_ARCHITECTURE.md`
+and `IMPLEMENTATION_ROADMAP.md` now carry the reconciled figures.
+
+### 32.5 Business-data safety
+
+Upgrade: creates two tables and inserts 78 configuration rows. It touches no
+existing table, deletes nothing and rewrites nothing. Downgrade: drops the two
+tables only; the 46 CLEAR tables are untouched and no CLEAR row references the
+new tables. No foreign key points at a business table; the only FK is
+`nav_nodes.parent_id` → `nav_nodes.id`. KEPT classification changes from
+46 + 41 + 1 = 88 to 46 + 43 + 1 = 90 **only when the migration is activated**,
+because `_kept_snapshot` counts every KEPT table and would fail on a name that
+does not exist yet.
+
+### 32.6 Not executed
+
+`alembic upgrade`, `alembic downgrade`, `scripts/verify_navigation_migration.py
+--run`, and every write against `herbanova_bcs_test`, `herbanova_bcs_dev` and
+production. The scratch-database rehearsal is prepared and dry-run only.
+
+### 32.7 Verdict
+
+**Batch 4a is prepared and still requires approval.** GO for 4a only, conditional
+on the owner decisions in design §12 and conditions C1, C3 and C6 (C2, C4 and C5
+are met). NO-GO for 4b–4d. `0031` must not be renamed from `.draft` until
+explicit approval.
+
+---
+
+## 33. WP-4 Batch 4a migration rehearsal — 4 November 2026
+
+**Scope.** The owner authorised a migration rehearsal **only on newly created,
+disposable scratch databases**. This section records what was run and what was
+observed. It is the first execution of `0031` anywhere.
+
+**Not authorised, and not done:** no write to the development, test
+(`herbanova_bcs_test`), staging or production database; `0031` remains
+`alembic/versions/0031_navigation_registry.py.draft` and is still invisible to
+Alembic and pytest; `KEPT_TABLES` was not edited; `/api/navigation` was not
+implemented; no frontend navigation changed; favourites were not created;
+nothing was committed or pushed.
+
+### 33.1 Repository preserved
+
+| Item | State |
+|---|---|
+| Branch / HEAD | `feature/gap-closure` at `77f5a96e4182af7a67eea95405d4c03fc66820e6` |
+| Working tree | 41 entries (22 modified, 19 untracked, 0 deleted); nothing reset, cleaned, discarded or rebased |
+| Draft migration | `alembic/versions/0031_navigation_registry.py.draft`, SHA-256 `6d6328a5aadf078d982c8ad9585c78c075ba85089d6def6f2405de8aae27e891`; no active `.py` exists |
+| Seed literal | `python scripts/generate_navigation_seed.py --check` → "seed block is current (78 rows)" |
+| Classification | `app/services/db_reset.py` unchanged: 46 CLEAR + 41 KEEP + 1 schema = 88 |
+
+The `.py` activation existed only inside two temporary copies, both removed. The
+repository's draft was never renamed.
+
+### 33.2 The three formerly skipped tests, explained
+
+The three tests are gated by
+`ACTIVE = (ROOT / "alembic" / "versions" / "0031_navigation_registry.py").exists()`
+and `pytest.mark.skipif(not ACTIVE, reason="0031 is an inactive .py.draft; activate it only after approval")`.
+They were executed against a **fresh `herbanova_nav_rehearsal_test` database** by
+a temporary isolated copy of the repository with the draft copied to `.py`
+(the `.draft` was kept beside it), `tests/conftest.py` pointed at that database,
+and `alembic upgrade head` run by the fixture on the newly created database.
+Result: **31 passed, 0 failed, 0 skipped in 4.12 s** (`var/reports/wp4a-gated-tests.xml`).
+
+| Test | Why it was skipped | Behaviour it covers | Database needed? | Execution and result |
+|---|---|---|---|---|
+| `test_migration_seed_matches_the_catalogue` | `0031` was a `.draft`; the gate could not see an active migration | Reads `nav_nodes` and `feature_registry` from the migrated database, compares every `node_key` in order with `build_nodes()`, and runs `validate_catalog` over the **database rows**, not the in-memory catalogue | **Yes.** It queries the two new tables through SQLAlchemy | Passed on the scratch database: 64 nodes in catalogue order, 14 feature rows, zero validation errors |
+| `test_deleting_every_switch_row_leaves_the_registry_intact` | Same gate | R-01 at database level: `DELETE FROM feature_flags` leaves 64 nav rows and 14 registry rows, and no foreign key points at `feature_flags` | **Yes.** It deletes rows and reads `pg_constraint` | Passed on the scratch database; the rehearsal also recorded 13 factory-seeded switch rows being deleted with the registry unchanged |
+| `test_downgrade_and_reupgrade_are_covered_by_the_verify_script` | Same gate, but **the test itself needs no database** | Static check that `scripts/verify_navigation_migration.py` names `0031_navigation_registry`, contains `"downgrade", "0030_sign_in_content"` and uses the `herbanova_nav_migration_scratch_test` database name | **No.** It only reads the script text; it was gated with the migration-evidence group, not because of a DB dependency | Passed in the isolated copy. This is stated plainly so no skip is presented as more than it was |
+
+The other registry tests (catalogue, validation, visibility, ETag) are not gated
+and continue to run in the ordinary suite: 28 passed, 3 skipped in the
+unactivated repository (`var/reports/wp4c-pytest.xml`).
+
+### 33.3 Catalogue parity before migration — 11/11 checks
+
+`python scripts/navigation_parity_report.py` writes
+`var/reports/wp4a-catalogue-parity.json`. All checks pass:
+
+- **Counts:** 5 modules, 14 categories, 20 groups, 25 screens, 14 features,
+  78 generated seed rows (64 + 14).
+- **Seed literal:** the `.draft` literal equals `build_nodes()` and
+  `build_features()` row for row.
+- **Duplicates:** none in `node_key`, route, view, `feature_key`, sibling
+  `sort_order` or alias.
+- **Orphans:** no missing parent, no unregistered feature, no alias target
+  missing, no feature row missing or extra.
+- **Permissions:** 17 nav permission keys and 49 feature permission keys, all
+  present in the backend catalogue (`app/core/permissions.py`, 49 keys).
+- **Routes and menu:** all 25 `#/<view>` routes parse back to the same view, all
+  labels match, and the 5/14/20/25 hierarchy is identical to `workspace.js`.
+- **View maps:** `VIEW_FEATURE`, `VIEW_PERM`, the `viewAllowed` OR rules
+  (`compare`, `hr`, `accounts`, `scheduled`, `reports`, `settings`) and the
+  `menu_any` narrowing match the catalogue.
+- **Alias:** `distributors` resolves to `sales/parties/customer-master/customers`
+  and is not a node.
+- **Accounts:** the 19 sub-sections are still code-driven, each routable as
+  `#/accounts/<key>` and dispatched by the `accounts` route; `reports` is a
+  section key and the separate `#/reports` screen is unaffected.
+- **Home:** exactly one Home screen (`dash`), matching `#/dash`.
+
+### 33.4 Migration rehearsal — 13/13 steps
+
+`python scripts/verify_navigation_migration.py --run` created
+`herbanova_nav_migration_scratch_test` on PostgreSQL 17.11, collected every
+piece of evidence, and only then dropped it. Evidence:
+`var/reports/wp4a-migration-rehearsal.json`; console log:
+`var/reports/wp4a-migration-rehearsal.log`.
+
+| # | Step | Observation |
+|---|---|---|
+| 1 | Create scratch database | Created 08:05:40Z; did not exist beforehand; server 17.11 |
+| 2 | Temporary Alembic tree | Draft activated only inside the temp script directory; repository untouched |
+| 3 | Upgrade `0028_advances` | Version `0028_advances`, 2.18 s |
+| 4 | Upgrade `0029_totp` | Version `0029_totp`, 1.37 s |
+| 5 | Upgrade `0030_sign_in_content` | Version `0030_sign_in_content`, 1.38 s; 88 public tables |
+| 6 | Upgrade `0031_navigation_registry` (draft) | Version `0031_navigation_registry`, 1.47 s; 90 public tables |
+| 7 | Verify tables and rows | 64 `nav_nodes` (5/14/20/25), 14 `feature_registry`, 78 rows; row-for-row equal to the catalogue; one Home; one alias row; `validate_catalog` = 0 errors |
+| 8 | Verify indexes, constraints, uniqueness, self-reference | 6 indexes on `nav_nodes` + 1 on `feature_registry`; 11 constraints on `nav_nodes` (pkey, FK, unique, 8 checks) + 2 on `feature_registry`; `nav_nodes.parent_id → nav_nodes.id` `ON DELETE RESTRICT`; no FK to `feature_flags`; identity sequence at 64 (called); 6 write probes behaved (duplicate key, second Home, depth/kind, missing parent, non-screen view all refused; a valid child accepted) |
+| 9 | Downgrade to `0030_sign_in_content` | Version `0030_sign_in_content`, 1.35 s; exactly `nav_nodes` and `feature_registry` removed; 88 earlier tables still present with identical row counts and column definitions |
+| 10 | Re-upgrade to `0031_navigation_registry` | Version `0031_navigation_registry`, 1.40 s |
+| 11 | Verify all 78 rows again and final version | 64/14 rows, 5/14/20/25, one Home, one alias; 0 duplicate keys/routes/sibling orders, 0 orphan parents/features; final `alembic_version` = `0031_navigation_registry` |
+| 12 | Five R-01 behaviours on the live scratch database | 5/5 pass (table in §33.6) |
+| 13 | Drop the scratch database | Dropped 08:05:51Z; `exists_after_drop = false`, after the JSON was written |
+
+### 33.5 Business-data safety
+
+The comparison is `0030` (before) against `0031` (after) on the same scratch
+database, so it isolates the migration's effect.
+
+| Measure | At `0030` | At `0031` |
+|---|---|---|
+| Alembic version | `0030_sign_in_content` | `0031_navigation_registry` |
+| Public tables | 88 | 90 |
+| Tables added | — | `nav_nodes`, `feature_registry` |
+| Tables removed | — | none |
+| Row-count changes in existing tables | — | **none** (`row_count_changes = {}`) |
+| Column changes in existing tables | — | **none** (`columns_changed = []`) |
+| Database size | 13,588,147 bytes (post-downgrade snapshot) | 13,776,563 bytes; 13,809,331 bytes after re-upgrade |
+| KEPT/CLEAR classification | 46 CLEAR + 41 KEEP + 1 schema | 46 + 41 + 1, with exactly the two new tables unclassified until activation |
+
+`0031` changed **only** the two new tables. No business table was deleted,
+truncated, recreated or modified. The two new names are deliberately **not** in
+`KEPT_TABLES` yet: `tests/test_db_reset.py::_kept_snapshot` counts every KEPT
+table, so adding them before the tables exist would fail. Activation adds them,
+making the classification 46 + 43 + 1 = 90.
+
+### 33.6 R-01 against the real scratch database
+
+The factory migrations seed 13 switch rows (`accounts`, `approvals`, `audit`,
+`hr`, `leads`, `products`, `reports`, `sales`, `scheduled`, `stock`, `suppliers`,
+`tax`, `users`), so "no row means ON" was proved after deleting them.
+
+| Behaviour | Observation |
+|---|---|
+| Registered feature without a switch row is ON | With `feature_flags` empty, `feature_store.is_enabled(hr)` → `True` |
+| Disabled switch hides nodes but keeps the registry row | `hr = false` → `is_enabled(hr)` false; the `hr` screen is filtered out of the visible set; `nav_nodes` still 64 and `feature_registry` still has `hr` |
+| Deleting every switch row leaves the registry intact | All 13 rows deleted → 64 nav / 14 feature rows remain; all 14 features ON |
+| Unknown feature key is rejected | Catalogue validation rejects `ghost`; database has **no** FK on either `feature_key` and the models declare none |
+| Registry membership does not enable or disable a switch | Neither table has an `enabled` column; `accounts` is ON with no row and OFF with a disabled row; registry count stays 14 |
+
+### 33.7 Rollback proof
+
+- Upgrade `0031`: succeeds; 64/14/78 rows.
+- Downgrade `0030`: succeeds; both tables gone; 88 earlier tables intact with
+  unchanged rows and columns; `legal_documents` and the three `sign_in_*` tables
+  present.
+- Re-upgrade `0031`: succeeds; the same 64/14/78 rows and final version.
+- After re-upgrade: 0 duplicate keys, routes or sibling orders; 0 orphan
+  parents or features; one Home.
+
+### 33.8 Evidence files
+
+| File | Contents |
+|---|---|
+| `var/reports/wp4a-catalogue-parity.json` | 11 checks, counts, duplicates, orphans, permissions, routes, alias, accounts |
+| `var/reports/wp4a-migration-rehearsal.json` | 13 steps, revisions, seed, schema, before/after table and row snapshots, size, classification, R-01, cleanup |
+| `var/reports/wp4a-migration-rehearsal.log` | Console log of the rehearsal |
+| `var/reports/wp4a-gated-tests.xml` | JUnit XML: 31 tests, 0 failures, 0 errors, 0 skipped |
+| `var/reports/wp4a-gated-tests.log` | pytest output from the isolated copy |
+| `var/reports/wp4a-gated-tests.json` | Scratch database creation/drop, draft hash, copy isolation |
+| `var/reports/run_gated_tests.py` | One-off harness for the isolated copy (`var/` is git-ignored) |
+
+Both scratch databases — `herbanova_nav_migration_scratch_test` and
+`herbanova_nav_rehearsal_test` — were created fresh and dropped after the
+evidence was written; both report `exists_after = false`.
+
+### 33.9 Verdict
+
+**Batch 4a is technically safe to activate.** The migration applies, seeds,
+reverses and re-applies cleanly on a disposable database without touching a
+single existing table or row, and the five R-01 behaviours hold against real
+PostgreSQL. Activation still requires the owner's explicit approval and the two
+open owner actions: C1 (record the design §12 decisions) and C3 (commit or
+checkpoint WP-2/WP-3 and take a verified dump). C6 is now met by this rehearsal.
+
+**No activation was performed.** `0031` remains inert; development and test
+remain at `0030`; production remains at `0028`. Batches 4b–4d are not started;
+nothing was committed or pushed.
+
+*Superseded by §34: activation was performed on 4 November 2026 after explicit
+owner approval, and §34 records the result.*
+
+---
+
+## 34. WP-4 Batch 4a activation — 4 November 2026
+
+§33.9 recorded the rehearsal verdict and is superseded by this section: the
+owner approved Batch 4a activation by explicit instruction on 4 November 2026,
+and the migration was activated on the approved development database.
+
+### 34.1 Preserved before any change
+
+| Item | Value |
+|---|---|
+| Branch / HEAD | `feature/gap-closure` / `77f5a96e4182af7a67eea95405d4c03fc66820e6` |
+| Checkpoint | `var/backups/wp4a-activation-20261104T082147Z/` — `tracked.diff` 251,166 B, `tracked.stat`, `untracked.txt` (20 files), `untracked.tar.gz` 106,453 B / 20 entries, `checksums.txt`, `git-status.txt` |
+| Database backup | `herbanova_bcs_dev.dump`, 406,720 B, 941 archive entries, SHA-256 `eeaba325bf99a2ec69a2f286a5dce31fd64d20072096a9f58d7adae0637a2499` |
+| Backup verified | restored into `herbanova_restore_check_20261104t082247z_test`: 88 tables, 891 rows, revision `0030_sign_in_content`, columns identical; scratch restore dropped |
+| Destructive commands | none |
+
+### 34.2 Activation
+
+- `alembic/versions/0031_navigation_registry.py.draft` → `.py`; chain
+  `0028_advances → 0029_totp → 0030_sign_in_content → 0031_navigation_registry`.
+- `nav_nodes` and `feature_registry` added to `KEPT_TABLES`; `navigation`
+  imported from `app/models/__init__.py`; the generator, parity and verify
+  scripts and one test resolve the active file first, then the draft.
+- Target asserted as `herbanova_bcs_dev` before running; `alembic upgrade
+  0031_navigation_registry` exited 0 (`var/reports/wp4a-activation-upgrade.log`).
+  Production and staging were not contacted.
+
+### 34.3 Database result — 16/16 checks
+
+`var/reports/wp4a-activation-verify.json`, 2026-11-04T08:26:32Z:
+
+| Check | Result |
+|---|---|
+| Revision | `0031_navigation_registry` |
+| Tables | 90; added `feature_registry`, `nav_nodes`; removed none |
+| Seed | 64 nodes + 14 features = 78 rows |
+| Home | one, `#/dash`, depth 4, featureless, unique index present |
+| Indexes / constraints | 6 + 1 indexes; 11 + 2 constraints |
+| Foreign keys | only `nav_nodes.parent_id → nav_nodes.id ON DELETE RESTRICT`; no incoming FK to `feature_flags` |
+| Catalogue | rows equal `build_nodes()` / `build_features()`; 0 validation errors; all keys known |
+| Business data | `changed_rows: {}`, `removed_tables: []`; database 15,529,651 B |
+
+### 34.4 Tests
+
+| Run | Result |
+|---|---|
+| `python -m pytest -q -rs` (JUnit `wp4a-activation-pytest.xml`) | **499 passed, 0 failed, 0 skipped**, 695 warnings, 204.86 s, exit 0 |
+| Navigation/reset/feature/role/permission subset | **83 passed, 0 failed, 0 skipped**, 114.53 s (31 + 24 + 10 + 11 + 7) |
+| `node --test tests/js/workspace.test.cjs` | **18 passed, 0 failed, 0 skipped** |
+| `python scripts/navigation_parity_report.py` | 11/11, 0 failed |
+| `python scripts/generate_navigation_seed.py --check` | current, 78 rows |
+
+The three previously skipped DB-gated tests now run: 496 pre-activation + 3 =
+499. No test was skipped or weakened.
+
+### 34.5 Application verification
+
+| Area | Result |
+|---|---|
+| Dev API probe (GET only, `:8000`) | 35/35: health, auth/me, modules, 14 features, eight WP-3 lists, 19 accounting endpoints, `/api/navigation` 404 |
+| Permissions | admin 49 keys, viewer 5; viewer 403 on `/api/features` and `/api/roles`, unchanged |
+| Browser walk on rebuilt test DB | 113/113 (WP-2 42, 21st tab 20, eight lists 51) |
+| Accounting sub-sections | 19/19 load `v-accounts` with their hash, tab and breadcrumb |
+| Alias / Home | `#/distributors` → `v-customers`, Customers tab, Customers breadcrumb; `#/dash` → `v-dash`, Home tab |
+| Registry contents | 64 nodes, 14 features, 25 screens, 19 sections outside the registry by design (G-01) |
+| Business change | none (`changed_rows: {}`) |
+
+`/api/navigation` and frontend navigation were not implemented or changed;
+those are batches 4b and later.
+
+### 34.6 Rollback
+
+`alembic downgrade 0030_sign_in_content` removes exactly the two tables; revert
+the `KEPT_TABLES` and model-import edits and delete the active migration file.
+The verified pre-activation dump restores 88 tables, 891 rows at
+`0030_sign_in_content` if a full restore is required. The downgrade path was
+rehearsed on a scratch database (§33.7) and removes no business row.
+
+### 34.7 Outstanding
+
+| Item | State |
+|---|---|
+| Production at `0028_advances` | Not touched; needs 0029 → 0030 → 0031 under separate approval |
+| Batches 4b–4d | Not started: no `/api/navigation`, no favourites endpoint, no frontend default flip (4b completed later, §35) |
+| G-01 accounting sections | Still code-driven; decision needed before 4d |
+| D8 favourites | Deferred; `user_favourites` not created |
+| Commit / push | Not performed; 43 working-tree entries remain local |
+
+### 34.8 Verdict
+
+**Batch 4a is activated in development and verified.** The migration created two
+new tables and 78 configuration rows without altering a business table or row;
+the full suite, the targeted registry-sensitive subset, Node tests, parity and
+browser evidence are green. Batches 4b–4d and production promotion remain
+separately unauthorised; nothing was committed or pushed.
+
+---
+
+## 35. WP-4 Batch 4b — the read-only navigation API — 4 November 2026
+
+**Scope.** The owner authorised Batch 4b only: `GET /api/navigation` under the
+approved contract in [FEATURE_REGISTRY_DESIGN.md](FEATURE_REGISTRY_DESIGN.md)
+§6.1, plus the read-only administrative endpoint §6.3 requires in this batch.
+Restrictions honoured: no database reset, no migration, no business-data
+change, no frontend navigation replacement, no 4c/4d code, no production
+deployment, no commit or push.
+
+### 35.1 Files
+
+| File | Change |
+|---|---|
+| `app/api/navigation.py` | New: `GET /api/navigation`, `GET /api/admin/navigation` |
+| `app/services/navigation_store.py` | New: read-only loader, deterministic order, dependency closure |
+| `app/main.py` | Imports and includes the navigation router |
+| `tests/test_navigation_api.py` | New: 26 tests |
+
+No table, column, migration, seed or frontend file was changed.
+`static/js/workspace.js` and `static/js/app.js` are untouched, and the SPA does
+not call either endpoint.
+
+### 35.2 Security behaviour
+
+- `require_login` is the only gate; anonymous requests return 401.
+- Permissions come from `rbac.role_permissions`, i.e. the stored role keys with
+  the parent/child rule applied, minus the permissions of switched-off
+  features. The response and the route gates therefore agree.
+- A feature is offered only when its registry row is `active`, its switch is ON
+  (or it is locked ON), and every `depends_on` feature is available. No shipped
+  row declares a dependency, so the default menu is unchanged.
+- Only screens in `visible_keys` are returned. A container with no visible
+  screen is pruned, so a closed branch's label is never disclosed.
+- Inactive nodes, and everything below them, are absent. An unknown feature
+  reference, a missing table or any `validate_catalog` error returns `503
+  {"detail": "Navigation registry unavailable"}`; no partial tree is produced.
+- Home is always present: it is the single registered `dash` screen, featureless
+  and permissionless, and the tests assert it for all five roles.
+- The alias `distributors` travels with the visible `customers` screen and is
+  absent when that screen is closed.
+- A GET writes no navigation row, feature row or audit row; the test compares
+  counts and the maximum `audit_log.id` before and after three requests.
+- Switch defaults are untouched: an absent `feature_flags` row is still ON and
+  `users` is still locked ON.
+
+### 35.3 Role visibility measured through the API
+
+| Role | Permission keys | Modules | Screens | Screens listed |
+|---|---|---|---|---|
+| Administrator | 49 | 5 | 25 | every registered screen |
+| Sales | 15 | 5 | 18 | no Suppliers, FOC, Expenses, Scheduled, Users, Roles, Audit |
+| Inventory | 14 | 5 | 16 | no Leads/Lost/Follow-ups, Accounts, Expenses, Scheduled, Users, Roles, Audit |
+| Viewer | 5 | 5 | 13 | Home, MoM/YoY, Sales, Billing, Customers, Purchases, Products, Inventory, FOC, Reports, Geography, HR, Settings |
+| HR Manager | 8 | 4 | 5 | Home, Approvals, Reports, HR, Settings; no Stock module |
+
+Empty branches are pruned exactly as expected: the HR Manager's Sales module
+keeps only the Approvals group and the People module keeps only People and
+Governance.
+
+### 35.4 ETag, conditional GET and caching
+
+- `ETag` is the quoted `navigation_etag` hash over the registry fingerprint,
+  user id, sorted permissions, sorted available features, favourites and
+  recents. `Cache-Control: private, no-cache` and `Vary: Cookie` are set on 200
+  and 304.
+- An unchanged request with `If-None-Match` returns **304** with an empty body
+  and the same ETag. Weak (`W/"…"`) and `*` validators are accepted; a stale
+  validator returns a full 200 identical to the first body.
+- A role-permission edit and a feature-switch change each made the old ETag
+  stale: the next request returned 200 with a different body/ETag, and the new
+  ETag then returned 304.
+- Two Administrators receive byte-identical bodies but different ETags because
+  the user id is an input. Sending one user's ETag as the other returns 200,
+  so a shared cache cannot serve one user's menu to another.
+- Browser probe on the test stack through the frontend proxy (`fetch` from the
+  signed-in page): Admin **200**, ETag `"fddec9544cdcb7c30d3c7ec1a3137d0c"`,
+  25 screens, 49 permissions, then **304**; Viewer **200**, ETag
+  `"1abba0b156e96ffc197eb2638084ccf5"`, 13 screens, 5 permissions, then **304**.
+  Headers observed: `private, no-cache`, `Vary: Cookie`. Evidence:
+  `var/reports/wp4b-navigation-browser.json`.
+
+### 35.5 Automated tests
+
+| Run | Command | Result |
+|---|---|---|
+| Full Python suite | `python -m pytest -q -rs --junitxml=var/reports/wp4b-pytest.xml` | **525 passed, 0 failed, 0 skipped**, 699 warnings, 219.03 s, exit 0 |
+| Node workspace model | `node --test tests/js/workspace.test.cjs` | **18 passed, 0 failed, 0 skipped**, 79.1 ms, exit 0 |
+| Navigation API | `python -m pytest tests/test_navigation_api.py -q` | **26 passed** |
+| Registry + switches + permission tree | four-file run | **78 passed** |
+
+The new tests cover: authentication; five roles; exact screen/route sets; Home;
+pruning; aliases; inactive nodes; feature switches; dependencies; invalid and
+missing registry; 503; ETag 200/304; permission-change invalidation; switch
+invalidation; per-user ETags; no writes; the admin endpoint and its 403/401;
+agreement with `/api/auth/me`; determinism.
+
+### 35.6 Browser regression (WP-2 and WP-3)
+
+The unchanged WP-4 walk was replayed against a backend running this checkout on
+the rebuilt test database (backend 8012, static frontend 3012, headless Chrome
+9224):
+
+| Phase | Checks | Result |
+|---|---|---|
+| A — WP-2 tabs, breadcrumbs, menu, overflow, favourites, guards, responsive, permissions | 42 | **42/42** |
+| B — 21st-tab eviction, reopen, Home protection, duplicate identity | 20 | **20/20** |
+| C — eight WP-3 lists: pager total, search/clear, filter, unpaged export, Products-only sorting | 51 | **51/51** |
+| Total | 113 | **113/113** |
+
+Evidence: `var/reports/wp4b-browser.json`, `wp4b-browser.log`,
+`wp4b-wp2walk.json`, `wp4b-navigation-browser.json`. Screenshots are written to
+`var/shots/` by the walk. The SPA was not modified, so this is regression
+evidence, not new frontend behaviour.
+
+### 35.7 Outstanding and known boundaries
+
+| Item | State |
+|---|---|
+| Frontend consumption | 4c: the SPA does not read `/api/navigation`; `workspace.js` remains the renderer |
+| Favourites / recents | Server values are empty (D8/D13); the keys exist so the shape is stable |
+| `depends_on` enforcement | As of 4b it narrowed this response only; `_feature_gate` still follows each feature's own switch. **Superseded by §36.2:** since 4c both readers share `feature_store.available_keys`. No shipped row declares a dependency |
+| Administrative editing | WP-5; the 4b endpoint is read-only and returns validation errors |
+| Production | Not touched; still at `0028_advances` |
+| Commit / push | Not performed |
+
+### 35.8 Rollback
+
+Batch 4b adds no schema and no data, so rollback is code-only:
+remove the `navigation` import and `app.include_router(navigation.router)` line
+from `app/main.py`, optionally delete `app/api/navigation.py`,
+`app/services/navigation_store.py` and `tests/test_navigation_api.py`. Restart
+the backend. No database restore, migration downgrade or data repair is needed;
+Batch 4a remains intact.
+
+### 35.9 Verdict
+
+**Batch 4b is implemented and verified.** The endpoint is authenticated,
+server-authoritative, feature- and dependency-aware, prunes closed branches,
+keeps Home, resolves the alias, answers 503 rather than half a tree, and returns
+correct per-user ETags with 304s only when the body is unchanged. It writes
+nothing. Batches 4c and 4d, production promotion, commit and push remain
+separately unauthorised.
+
+## 36. WP-4 Batch 4c — opt-in frontend integration — 4 November 2026
+
+The SPA can now read `GET /api/navigation`, behind a switch that is **off by
+default**. A browser that opens the app without opting in renders exactly the
+pre-4c menu. The router, the tab strip, the breadcrumb, favourites, recents,
+the palette and all 19 accounting sub-sections were kept; no screen was
+rewritten or duplicated.
+
+### 36.1 What changed
+
+| File | Change |
+|---|---|
+| `static/js/workspace.js` | Active-hierarchy block: `navTree`, `navAllows`, `navInMenu`, `setNavTree`, `resetNavTree`, `navFromApi`. `menuAllowed`, `flatNav`, `crumbPath` and the palette read the active tree; unknown and duplicate views are dropped |
+| `static/js/app.js` | `NAV_API_ENABLED = false`; `?nav=api` / `?nav=builtin` persisted in `sessionStorage["hb.navApi"]`; states `builtin` / `loading` / `ready` / `error`; `navFetch` / `navRefresh`; sequence + username guard; `renderSideNav()` iterates `WS.navTree()`; `wsViewOk()` requires `navAllows` while active; failure alert with **Retry** |
+| `static/css/styles.css` | `.nav-alert` and its mobile placement |
+| `app/services/feature_store.py` | `available_keys(db)` is one closure shared by `_feature_gate`, `enabled_keys` (`/api/auth/me`), `disabled_permissions` (RBAC) and the navigation endpoint; falls back to the stored switches before `0031`; a cycle fails closed |
+| `app/services/navigation_store.py` | `load_features(db)` returns the rows and flags, or `None` when the tables are absent |
+| `tests/js/workspace.test.cjs` | Converter test and active-tree test (**20 pass**) |
+| `tests/test_feature_dependencies.py` | **New**, 5 tests |
+| `tests/test_navigation_registry.py` | Stub distinguishes `FeatureFlag` selects from `FeatureRegistry` selects |
+| `tests/test_profit_loss.py` | Source guard follows `renderSideNav()` to `WS.navTree().forEach` |
+
+No migration, table, column, seed row, permission key or business row changed.
+
+### 36.2 The dependency-versus-route inconsistency, resolved
+
+Before 4c the navigation endpoint closed `depends_on`, but the route gate and
+`/api/auth/me` read only each feature's own switch. A dependent module could
+therefore disappear from the menu while its API still answered. Since 4c all
+four readers call `available_keys(db)`: switch ON (or locked ON), registry row
+`active`, and every `depends_on` feature available. Before `0031` the function
+falls back to the stored switches. `tests/test_feature_dependencies.py`:
+
+1. switching off `foc` closes the dependent `stock` module in `/api/foc/notes`,
+   `/api/auth/me` and `/api/navigation` together;
+2. a `status="planned"` row is hidden in all three;
+3. `available_keys`, `enabled_keys`, `is_enabled` and `disabled_permissions`
+   agree for every feature;
+4. a cycle returns only the features outside it (fail-closed), not the whole
+   set;
+5. with `load_features` forced to `None`, the pre-0031 behaviour returns.
+
+### 36.3 Automated results
+
+| Suite | Result |
+|---|---|
+| Full Python suite (`--junitxml=var/reports/wp4c-pytest.xml`) | **530 passed, 0 failed, 0 skipped** in 240.37 s |
+| Node (`node --test tests/js/`) | **20 passed, 0 failed** |
+| Navigation-sensitive subset (`test_navigation_registry`, `test_navigation_api`, `test_feature_dependencies`, `test_workspace_model`, `test_navigation_*`) | included in the 530 |
+
+The full suite runs against a freshly recreated `herbanova_bcs_test` with
+`alembic upgrade head` (0031).
+
+### 36.4 Browser results
+
+Test-database stack: backend `var/reports/serve_wp4c.py` on 8013 (test DB
+guard), static frontend `scripts/run_frontend.py --port 3013 --backend
+http://127.0.0.1:8013`, headless Chrome on 9225. Evidence:
+`var/reports/wp4c-browser.json`, `wp4c-browser.log`, `wp4c-wp2walk.json`; the
+screenshots are `var/shots/wp4c-nav-{1440,768,390}-light.png` and
+`wp4c-nav-390-dark.png`. All three processes were stopped afterwards after
+their command lines were checked.
+
+| Phase | Checks | Result |
+|---|---|---|
+| A — WP-2 tabs, breadcrumbs, palette, favourites, guards, responsive | 42 | 42/42 |
+| B — 21st-tab eviction, reopen, Home protection | 20 | 20/20 |
+| C — eight WP-3 lists and Products-only sorting | 51 | 51/51 |
+| D — opt-in navigation (Batch 4c) | 86 | 86/86 |
+| Total | 199 | **199/199** |
+
+Per role, the API rail equals the server's `in_menu` set exactly, is a subset of
+the built-in menu, and contains no duplicate:
+
+| Role | Built-in menu | API menu | Server screens | Server menu | Modules |
+|---|---|---|---|---|---|
+| Administrator | 21 | 21 | 25 | 21 | 5 |
+| Sales | 16 | 16 | 18 | 16 | 5 |
+| Inventory | 14 | 14 | 16 | 14 | 5 |
+| Viewer | 11 | 11 | 13 | 11 | 5 |
+| HR manager | 5 | 5 | 5 | 5 | 4 |
+
+Phase D also proves:
+
+- per-user `ETag`, `Cache-Control: private, no-cache`, `Vary: Cookie`; browser
+  revalidation `200 → 304`;
+- switching Viewer → Administrator leaves no Viewer row and restores the full
+  Administrator menu; the four `never` screens (`tax`, `users`, `audit`,
+  `compare`) stay out of the rail and remain routable;
+- breadcrumbs follow the server tree
+  (`Stock and supply → Inventory → Masters → Products`);
+- one tab per accounting section; favourites survive a reload; the palette lists
+  screens from the active tree;
+- all eight WP-3 lists open with the right titles; all 19 accounting
+  sub-sections are reachable and the bar holds 19 entries;
+- deep link `#/inventory/ledger` with refresh, back and forward;
+- 1440/768/390 px without sideways overflow, light and dark;
+- a simulated `503` shows "The menu could not be loaded", keeps the built-in
+  filtered menu, offers **Retry**, and the retry restores the server menu;
+- an anonymous browser gets `401`;
+- no uncaught errors or unhandled rejections.
+
+### 36.5 Defect found during verification
+
+`navReset()` called `navRefresh()` while the state was still `builtin`; the
+retry guard returned before the fetch, so an opted-in browser rendered no rail
+at all. The loader now sets `loading`, renders, then calls the guard-free
+`navFetch()`; `navRefresh()` remains the Retry wrapper. This was found by the
+browser walk (rail empty while the API answered 200), not by a unit test. The
+state machine is now covered by the walk's per-role, failure and retry checks.
+
+### 36.6 What was not verified
+
+- No production database or host was touched; development remains at
+  `0031_navigation_registry`, production at `0028_advances`.
+- No commit, push, deploy or PR.
+- Keyboard tab navigation was exercised in Phase A (WP-2) but not re-driven
+  against the server tree; the tree only changes which rows exist, and Phase A
+  covers the strip's keys.
+- Screen readers were not tested; the alert uses `role="alert"`/`role="status"`.
+- Server favourites and Batch 4d were not implemented, as instructed.
+
+### 36.7 Rollback
+
+The switch is already off: remove `hb.navApi` from the session and the app is
+back to the built-in menu with no code change. To remove the code, revert the
+4c hunks in `static/js/workspace.js`, `static/js/app.js` and
+`static/css/styles.css`, restore `app/services/feature_store.py`, delete
+`tests/test_feature_dependencies.py`, and revert `tests/test_navigation_registry.py`
+and `tests/test_profit_loss.py`. Nothing in the database changes.
+
+### 36.8 Verdict
+
+**Batch 4c is implemented and verified as opt-in.** The default is unchanged,
+the server is authoritative, a failure never widens a menu, the dependency and
+route gates now share one answer, and the full automated and browser suites
+pass. Default activation (4d), server-side favourites, deployment, commit and
+push remain separately unauthorised.
+
+## 37. WP-4 Batch 4d — default navigation activation — 4 November 2026
+
+The server's navigation tree is now the default menu for every browser. The
+built-in `workspace.js` hierarchy remains the loading and failure fallback and
+is restorable for a session with `?nav=builtin`. Batch 4c is unchanged in
+substance: the model, converter, failure alert, **Retry**, sequence guard and
+`wsViewOk()` AND-gate were kept.
+
+### 37.1 What changed
+
+| File | Change |
+|---|---|
+| `static/js/app.js` | `NAV_API_ENABLED = true` (Batch 4d release default); the comment block now documents the default, the loading/error fallback and `?nav=builtin` |
+| `app/services/navigation_catalog.py` | `ADMIN_ONLY_VIEWS = frozenset({"scheduled"})` with the reason (routes guarded by `require_admin`, which the registry cannot express) |
+| `app/services/navigation_registry.py` | `narrow_admin_only(visible, nodes, admin=...)`; `navigation_etag(..., admin=...)` adds Administrator status to the ETag identity |
+| `app/api/navigation.py` | computes `is_admin(db, user)`, applies `narrow_admin_only` before pruning, passes `admin` to the ETag |
+| `tests/test_navigation_registry.py` | two tests: Administrator-only screens are subtracted for every other caller; Home and the `distributors` alias survive. The existing ETag test gains an assertion that `admin` alone changes the validator |
+| `tests/test_navigation_parity.py` | **new**, 10 tests; runs the shipped `workspace.js` in Node against the real endpoint body |
+| `tests/js/nav_parity.cjs` | **new**, the Node harness the parity test calls |
+| `var/review/wp4d_nav.py`, `var/reports/run_wp4d_walk.py` | **new**, the browser walk and its runner (probe files, not shipped) |
+
+No migration, table, column, seed row, permission key or business row changed.
+No production host was contacted.
+
+### 37.2 The `scheduled` discrepancy, resolved without weakening RBAC
+
+Before this batch the built-in menu hid **Scheduled reports** unless the role
+was literally `admin`, while the registry records only `email:manage`. A custom
+role holding that permission (possible through a restored dump or direct SQL,
+because `validate_permissions` refuses it through the API) would have been
+offered a screen whose routes all answer `403`.
+
+- The route stays `require_admin("email:manage")`; no gate was loosened.
+- `narrow_admin_only()` subtracts `ADMIN_ONLY_VIEWS` for every caller who is not
+  the Administrator, so the endpoint can only hide screens relative to the
+  permissions it was given.
+- `admin` is part of the ETag, so a promotion or demotion cannot be answered
+  `304` from the old body.
+- `test_admin_only_screens_are_removed_for_every_other_role`,
+  `test_admin_only_narrowing_keeps_home_and_the_alias`,
+  `test_etag_separates_the_admin_role_when_bodies_match` and
+  `test_a_stored_role_with_email_manage_cannot_reach_scheduled` pin the
+  behaviour.
+
+Result: the Administrator sees `scheduled` (21 rail entries, 25 registered
+screens); Sales, Inventory, Viewer and HR manager never do; the parity harness
+finds no view or menu difference between the built-in rules and the payload.
+
+### 37.3 Parity proof
+
+`tests/test_navigation_parity.py` compares two independent computations for
+every case:
+
+1. the **built-in** rules evaluated by the shipped `workspace.js`
+   (`viewAllowed`, `menuAllowed`, `navFor`);
+2. the **server** payload's `in_menu` screens, converted back by the shipped
+   `navFromApi`.
+
+It runs `tests/js/nav_parity.cjs` under Node over stdin, so the assertion is
+about the code the browser executes, not a Python reimplementation.
+
+| Group | Cases |
+|---|---|
+| Seeded roles over HTTP (`admin`, `sales`, `inventory`, `viewer`, `hr_manager`) | 5 |
+| Each gate permission alone | 17 |
+| Each pair of gate permissions | 136 |
+| Each feature switch off | 14 |
+| All feature switches off | 1 |
+| **Total** | **173** |
+
+Every case asserts: no duplicate view, no unknown view, and identical view and
+menu sets. Additional tests cover Home and the alias, hidden routes that stay
+addressable, a feature switch removing its screen and permissions, `foc`
+closing when `stock` is off, and a custom `email:manage` role not receiving
+`scheduled`. With the seeded roles the test also checks `/api/auth/me`
+permissions agree with the endpoint.
+
+### 37.4 Automated results
+
+| Suite | Result |
+|---|---|
+| Full Python suite (`--junitxml=var/reports/junit-wp4d.xml`) | **542 passed, 0 failed, 0 errors, 0 skipped** in 237.92 s, timestamp `2026-11-04T16:50:11+05:30`, exit 0 |
+| Node (`node --test tests/js/workspace.test.cjs`) | **20 passed, 0 failed** |
+| Navigation registry + API (`test_navigation_registry`, `test_navigation_api`) | included in the 542; the two 4d registry tests pass |
+| Parity (`tests/test_navigation_parity.py`) | **10 passed**, 173 catalogue cases |
+
+The suite runs against a freshly recreated `herbanova_bcs_test` with
+`alembic upgrade head` (0031).
+
+### 37.5 Browser results
+
+Test-database stack: backend `var/reports/serve_wp4c.py` on 8013 (test-database
+guard), static frontend `scripts/run_frontend.py --port 3013 --backend
+http://127.0.0.1:8013`, headless Chrome on 9225. Evidence:
+`var/reports/wp4d-browser.json`, `var/shots/wp4d-nav-{1440,768,390}-light.png`
+and `wp4d-nav-390-dark.png`. All three processes were stopped afterwards.
+
+| Phase | Checks | Result |
+|---|---|---|
+| A — WP-2 tabs, breadcrumbs, palette, favourites, guards, responsive | 42 | 42/42 |
+| B — 21st-tab eviction, reopen, Home protection | 20 | 20/20 |
+| C — eight WP-3 lists and Products-only sorting | 51 | 51/51 |
+| D — default navigation (Batch 4d) | 113 | 113/113 |
+| Total | 226 | **226/226** |
+
+With no query parameter, the rail equals the server's `in_menu` set exactly and
+no alert appears:
+
+| Role | Built-in menu | Server tree | Server screens | Modules |
+|---|---|---|---|---|
+| Administrator | 21 | 21 | 25 | 5 |
+| Sales | 16 | 16 | 18 | 5 |
+| Inventory | 14 | 14 | 16 | 5 |
+| Viewer | 11 | 11 | 13 | 5 |
+| HR manager | 5 | 5 | 5 | 4 |
+
+Phase D also proves:
+
+- `?nav=builtin` restores the built-in, permission-filtered menu and survives
+  in-app navigation; `?nav=api` re-opts in; the default re-applies on the next
+  sign-in;
+- all 25 screens open under the server tree, each with its own title;
+- the palette opens with `Ctrl+K`, arrows and Enter open Products;
+- switching to the Viewer and deep-linking `#/scheduled` falls back to Home;
+  switching back restores the Administrator menu;
+- breadcrumbs follow the server tree; one tab per accounting section;
+  favourites survive a reload; the palette lists the active tree;
+- all eight WP-3 lists and all 19 accounting sub-sections are reachable;
+- deep link, refresh, Back and Forward;
+- 1440/768/390 px without sideways overflow, light and dark;
+- browser revalidation `200 -> 304`; anonymous `401`;
+- three forced failures (HTTP 503, network rejection, malformed 200 JSON) each
+  show the alert, keep the built-in filtered menu, offer **Retry**, and the
+  retry restores the server menu;
+- a live permission change on a throwaway role removes Products from the menu,
+  closes its tab, falls back to `#/dash` and keeps the server tree;
+- no uncaught errors or unhandled rejections.
+
+### 37.6 Security and RBAC verification
+
+- `GET /api/navigation` still calls `require_login`; anonymous returns `401`.
+- The payload is built from `role_permissions()` and the dependency-closed
+  feature switches, then narrowed by `narrow_admin_only`. It can never offer a
+  screen the built-in rules would hide (`wsViewOk` ANDs both, and the parity
+  test asserts the API set is a subset of the built-in set for every case).
+- No route gate, permission key, `ADMIN_ONLY_PERMISSIONS` list or role seed was
+  changed. `scheduled` remains `require_admin("email:manage")`.
+- Response headers unchanged: per-user `ETag` (now also keyed on `admin`),
+  `Cache-Control: private, no-cache`, `Vary: Cookie`; the admin endpoint stays
+  `no-store`.
+- Session switching: the sequence number and captured username discard an
+  answer from a previous account; the walk switches Admin to Viewer to Admin and
+  finds no stale row.
+- Permission changes during a session were exercised live (role edit, reload)
+  and by unit test (`test_etag_changes_after_a_permission_change`).
+- No `.env`, token or credential was printed; probe tokens were minted in
+  process and never echoed.
+
+### 37.7 What was not verified
+
+- No production database or host was touched; development remains at
+  `0031_navigation_registry`, production at `0028_advances`.
+- No commit, push, deploy or PR.
+- Screen readers were not tested; the alert keeps `role="alert"`/`role="status"`.
+- A real proxy or CDN cache was not placed in front of the endpoint; ETag and
+  header behaviour was checked directly and in the browser.
+- Server-side favourites were not implemented, as instructed.
+
+### 37.8 Rollback
+
+1. **Instant, no code:** set `NAV_API_ENABLED = false` in
+   `static/js/app.js`, or open the app with `?nav=builtin`. The rail is the
+   built-in `workspace.js` menu; no server call is needed.
+2. **Per browser:** remove `sessionStorage["hb.navApi"]`.
+3. **Remove the code:** revert the 4d hunks in `static/js/app.js`,
+   `app/api/navigation.py`, `app/services/navigation_registry.py` and
+   `app/services/navigation_catalog.py`; delete `tests/test_navigation_parity.py`
+   and `tests/js/nav_parity.cjs`. The 4c behaviour returns unchanged.
+4. No data to undo: 4d added no table, row, column or migration.
+
+### 37.9 Verdict
+
+**Batch 4d is implemented and verified in development only.** The server tree
+is the default, the built-in hierarchy is the fallback and the rollback, the
+`scheduled` discrepancy is closed without weakening RBAC, and the Python, Node
+and browser suites pass. Production promotion remains separately unauthorised.
+
+## 38. WP-4 release hardening and final checkpoint — 4 November 2026
+
+The release-readiness audit was accepted as the baseline. This batch applied
+the approved corrections **C-1, C-2, C-3, C-4, C-5 and C-7 only**. C-6 and C-8
+were not implemented and remain gates for WP-5. Nothing was committed, pushed,
+migrated or deployed; production was not contacted. Migration 0031 was not
+edited.
+
+### 38.1 Corrections applied
+
+| ID | Change | Files |
+| --- | --- | --- |
+| C-1 | Marked the Batch 4a approval review as superseded without deleting it. A blockquote under the title names the current document; the one-line verdict, the §8 NO-GO line, the `/api/navigation` 404 sentence and the §14.6 route-probe row are annotated as historical. Historical test counts are unchanged. | `docs/WP4_APPROVAL_READINESS.md` |
+| C-2 | `--check` still reads the active migration; `--write` now refuses the active path with exit code 2 and a message explaining that Alembic does not checksum applied revisions and a seed change belongs in a new migration. The draft path remains writable before activation. The audit suggested an optional `--force-active`; the approved instruction was to prevent the rewrite, so no bypass flag was added. The design doc now describes the post-activation behaviour. | `scripts/generate_navigation_seed.py`, `docs/FEATURE_REGISTRY_DESIGN.md`, `tests/test_navigation_seed_tool.py` (new) |
+| C-3 | The parity report resolves the active migration first with `.py.draft` as fallback, names the source in its error when missing, describes the seed rather than a "draft", and resolves a relative `--out` against the repository root. The docstring states the working directory. | `scripts/navigation_parity_report.py` |
+| C-4 | Stale comments corrected: "opt-in since Batch 4c" → the default since 4d, and "WP-4a calls none of this at runtime" → both endpoints use it. Comments only; no logic changed. | `static/js/workspace.js`, `app/services/navigation_registry.py`, `tests/js/workspace.test.cjs` |
+| C-5 | A session-wide OS file lock (`var/.pytest-suite.lock`) is taken before the test database is dropped, so a second suite fails immediately instead of racing. Procedure documented, including the probe-server caveat. | `tests/conftest.py`, `pytest.ini`, `docs/TESTING.md` (new) |
+| C-7 | Fresh checkpoint of the complete final working tree (tracked and untracked source, no `var/`). | `var/backups/wp4-final-20261104T120641Z/` |
+
+### 38.2 The serial-run lock
+
+`tests/conftest.py` opens `var/.pytest-suite.lock`, locks its first byte with
+`msvcrt.locking(LK_NBLCK)` on Windows or `fcntl.flock(LOCK_EX|LOCK_NB)` on
+POSIX, and writes `pid=… database=herbanova_bcs_test`. The `database` fixture
+depends on the lock fixture, so ordering is guaranteed. The kernel releases the
+lock when the process exits; a stale file does not block anything.
+
+Two behaviour details found and fixed while proving it:
+
+- On Windows, even *reading* a locked byte raises `PermissionError`. The first
+  version read the file before locking and surfaced that raw error instead of
+  the intended message. The lock is now taken before the contents are touched,
+  and every contention path raises one `RuntimeError`.
+- With a holder process sleeping, a second `pytest` failed in **0.11 s** with
+  `RuntimeError: another pytest suite holds var/.pytest-suite.lock …` and did
+  not drop the database. After the holder exited, the normal run passed.
+
+The lock covers `pytest`. Anything else aimed at `herbanova_bcs_test` — a probe
+server such as `var/probe/serve_test.py` — must be stopped before a suite runs;
+`docs/TESTING.md` says so.
+
+### 38.3 Test evidence
+
+| Check | Command | Result | Evidence |
+| --- | --- | --- | --- |
+| Python suite, isolated | `python -m pytest -q --junitxml=var/reports/wp4-hardening-pytest.xml` | **545 passed, 0 failed, 0 errors, 0 skipped** in 226.67 s | JUnit `tests=545` |
+| Node workspace suite | `node --test tests/js/workspace.test.cjs` | **20 passed, 0 failed, 0 skipped** (77.4 ms) | console |
+| Security/RBAC subset | modules below, counted from the same JUnit run | **114 tests, 0 failures** | JUnit |
+| Catalogue parity | `python scripts/navigation_parity_report.py --out var/reports/wp4-hardening-parity.json` | **11 checks, 0 failed** | JSON report |
+| Browser regression | `python var/reports/run_wp4d_walk.py` on 8013/3013/9225 | **226/226 checks** (A 42, B 20, C 51, D 113) | `var/reports/wp4d-browser.json` |
+
+The security/RBAC subset is `test_authz` (7), `test_feature_dependencies` (5),
+`test_feature_switches` (10), `test_hr_security` (7), `test_navigation_api`
+(26), `test_navigation_registry` (33), `test_permission_tree` (11),
+`test_roles_parity` (7) and `test_signin` (8).
+
+The Python count is the 542-test baseline plus the three C-2 regression tests.
+No test was skipped, weakened or removed. The 545 tests also include the Node
+suite through `tests/test_workspace_model.py`, so the two entry points cover the
+same contract.
+
+The browser walk ran against a temporary backend on `127.0.0.1:8013` pointed at
+`herbanova_bcs_test`, a frontend on `127.0.0.1:3013` and headless Chrome on
+port `9225`; all three were stopped afterwards. It exercised the 4d navigation
+path (default server menu, fallback on 503 and malformed payloads, retry,
+per-role menus, permission change mid-session, anonymous 401) and the WP-2/3
+walks. No token or credential was printed.
+
+### 38.4 Migration integrity
+
+| Item | Value |
+| --- | --- |
+| `alembic/versions/0031_navigation_registry.py` SHA-256 | `ed52f95566c7b097e1a4dcedd6bb243e51b8ec283a40b1339dec667ecd6c6f04` — **unchanged** from the audit |
+| `python -m alembic heads` | `0031_navigation_registry (head)` — single head |
+| `python -m alembic current` | `0031_navigation_registry (head)` on the development database |
+| Schema change in this batch | None |
+
+The generator and parity tools read the migration; neither writes it. The C-2
+test re-checks the file's SHA-256 before and after both `--check` and `--write`.
+
+### 38.5 Final checkpoint (C-7)
+
+The checkpoint was taken from `git ls-files -co --exclude-standard`, which
+lists tracked and untracked source and honours `.gitignore` (so `var/` and
+`.env` are excluded). It was verified by extracting the archive to a temporary
+directory and comparing every file's SHA-256 with `SHA256SUMS`; the checkpoint
+contains `source.zip`, `manifest.json`, `SHA256SUMS` and `git-status.txt`. The
+archive hash, byte size, file count and working-tree entry count are recorded
+in `manifest.json` for that directory.
+
+### 38.6 What was not done
+
+- No commit, no push, no pull request, no tag.
+- No production connection, migration, reset or deployment.
+- C-6 (container permissions) and C-8 (rail label ownership) were not
+  implemented; both remain WP-5 gates.
+- No production backup was taken, because production was not an approved
+  target.
+
+### 38.7 Verdict
+
+**The correction batch is complete and verified.** The tree is ready for a
+local release commit once the staging manifest is approved. Production remains
+**NO-GO** under the conditions in `WP4_RELEASE_READINESS.md` §12.

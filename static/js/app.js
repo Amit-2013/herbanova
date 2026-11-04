@@ -7,6 +7,9 @@
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+/* The navigation hierarchy, view permissions and tab rules live in
+   workspace.js so the same definitions run under the Node tests. */
+const WS = window.HBWorkspace;
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money = n => new Intl.NumberFormat("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2}).format(Number(n) || 0);
 const qty = n => new Intl.NumberFormat("en-IN", {maximumFractionDigits: 3}).format(Number(n) || 0);
@@ -19,7 +22,7 @@ const fmtDay = s => s ? parseTs(s).toLocaleDateString("en-IN", {day: "2-digit", 
 const daysUntil = iso => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((new Date(iso + "T00:00:00") - t) / 86400000); };
 const poValue = po => Math.round(po.lines.reduce((s, l) => s + Number(l.qty) * Number(l.unit_cost), 0) * 100) / 100;
 
-const state = {user: null, perms: new Set(), features: null, featureFlags: [], modules: null, dashboard: null, products: [], warehouses: [], batches: [], pos: [], movements: null,
+const state = {user: null, perms: new Set(), features: null, featureFlags: [], modules: null, dashboard: null, products: [], plist: {rows: [], total: null, page: 1, size: 50, q: "", status: "", sort: "sku", direction: "asc", loading: false, loaded: false, seq: 0, timer: 0}, lp: {}, warehouses: [], batches: [], pos: [], movements: null,
                suppliers: [], bankChanges: [], supFilter: "all",
                dists: [], orders: [], approvals: [], leads: [], rp: {cat: [], key: "stock", from: "", to: "", data: null, tok: 0}, soFilter: "all", apFilter: "pending", ldFilter: "open", ldOwner: "all", distFilter: "all",
                users: [], roles: [], employees: [], permCatalog: [], audit: {rows: [], actions: [], actors: [], total: 0},
@@ -117,16 +120,24 @@ const can = p => state.perms.has(p);
 const dashQuery = () => `from_date=${encodeURIComponent(state.dashFrom)}&to_date=${encodeURIComponent(state.dashTo)}`;
 
 /* ---------- server calls ---------- */
-async function api(path, opts = {}) {
+/* Paged lists answer with X-Total-Count, so the footer can show the true number
+   of matching rows rather than the size of the page in hand. */
+async function apiPage(path, opts = {}) {
   const o = {credentials: "same-origin", headers: {"Content-Type": "application/json"}, ...opts};
   if (o.body && typeof o.body !== "string") o.body = JSON.stringify(o.body);
   let res;
   try { res = await fetch(path, o); }
-  catch (e) { return {status: 0, ok: false, body: {detail: "Cannot reach the server. Check the connection and try again."}}; }
+  catch (e) { return {status: 0, ok: false, total: null, body: {detail: "Cannot reach the server. Check the connection and try again."}}; }
   let body = null;
   try { body = await res.json(); } catch (e) { /* empty body */ }
+  const raw = res.headers.get("X-Total-Count");
+  const total = raw != null && /^\d+$/.test(raw) ? Number(raw) : null;
   if (res.status === 401 && state.user && !path.endsWith("/login")) leave("Your session has ended. Sign in again.");
-  return {status: res.status, ok: res.ok, body};
+  return {status: res.status, ok: res.ok, body, total};
+}
+async function api(path, opts = {}) {
+  const {status, ok, body} = await apiPage(path, opts);
+  return {status, ok, body};
 }
 function detail(b) {
   const d = b && b.detail;
@@ -158,6 +169,8 @@ function openDrawer(title, sub, html, wide = false) {
   $("#drawer").classList.remove("hide");
   document.body.classList.add("drawer-open");
   fitDrawerTables();
+  drawerSnap = drawerFormSnapshot();
+  drawerDirty = false;
   const first = $("#dbody").querySelector("input,select,textarea");
   (first || $("#dclose")).focus();
 }
@@ -183,6 +196,8 @@ function closeDrawer() {
   $("#drawer").classList.add("hide");
   document.body.classList.remove("drawer-open");
   $("#dbody").innerHTML = "";
+  drawerDirty = false;
+  drawerSnap = "";
   if (lastFocus && document.contains(lastFocus)) lastFocus.focus();
   lastFocus = null;
 }
@@ -193,15 +208,7 @@ const drawerOpen = () => !$("#drawer").classList.contains("hide");
    module off centrally, and the server then removes its permissions from every
    role. The map mirrors app/core/features.py so navigation never offers a
    screen whose API answers 403. A missing list (older server) means all on. */
-const VIEW_FEATURE = {products: "products", inventory: "stock", purchasing: "stock",
-                      foc: "foc",
-                      suppliers: "suppliers", sales: "sales", billing: "sales",
-                      customers: "sales", geo: "sales",
-                      approvals: "approvals", leads: "leads", lost: "leads",
-                      followups: "leads", accounts: "accounts", expenses: "accounts",
-                      tax: "tax",
-                      reports: "reports", compare: "reports", hr: "hr", audit: "audit",
-                      scheduled: "scheduled", users: "users", roles: "users"};
+const VIEW_FEATURE = WS.VIEW_FEATURE;
 const featureOn = v => !VIEW_FEATURE[v] || !state.features || state.features.has(VIEW_FEATURE[v]);
 
 function enter(u) {
@@ -221,38 +228,26 @@ function enter(u) {
   $("#totp").classList.add("hide");
   $("#shell").classList.remove("hide");
   $("#who").textContent = u.username;
-  const show = (id, on) => { const el = $(id); if (el) el.classList.toggle("hide", !on); };
-  show("#navLeads", can("lead:read"));
-  show("#navSuppliers", can("supplier:read"));
-  show("#navBilling", can("sales:read"));
-  show("#navAccounts", can("accounts:read") || can("accounts:reports"));
-  show("#navHr", can("hr:read") || can("hr:attendance_self"));
-  show("#navRoles", can("user:manage"));
-  show("#navSettings", can("user:manage") || can("tax:read") || can("audit:read") || can("hr:read"));
-  // Every other module link follows the read permission its API requires, so a
-  // role is never offered a screen that can only answer 403.
-  const showView = (v, on) => $$(`.side a.nav[data-v="${v}"]`).forEach(a => a.classList.toggle("hide", !on || !featureOn(v)));
-  showView("lost", can("lead:read"));
-  showView("expenses", can("expense:read"));
-  showView("followups", can("lead:read"));
-  showView("customers", can("sales:read"));
-  showView("sales", can("sales:read"));
-  showView("approvals", can("approval:read"));
-  showView("purchasing", can("stock:read"));
-  showView("products", can("product:read"));
-  showView("inventory", can("stock:read"));
-  showView("foc", can("foc:read"));
-  showView("geo", can("sales:read"));
-  showView("roles", can("user:manage"));
-  showView("scheduled", srAllowed());
-  showView("reports", ["accounts:read", "hr:reports", "sales:read", "stock:read",
-                       "supplier:read", "tax:read"].some(k => can(k)));
-  $$(".nav-group").forEach(g => g.classList.toggle("hide", !g.querySelector("a.nav:not(.hide)")));
   $("#role").textContent = u.role;
+  // The menu, breadcrumb and favourite star all read the same hierarchy; rows
+  // are filtered by the server's permissions and the module switches. A fresh
+  // identity starts from the built-in menu while the server's own tree for this
+  // account is requested, and keeps it if that request fails or ?nav=builtin
+  // was chosen.
+  navReset();
+  wsEnter();
   route();
   loadAll();
 }
 function leave(msg) {
+  navSeq += 1;
+  WS.resetNavTree();
+  navState = "builtin";
+  navError = "";
+  wsClearTabs();
+  wsModel = null;
+  wsLastHash = "";
+  closeTabMenu();
   state.user = null; state.perms = new Set(); state.features = null;
   state.featureFlags = []; state.movements = null;
   state.dashboard = null; state.dashLoading = false; state.dashError = null;
@@ -687,6 +682,10 @@ async function loadAll() {
   const failed = [p, w, b, o, ds, so, canApprovals ? ap : null, ld, sp].find(r => r && !r.ok);
   if (failed) toast(failed, "Some data could not be loaded");
   renderAll();
+  if (state.view === "products" && state.plist.loaded) loadProductList();
+  // A save refreshes the cache; a list that has already paged must re-read the
+  // server so its page and total stay true to the new record.
+  if (LIST_SPEC[state.view] && listState(state.view).loaded) loadList(state.view);
   if (state.dashboard && state.expiry.bucket !== "all") setExpiryBucket(state.expiry.bucket);
   if (state.movements) loadMovements();
 }
@@ -698,27 +697,8 @@ async function loadMovements() {
 }
 
 /* ---------- routing ---------- */
-const TITLES = {dash: "Overview", products: "Products", inventory: "Inventory", purchasing: "Purchases",
-                suppliers: "Suppliers", tax: "Tax and discounts",
-                sales: "Sales orders", billing: "Billing", accounts: "Accounting & Finance",
-                expenses: "Expenses", foc: "Free samples (FOC)",
-                approvals: "Approvals", customers: "Customers and distributors",
-                leads: "Leads", lost: "Lost leads", followups: "Today's follow-ups",
-                reports: "Reports", hr: "HR Management", settings: "Settings & Administration",
-                roles: "Roles & Permissions", users: "Logins and employees", audit: "Audit trail",
-                compare: "MoM & YoY dashboard", geo: "Geography",
-                scheduled: "Scheduled reports"};
-const VIEW_PERM = {leads: "lead:read", lost: "lead:read", followups: "lead:read",
-                   geo: "sales:read",
-                   customers: "sales:read", users: "user:manage", roles: "user:manage",
-                   audit: "audit:read",
-                   suppliers: "supplier:read", tax: "tax:read", accounts: "accounts:read",
-                   expenses: "expense:read",
-                   products: "product:read", inventory: "stock:read", purchasing: "stock:read",
-                   foc: "foc:read",
-                   sales: "sales:read", billing: "sales:read",
-                   approvals: "approval:read",
-                   hr: "hr:read", scheduled: "email:manage"};
+const TITLES = WS.TITLES;
+const VIEW_PERM = WS.VIEW_PERM;
 function route() {
   closeDashRange();
   // A hash may carry a query (`#/accounts/gst-out?from=...&to=...`) so a KPI
@@ -740,12 +720,9 @@ function route() {
   // Customers and distributors are one master. The older address still opens
   // the screen, so dashboard drill-downs, links and bookmarks keep working.
   if (v === "distributors") v = "customers";
-  // Staff with only self-service attendance still reach the HR page for their own day.
-  const allowed = featureOn(v) && (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === "hr" && can("hr:attendance_self"))
-    || (v === "compare" && (can("sales:read") || can("stock:read")))
-    || (v === "accounts" && can("accounts:reports")))
-    && (v !== "scheduled" || srAllowed());
-  state.view = TITLES[v] && allowed ? v : "dash";
+  // One predicate serves the route, the menu, the tabs and the breadcrumb, so a
+  // screen the role may not open cannot be reached through any of them.
+  state.view = wsViewOk(v) ? v : "dash";
   $("#shell").dataset.view = state.view;
   if (state.view === "inventory") state.tab = ["stock", "ledger", "warehouses"].includes(sub) ? sub : "stock";
   if (state.view === "scheduled") state.sr.tab = ["schedules", "recipients", "log"].includes(sub) ? sub : "schedules";
@@ -756,6 +733,8 @@ function route() {
   renderHead();
   if (state.view === "reports") openReports();
   if (state.view === "audit") openAudit();
+  if (state.view === "products") loadProductList();
+  if (LIST_SPEC[state.view] && !listState(state.view).loaded) loadList(state.view);
   if (state.view === "lost") renderLost();
   if (state.view === "followups") renderFollowups();
   if (state.view === "customers") renderCustomers();
@@ -783,13 +762,507 @@ function route() {
   if (state.view === "expenses") { openExpenses(); applyExpensesQuery(hashParams); }
   if (state.view === "foc") openFoc();
   if (state.view === "scheduled") openScheduled();
+  wsSync();
   document.title = `${TITLES[state.view]} - HERBANOVA`;
 }
+/* ---------- workspace: tabs, breadcrumbs, menu, favourites ---------- */
+/* One hierarchy (workspace.js) renders the sidebar, the breadcrumb and the
+   palette's screen list, so a path shown in the breadcrumb is a path in the
+   menu, and every placement resolves to the same route. */
+const WS_TABS = "hb.tabs";              // sessionStorage, one set per user
+const WS_FAV = "hb.favourites";         // localStorage, this device only
+const WS_RECENT = "hb.recent";          // localStorage, this device only
+
+let wsModel = null;                     // {open: [tab], active, closed: [tab]}
+let wsLastHash = "";                    // the address the screen was drawn for
+let drawerDirty = false;                // the open drawer holds unsaved edits
+let drawerSnap = "";
+
+const wsCtx = () => ({can, features: state.features, srAllowed});
+/* Once the server's hierarchy is in hand it is the narrower of the two: a view
+   it left out was hidden for this account and must stay closed to the router,
+   the tabs, the breadcrumb and the palette alike. While it is absent, loading
+   or failed, the built-in hierarchy (also permission filtered) decides. */
+const wsViewOk = v => WS.viewAllowed(v, wsCtx()) && (navState !== "ready" || WS.navAllows(v));
+const wsArea = name => { try { return window[name]; } catch (e) { return null; } };
+const wsStore = {
+  get(area, base) {
+    const store = wsArea(area);
+    try { return store ? JSON.parse(store.getItem(base) || "null") : null; } catch (e) { return null; }
+  },
+  set(area, base, value) {
+    const store = wsArea(area);
+    try { if (store) store.setItem(base, JSON.stringify(value)); } catch (e) { /* storage blocked */ }
+  },
+};
+const wsUserKey = base => `${base}:${(state.user && state.user.username) || "anon"}`;
+const wsFavourites = () => {
+  const v = wsStore.get("localStorage", wsUserKey(WS_FAV));
+  return Array.isArray(v) ? v.filter(k => typeof k === "string" && k) : [];
+};
+const wsRecents = () => {
+  const v = wsStore.get("localStorage", wsUserKey(WS_RECENT));
+  return Array.isArray(v) ? v.filter(k => typeof k === "string" && k) : [];
+};
+
+/* ---------- navigation source (Batch 4d, on by default) ----------
+   `GET /api/navigation` renders the menu. The built-in hierarchy in
+   workspace.js remains the fallback: it is drawn while the request is in
+   flight, kept when the request fails, and restored on demand with
+   ?nav=builtin. ?nav=api re-opts in; the choice is kept in sessionStorage
+   because the router rewrites the hash and would drop the query on the next
+   click. Either way the built-in rules still apply: wsViewOk() ANDs the two,
+   so a server payload can only hide screens, never reveal one. */
+const NAV_API_ENABLED = true;      // Batch 4d default for every browser
+const NAV_OPT_IN = "hb.navApi";   // "api" | "builtin"
+let navState = "builtin";         // builtin | loading | ready | error
+let navError = "";
+let navSeq = 0;
+
+function navChoice() {
+  let pick = "";
+  const search = new URLSearchParams(location.search);
+  const q = location.hash.indexOf("?");
+  const fromUrl = search.get("nav")
+    || (q >= 0 ? new URLSearchParams(location.hash.slice(q + 1)).get("nav") : "");
+  if (fromUrl === "api" || fromUrl === "builtin") {
+    try { const store = wsArea("sessionStorage"); if (store) store.setItem(NAV_OPT_IN, fromUrl); }
+    catch (e) { /* storage blocked: this page still honours the query */ }
+    pick = fromUrl;
+  } else {
+    try { const store = wsArea("sessionStorage"); pick = store ? store.getItem(NAV_OPT_IN) || "" : ""; }
+    catch (e) { pick = ""; }
+  }
+  if (pick === "builtin") return false;
+  if (pick === "api") return true;
+  return NAV_API_ENABLED;
+}
+/* Cleared typing into the session, a retried request and a re-login all raise
+   the sequence, so an answer from an earlier identity is thrown away instead
+   of repainting another account's menu. */
+function navReset() {
+  navSeq += 1;
+  WS.resetNavTree();
+  navError = "";
+  if (!navChoice()) {
+    navState = "builtin";
+    renderSideNav();
+    return;
+  }
+  navState = "loading";
+  renderSideNav();
+  navFetch();
+}
+function navFallback(message) {
+  navSeq += 1;
+  navState = "error";
+  navError = message;
+  WS.resetNavTree();
+  renderSideNav();
+  renderCrumbs();
+  renderFavBtn();
+}
+/* The retry button is only offered from the error state; a second request
+   while one is in flight would just race its own answer. */
+function navRefresh() {
+  if (!state.user || navState === "builtin" || navState === "loading") return;
+  navState = "loading";
+  navError = "";
+  renderSideNav();
+  navFetch();
+}
+async function navFetch() {
+  const seq = ++navSeq;
+  const who = state.user && state.user.username;
+  const res = await api("/api/navigation");
+  if (seq !== navSeq || !state.user || state.user.username !== who) return;
+  if (!res.ok) {
+    if (res.status === 401) return;            // api() has already left the session
+    navFallback(res.status === 0
+      ? "Cannot reach the server, so the menu could not be loaded."
+      : `The server could not supply the menu (HTTP ${res.status}).`);
+    return;
+  }
+  const conv = WS.navFromApi(res.body);
+  if (!conv.ok) {
+    navFallback("The server sent a menu this screen cannot read.");
+    return;
+  }
+  WS.setNavTree(conv.tree, conv.menu, conv.views);
+  navState = "ready";
+  navError = "";
+  // Tabs, favourites and recents that this account may no longer open leave
+  // with the screens they point at.
+  if (wsModel) { wsModel = WS.pruneModel(wsModel, wsViewOk); wsSaveTabs(); }
+  renderSideNav();
+  renderTabs();
+  renderCrumbs();
+  renderFavBtn();
+  if (!wsViewOk(state.view)) {
+    const tab = wsLastTab();
+    location.hash = tab && wsViewOk(tab.view) ? tab.hash : WS.HOME_HASH;
+  }
+}
+
+function accSectionLabel(key) {
+  const found = ACC_SECTIONS.find(s => s.key === key);
+  return found ? found.label : "";
+}
+/* A tab names the screen, not the file: the accounts sections are separate
+   tabs because each is a different report with its own address. */
+function wsTabTitle(view, section) {
+  if (view === "accounts") return section ? (accSectionLabel(section) || TITLES[view]) : TITLES[view];
+  return TITLES[view] || "Screen";
+}
+function wsCurrentKey() {
+  if (state.view === "dash") return WS.HOME;
+  return WS.canonicalKey(state.view, state.view === "accounts" ? state.acc.section : "");
+}
+function wsKeyAllowed(key) {
+  const p = WS.parseHash("#/" + key);
+  return wsViewOk(p.view);
+}
+function wsSaveTabs() {
+  const store = wsArea("sessionStorage");
+  if (!store || !wsModel) return;
+  try { store.setItem(wsUserKey(WS_TABS), WS.serializeModel(wsModel)); } catch (e) { /* storage blocked */ }
+}
+function wsClearTabs() {
+  const store = wsArea("sessionStorage");
+  if (!store) return;
+  try {
+    Object.keys(store).filter(k => k.indexOf(WS_TABS + ":") === 0).forEach(k => store.removeItem(k));
+  } catch (e) { /* storage blocked */ }
+}
+/* A login starts from Home; a re-enter (TOTP, password change) keeps the strip. */
+function wsEnter() {
+  if (!wsModel) {
+    const store = wsArea("sessionStorage");
+    let raw = null;
+    try { raw = store ? store.getItem(wsUserKey(WS_TABS)) : null; } catch (e) { raw = null; }
+    wsModel = WS.pruneModel(raw ? WS.deserializeModel(raw) : WS.initialModel(), wsViewOk);
+  }
+  renderNavExtra();
+  renderFavBtn();
+}
+function wsLastTab() {
+  return wsModel ? wsModel.open.find(t => t.key === wsModel.active) || null : null;
+}
+function wsGoActive() {
+  const tab = wsLastTab();
+  if (!tab) return;
+  if (tab.hash === location.hash) route(); else location.hash = tab.hash;
+}
+function wsActivate(key) {
+  if (!wsModel) return;
+  const tab = wsModel.open.find(t => t.key === key);
+  if (!tab) return;
+  if (tab.key !== wsModel.active && drawerOpen() && !requestCloseDrawer()) return;
+  wsModel = WS.activateTab(wsModel, key);
+  wsSaveTabs();
+  closeTabMenu();
+  if (drawerOpen()) closeDrawer();
+  wsGoActive();
+}
+
+function wsDrawerTouched() {
+  if (!drawerOpen()) return;
+  drawerDirty = drawerFormSnapshot() !== drawerSnap;
+}
+/* The form lives in the shared drawer; every field is compared to the snapshot
+   taken when it opened, so a reopened record never inherits a stale "dirty". */
+function drawerFormSnapshot() {
+  const body = $("#dbody");
+  if (!body) return "";
+  return $$("input,select,textarea", body).map(el => {
+    if (el.type === "hidden" || el.type === "file") return "";
+    if (el.type === "checkbox" || el.type === "radio") return el.checked ? "1" : "0";
+    return el.value;
+  }).join("\u0001");
+}
+function confirmDiscard(what) {
+  return window.confirm(`You have unsaved changes in ${what || "this form"}. Discard them?`);
+}
+function requestCloseDrawer() {
+  if (!drawerOpen()) return true;
+  if (drawerDirty && !confirmDiscard($("#dtitle").textContent)) return false;
+  closeDrawer();
+  return true;
+}
+function wsCloseTab(key) {
+  if (!wsModel || key === WS.HOME) return;
+  const active = wsModel.active === key;
+  if (active && !requestCloseDrawer()) return;
+  wsModel = WS.closeTab(wsModel, key);
+  wsSaveTabs();
+  renderTabs();
+  renderNavExtra();
+  if (!active) return;
+  wsGoActive();
+}
+function wsCloseSiblings(keep) {
+  if (!wsModel) return;
+  if (wsModel.active !== keep && !requestCloseDrawer()) return;
+  wsModel = keep === WS.HOME ? WS.closeAll(wsModel) : WS.closeOthers(wsModel, keep);
+  wsSaveTabs();
+  renderTabs();
+  renderNavExtra();
+  if (drawerOpen()) closeDrawer();
+  wsGoActive();
+}
+function wsReopen() {
+  if (!wsModel) return;
+  const result = WS.reopenClosed(wsModel);
+  if (!result.tab) return;
+  wsModel = result.model;
+  wsSaveTabs();
+  renderTabs();
+  renderNavExtra();
+  wsGoActive();
+}
+
+/* ---------- tab strip ---------- */
+function tabElementId(key) {
+  return "tab-" + key.replace(/[^a-z0-9]+/gi, "-");
+}
+function renderTabs() {
+  const strip = $("#tabstrip");
+  if (!strip || !wsModel) return;
+  const focusInside = strip.contains(document.activeElement);
+  strip.innerHTML = wsModel.open.map(t => {
+    const on = t.key === wsModel.active;
+    return `<div class="tab${on ? " on" : ""}${t.closable ? "" : " pinned"}" role="tab"
+        id="${tabElementId(t.key)}" aria-selected="${on}" aria-controls="v-${esc(t.view)}"
+        tabindex="${on ? 0 : -1}" data-key="${esc(t.key)}" title="${esc(t.title)}">
+        <span class="tab-main">${esc(t.title)}</span>
+        ${t.closable ? `<button class="tab-x" type="button" data-act="tab-close" data-key="${esc(t.key)}"
+          tabindex="-1" aria-label="Close ${esc(t.title)}">×</button>` : ""}
+      </div>`;
+  }).join("");
+  if (focusInside) {
+    const active = $("#" + tabElementId(wsModel.active));
+    if (active) active.focus();
+  }
+  fitTabs();
+}
+/* The strip never scrolls sideways on a desktop width: the tabs that do not fit
+   move into the overflow menu, which still lists every open screen. */
+function fitTabs() {
+  const strip = $("#tabstrip"), more = $("#tabMore");
+  if (!strip || !more || !wsModel) return;
+  const tabs = $$(".tab", strip);
+  tabs.forEach(t => t.classList.remove("away"));
+  if (!tabs.length) { more.classList.add("hide"); return; }
+  more.classList.remove("hide");
+  const overflow = () => strip.scrollWidth > strip.clientWidth + 1;
+  if (!overflow()) { more.classList.add("hide"); return; }
+  const activeId = tabElementId(wsModel.active);
+  for (let i = tabs.length - 1; i >= 0 && overflow(); i--) {
+    if (tabs[i].id === activeId || tabs[i].dataset.key === WS.HOME) continue;
+    tabs[i].classList.add("away");
+  }
+  if (overflow()) {
+    const home = tabs.find(t => t.dataset.key === WS.HOME);
+    if (home && home.id !== activeId) home.classList.add("away");
+  }
+}
+function renderTabMenu() {
+  const menu = $("#tabMenu");
+  if (!menu || !wsModel) return;
+  const closable = wsModel.open.filter(t => t.closable).length;
+  const current = wsLastTab();
+  menu.innerHTML = `<h3>Open screens</h3>
+    ${wsModel.open.map(t => `<button role="menuitem" type="button" data-act="tab-go" data-key="${esc(t.key)}"
+      ${t.key === wsModel.active ? "disabled" : ""}>${esc(t.title)}${t.closable ? "" : " · pinned"}</button>`).join("")}
+    <div class="tab-menu-sep" role="separator"></div>
+    <button role="menuitem" type="button" data-act="tab-close" data-key="${esc(wsModel.active)}"
+      ${current && current.closable ? "" : "disabled"}>Close current tab</button>
+    <button role="menuitem" type="button" data-act="tab-close-others" ${closable ? "" : "disabled"}>Close other tabs</button>
+    <button role="menuitem" type="button" data-act="tab-close-all" ${closable ? "" : "disabled"}>Close all except Home</button>
+    <button role="menuitem" type="button" data-act="tab-reopen" ${wsModel.closed.length ? "" : "disabled"}>Reopen closed tab</button>`;
+}
+function openTabMenu() {
+  renderTabMenu();
+  $("#tabMenu").classList.remove("hide");
+  $("#tabMore").setAttribute("aria-expanded", "true");
+}
+function closeTabMenu() {
+  const menu = $("#tabMenu");
+  if (menu) menu.classList.add("hide");
+  const btn = $("#tabMore");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+function toggleTabMenu() {
+  const menu = $("#tabMenu");
+  if (!menu) return;
+  menu.classList.contains("hide") ? openTabMenu() : closeTabMenu();
+}
+
+/* ---------- breadcrumb ---------- */
+function renderCrumbs() {
+  const box = $("#crumbs");
+  if (!box || !state.user) return;
+  const section = state.view === "accounts" ? accSectionLabel(state.acc.section) : "";
+  const path = WS.crumbPath(state.view, section, wsViewOk);
+  if (!path.length) { box.innerHTML = ""; box.classList.add("hide"); return; }
+  box.classList.remove("hide");
+  box.innerHTML = "<ol>" + path.map(c => {
+    if (c.current) return `<li><span aria-current="page">${esc(c.label)}</span></li>`;
+    return c.view ? `<li><a href="#/${esc(c.view)}">${esc(c.label)}</a></li>`
+                  : `<li><span>${esc(c.label)}</span></li>`;
+  }).join("") + "</ol>";
+}
+
+/* ---------- menu, favourites and recents ---------- */
+function navRow(v) {
+  const ids = WS.MENU_IDS[v] || {};
+  return `<a class="nav" href="#/${esc(v)}" data-v="${esc(v)}"${ids.id ? ` id="${ids.id}"` : ""}>${esc(TITLES[v])}`
+    + `${ids.count ? `<span class="count hide" id="${ids.count}"></span>` : ""}</a>`;
+}
+/* The menu is built per role, so a badge is absent whenever its row is absent.
+   A renderer must not fail because the screen it belongs to is not in the menu. */
+function setBadge(id, n, label) {
+  const c = $("#" + id);
+  if (!c) return;
+  c.textContent = n; c.classList.toggle("hide", !n); c.setAttribute("aria-label", label);
+}
+function renderSideNav() {
+  const nav = $("#sideNav");
+  if (!nav) return;
+  $$(".nav-module", nav).forEach(el => el.remove());
+  const frag = document.createDocumentFragment();
+  WS.navTree().forEach(mod => {
+    const cats = [];
+    mod.categories.forEach(cat => {
+      const rows = [];
+      cat.groups.forEach(g => g.views.forEach(v => { if (WS.menuAllowed(v, wsCtx())) rows.push(v); }));
+      if (rows.length) cats.push({label: cat.label, rows});
+    });
+    if (!cats.length) return;
+    const box = document.createElement("div");
+    box.className = "nav-module";
+    box.innerHTML = `<p class="nav-mod">${esc(mod.label)}</p>` + cats.map(c =>
+      `<div class="nav-group">${c.label ? `<p class="nav-grp">${esc(c.label)}</p>` : ""}`
+      + c.rows.map(navRow).join("") + "</div>").join("");
+    frag.appendChild(box);
+  });
+  nav.appendChild(frag);
+  renderNavExtra();
+}
+/* Server-menu states. A failed load keeps the built-in menu (already filtered
+   by permissions) and says so, rather than dropping the menu or opening every
+   module. */
+function navStatusHtml() {
+  if (navState === "loading")
+    return `<div class="nav-alert" role="status">Loading the menu…</div>`;
+  if (navState !== "error") return "";
+  return `<div class="nav-alert" role="alert">
+      <b>The menu could not be loaded</b>
+      <p>${esc(navError)}</p>
+      <p class="nav-alert-sub">Showing the built-in menu for this role.</p>
+      <button class="btn ghost sm" type="button" data-act="nav-retry">Retry</button>
+    </div>`;
+}
+function renderNavExtra() {
+  const box = $("#navExtra");
+  if (!box || !state.user) return;
+  const favs = wsFavourites().filter(wsKeyAllowed);
+  const recents = wsRecents().filter(k => wsKeyAllowed(k) && favs.indexOf(k) < 0).slice(0, 6);
+  const row = k => {
+    const p = WS.parseHash("#/" + k);
+    return `<a class="nav" href="#/${esc(k)}" data-wskey="${esc(k)}">${esc(wsTabTitle(p.view, p.section))}</a>`;
+  };
+  box.innerHTML = navStatusHtml()
+    + (favs.length ? `<div class="nav-group" aria-label="Favourites">
+      <p class="nav-grp">Favourites</p>${favs.map(row).join("")}</div>` : "")
+    + (recents.length ? `<div class="nav-group" aria-label="Recently opened">
+      <p class="nav-grp">Recently opened</p>${recents.map(row).join("")}</div>` : "");
+}
+function renderFavBtn() {
+  const btn = $("#favBtn");
+  if (!btn) return;
+  const key = wsCurrentKey();
+  const show = !!state.user && state.view !== "dash" && wsViewOk(state.view);
+  btn.classList.toggle("hide", !show);
+  if (!show) return;
+  const on = wsFavourites().indexOf(key) >= 0;
+  btn.setAttribute("aria-pressed", String(on));
+  btn.textContent = on ? "★" : "☆";
+  btn.title = on ? "Remove from favourites" : "Add to favourites";
+  btn.setAttribute("aria-label", btn.title);
+}
+
+/* Called at the end of route(): the rendered screen becomes the active tab. */
+function wsSync() {
+  if (!state.user) return;
+  const view = state.view;
+  const parsed = WS.parseHash(location.hash);
+  // A screen the role may not open leaves no permission-shaped address behind;
+  // the route has already fallen back to Home, so the address follows it.
+  if (parsed.view !== "dash" && !wsViewOk(parsed.view)) {
+    history.replaceState(null, "", WS.HOME_HASH);
+  }
+  const section = view === "accounts" ? (state.acc.section || "")
+    : (parsed.view === view ? parsed.section : "");
+  const q = parsed.view === view && parsed.hash.indexOf("?") >= 0
+    ? parsed.hash.slice(parsed.hash.indexOf("?")) : "";
+  const hash = view === "dash" ? WS.HOME_HASH
+    : "#/" + view + (section ? "/" + section : "") + q;
+  if (!wsModel) wsModel = WS.initialModel();
+  wsModel = WS.openTab(wsModel, {
+    view, section: view === "accounts" ? section : "", hash, title: wsTabTitle(view, section),
+  });
+  if (view !== "dash") {
+    wsStore.set("localStorage", wsUserKey(WS_RECENT),
+                WS.pushRecent(wsRecents(), WS.canonicalKey(view, section), 6));
+  }
+  wsLastHash = location.hash;
+  wsSaveTabs();
+  renderTabs();
+  renderCrumbs();
+  renderNavExtra();
+  renderFavBtn();
+}
+
 function showTab() {
   $$("[data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === state.tab)));
   ["stock", "ledger", "warehouses"].forEach(t => $("#i-" + t).classList.toggle("hide", t !== state.tab));
   if (state.tab === "ledger" && !state.movements) loadMovements();
 }
+/* The header may count a status breakdown only from the 200-row cache, so it
+   says so only while the cache covers the server's total. The headline count
+   always comes from the server page's X-Total-Count once that page has loaded. */
+function listTotal(key) {
+  const s = listState(key);
+  return s.loaded && s.total != null ? s.total : null;
+}
+function listCovers(cache, total) {
+  return total == null || cache.length >= total;
+}
+/* A breakdown describes the whole cache, so it is only shown for the screen's
+   default view. Under a search or a narrower filter the header states the
+   server's total for that view and nothing more. */
+const LIST_DEFAULT_FILTER = {
+  suppliers: () => state.supFilter === "all",
+  customers: () => state.distFilter === "all",
+  sales: () => state.soFilter === "all",
+  purchasing: () => state.poFilter === "all",
+  billing: () => state.invFilter === "all",
+  approvals: () => state.apFilter === "pending",
+  leads: () => state.ldFilter === "open" && state.ldOwner === "all",
+};
+function listNarrowed(key) {
+  const s = listState(key);
+  const isDefault = LIST_DEFAULT_FILTER[key] ? LIST_DEFAULT_FILTER[key]() : true;
+  return !!s.q || !isDefault;
+}
+/* The rows a header breakdown may count: the server page when it already holds
+   every matching row, otherwise the shared cache. */
+function listBreakdownRows(key, total, cache) {
+  const s = listState(key);
+  return s.loaded && listCovers(s.rows, total) ? s.rows : cache;
+}
+
 function renderHead() {
   const v = state.view; let sub = "", act = "";
   if (v === "dash") {
@@ -803,33 +1276,56 @@ function renderHead() {
     sub = "Sales, returns and GST by the buyer state frozen on each issued invoice. District and city are not recorded, so the page stops at state.";
   }
   if (v === "products") {
-    sub = `${plural(state.products.length, "product")} on file, ${state.products.filter(x => x.status === "active").length} active.`;
-    if (can("product:write")) act = `<button class="btn" data-act="new-product" type="button">New product</button>`;
+    const p = state.plist;
+    sub = p.loaded && p.total != null
+      ? `${plural(p.total, "product")}${p.q || p.status ? " matching the filters" : " on file"}.`
+      : `${plural(state.products.length, "product")} on file, ${state.products.filter(x => x.status === "active").length} active.`;
+    act = `${can("product:read") ? `<button class="btn ghost" data-act="export-products" type="button">Export CSV</button>` : ""}${can("product:write") ? `<button class="btn" data-act="new-product" type="button">New product</button>` : ""}`;
   }
   if (v === "inventory") {
     sub = "Stock by batch, the movement ledger and warehouses.";
     if (state.tab === "warehouses" && can("stock:write")) act = `<button class="btn" data-act="new-warehouse" type="button">New warehouse</button>`;
   }
   if (v === "purchasing") {
-    const n = s => state.pos.filter(x => x.status === s).length;
-    sub = `${n("open")} open, ${n("partially_received")} part received, ${n("received")} received, ${n("cancelled")} cancelled.`;
-    if (can("stock:write")) act = `<button class="btn" data-act="new-po" type="button">New purchase order</button>`;
+    const total = listTotal("purchasing");
+    const rows = listBreakdownRows("purchasing", total, state.pos);
+    const n = s => rows.filter(x => x.status === s).length;
+    sub = listCovers(rows, total) && !listNarrowed("purchasing")
+      ? `${n("open")} open, ${n("partially_received")} part received, ${n("received")} received, ${n("cancelled")} cancelled.`
+      : `${plural(total != null ? total : state.pos.length, "purchase order")}.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="purchasing" type="button">Export CSV</button>`
+        + (can("stock:write") ? ` <button class="btn" data-act="new-po" type="button">New purchase order</button>` : "");
   }
   if (v === "suppliers") {
     const pending = state.bankChanges.filter(b => b.status === "pending").length;
-    const incomplete = state.suppliers.filter(s => s.needs_completion).length;
-    sub = `${plural(state.suppliers.length, "supplier")}. ${pending} bank change${pending === 1 ? "" : "s"} awaiting approval, ${incomplete} still to be completed.`;
-    if (can("supplier:write")) act = `<button class="btn" data-act="new-supplier" type="button">New supplier</button>`;
+    const total = listTotal("suppliers");
+    const rows = listBreakdownRows("suppliers", total, state.suppliers);
+    const incomplete = rows.filter(s => s.needs_completion).length;
+    sub = listCovers(rows, total) && !listNarrowed("suppliers")
+      ? `${plural(total != null ? total : state.suppliers.length, "supplier")}. ${pending} bank change${pending === 1 ? "" : "s"} awaiting approval, ${incomplete} still to be completed.`
+      : `${plural(total, "supplier")}.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="suppliers" type="button">Export CSV</button>`
+        + (can("supplier:write") ? ` <button class="btn" data-act="new-supplier" type="button">New supplier</button>` : "");
   }
   if (v === "sales") {
-    const n = c => state.orders.filter(o => o.status === c).length;
-    sub = `${n("approved")} ready to dispatch, ${n("pending_approval")} awaiting approval, ${n("draft")} draft.`;
-    if (can("sales:write")) act = `<button class="btn" data-act="new-so" type="button">New sales order</button>`;
+    const total = listTotal("sales");
+    const rows = listBreakdownRows("sales", total, state.orders);
+    const n = c => rows.filter(o => o.status === c).length;
+    sub = listCovers(rows, total) && !listNarrowed("sales")
+      ? `${n("approved")} ready to dispatch, ${n("pending_approval")} awaiting approval, ${n("draft")} draft.`
+      : `${plural(total != null ? total : state.orders.length, "sales order")}.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="sales" type="button">Export CSV</button>`
+        + (can("sales:write") ? ` <button class="btn" data-act="new-so" type="button">New sales order</button>` : "");
   }
   if (v === "billing") {
-    const issued = state.invoices.filter(i => i.status === "issued").length;
+    const total = listTotal("billing");
+    const rows = listBreakdownRows("billing", total, state.invoices);
+    const issued = rows.filter(i => i.status === "issued").length;
     const corrected = state.creditNotes.length + state.debitNotes.length;
-    sub = `${plural(state.invoices.length, "tax invoice")}, ${issued} live. ${plural(corrected, "credit or debit note")}. An issued invoice is never edited: correct it with a note.`;
+    sub = listCovers(rows, total) && !listNarrowed("billing")
+      ? `${plural(total != null ? total : state.invoices.length, "tax invoice")}, ${issued} live. ${plural(corrected, "credit or debit note")}. An issued invoice is never edited: correct it with a note.`
+      : `${plural(total, "tax invoice")}. An issued invoice is never edited: correct it with a note.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="billing" type="button">Export CSV</button>`;
   }
   if (v === "accounts") {
     const out = state.accounts.outstanding;
@@ -842,11 +1338,27 @@ function renderHead() {
           + ` <button class="btn ghost" data-act="new-entry" data-kind="payment" type="button">Record payment</button>`;
     }
   }
-  if (v === "approvals") sub = `${state.approvals.filter(a => a.status === "pending").length} waiting for a decision. The person who raised an order cannot approve it.`;
+  if (v === "approvals") {
+    const total = listTotal("approvals");
+    const rows = listBreakdownRows("approvals", total, state.approvals);
+    const waiting = rows.filter(a => a.status === "pending").length;
+    sub = state.apFilter === "pending" && !listNarrowed("approvals") && total != null
+      ? `${total} waiting for a decision. The person who raised an order cannot approve it.`
+      : listCovers(rows, total) && !listNarrowed("approvals")
+        ? `${waiting} waiting for a decision. The person who raised an order cannot approve it.`
+        : `${plural(total, "request")} in this view. The person who raised an order cannot approve it.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="approvals" type="button">Export CSV</button>`;
+  }
   if (v === "leads") {
-    const od = state.leads.filter(l => l.follow_up_state === "overdue").length, td = state.leads.filter(l => l.follow_up_state === "today").length;
-    sub = `${od} overdue and ${td} due today across the team. Only a lead’s owner or an administrator can change it.`;
-    if (can("lead:write")) act = `<button class="btn" data-act="new-lead" type="button">New lead</button>`;
+    const total = listTotal("leads");
+    const rows = listBreakdownRows("leads", total, state.leads);
+    const od = rows.filter(l => l.follow_up_state === "overdue").length,
+          td = rows.filter(l => l.follow_up_state === "today").length;
+    sub = listCovers(rows, total) && !listNarrowed("leads")
+      ? `${od} overdue and ${td} due today across the team. Only a lead’s owner or an administrator can change it.`
+      : `${plural(total != null ? total : state.leads.length, "lead")}. Only a lead’s owner or an administrator can change it.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="leads" type="button">Export CSV</button>`
+        + (can("lead:write") ? ` <button class="btn" data-act="new-lead" type="button">New lead</button>` : "");
   }
   if (v === "lost") {
     sub = `${plural(state.leads.filter(l => l.status === "lost").length, "lost lead")}. A lost lead keeps its history; only an Administrator can reopen it.`;
@@ -858,11 +1370,16 @@ function renderHead() {
     if (can("lead:write")) act = `<button class="btn" data-act="new-lead" type="button">New lead</button>`;
   }
   if (v === "customers") {
-    const active = state.dists.filter(d => d.status === "active").length;
-    const blocked = state.dists.filter(d => d.status === "blocked").length;
-    const incomplete = state.dists.filter(d => d.needs_completion).length;
-    sub = `${plural(state.dists.length, "record")} in one customer and distributor master. Active: ${active}, Blocked: ${blocked}${incomplete ? `, needing details: ${incomplete}` : ""}. Credit in use counts orders awaiting approval, approved and dispatched.`;
-    if (can("distributor:write")) act = `<button class="btn" data-act="new-dist" type="button">New customer or distributor</button>`;
+    const total = listTotal("customers");
+    const rows = listBreakdownRows("customers", total, state.dists);
+    const active = rows.filter(d => d.status === "active").length;
+    const blocked = rows.filter(d => d.status === "blocked").length;
+    const incomplete = rows.filter(d => d.needs_completion).length;
+    sub = listCovers(rows, total) && !listNarrowed("customers")
+      ? `${plural(total != null ? total : state.dists.length, "record")} in one customer and distributor master. Active: ${active}, Blocked: ${blocked}${incomplete ? `, needing details: ${incomplete}` : ""}. Credit in use counts orders awaiting approval, approved and dispatched.`
+      : `${plural(total, "record")} in one customer and distributor master. Credit in use counts orders awaiting approval, approved and dispatched.`;
+    act = `<button class="btn ghost" data-act="export-list" data-list="customers" type="button">Export CSV</button>`
+        + (can("distributor:write") ? ` <button class="btn" data-act="new-dist" type="button">New customer or distributor</button>` : "");
   }
   if (v === "hr") {
     const d = state.hr.dashboard;
@@ -916,6 +1433,25 @@ function shelf(expiry) {
   return `<div class="shelf ${cls}"><span class="t">${esc(text)}</span><div class="g"><i style="width:${pct.toFixed(0)}%"></i></div><small>${esc(fmtDate(expiry))}</small></div>`;
 }
 const empty = (el, show, title, hint) => { el.classList.toggle("hide", !show); if (show) el.innerHTML = `<b>${esc(title)}</b>${esc(hint || "")}`; };
+
+/* One footer pager for every list screen. The range and total come from the
+   server's X-Total-Count; the page size is offered in the same footer. */
+const PG_SIZES = [25, 50, 100, 200];
+function pagerHtml(p, key = "products") {
+  if (p.total == null) return "";
+  const size = p.size || 50;
+  const pages = Math.max(1, Math.ceil(p.total / size));
+  const page = Math.min(Math.max(1, p.page || 1), pages);
+  const first = p.total ? (page - 1) * size + 1 : 0;
+  const last = p.total ? Math.min(page * size, p.total) : 0;
+  const btn = (to, label, off, name) =>
+    `<button class="btn ghost sm" type="button" data-act="list-page" data-list="${key}" data-page="${to}" aria-label="${name}"${off ? " disabled" : ""}>${label}</button>`;
+  return `<span class="pager-count">${p.total ? `${qty(first)}–${qty(last)} of ${qty(p.total)}` : "0 of 0"}</span>
+    <div class="pager-nav">${btn("first", "«", page <= 1, "First page")}${btn("prev", "‹", page <= 1, "Previous page")}
+      <span class="pager-page">Page <b>${page}</b> of ${pages}</span>
+      ${btn("next", "›", page >= pages, "Next page")}${btn("last", "»", page >= pages, "Last page")}</div>
+    <label class="pager-size">Rows per page<select data-act="list-size" data-list="${key}" aria-label="Rows per page">${PG_SIZES.map(n => `<option value="${n}"${n === size ? " selected" : ""}>${n}</option>`).join("")}</select></label>`;
+}
 const MOVE = {receipt: ["Goods received", "ok"], issue: ["Issued", "off"], transfer: ["Transferred", "off"],
               adjust: ["Adjustment", "warn"], return: ["Returned", "off"], reversal: ["Reversal", "warn"]};
 
@@ -983,9 +1519,7 @@ function renderDash() {
   renderModuleList();
 
   const openTotal = d.purchase_orders ? d.purchase_orders.open_count : 0;
-  const c = $("#poCount");
-  c.textContent = openTotal; c.classList.toggle("hide", !openTotal);
-  c.setAttribute("aria-label", `${openTotal} open purchase orders`);
+  setBadge("poCount", openTotal, `${openTotal} open purchase orders`);
 }
 
 /* ---------- dashboard fragments ---------- */
@@ -2459,8 +2993,10 @@ function openPalette() {
   $("#paletteQ").value = "";
   $("#paletteQ").setAttribute("aria-activedescendant", "");
   $("#paletteResults").innerHTML = "";
-  $("#paletteNote").textContent = "Type at least two characters. Results follow what your role may read.";
   $("#paletteQ").focus();
+  // Open on the screen list, so the palette is navigation even before a search.
+  renderPalette(null, "");
+  $("#paletteNote").textContent = "Type at least two characters to search records. Screens are listed above.";
 }
 
 function closePalette() {
@@ -2492,8 +3028,27 @@ function paletteSetIndex(i) {
   }
 }
 
+/* The palette is navigation as well as record search: the screens the role may
+   open come from the same hierarchy the sidebar and breadcrumb use. */
+function paletteScreenGroup(term) {
+  const q = String(term || "").trim().toLowerCase();
+  const seen = {}, items = [];
+  WS.flatNav().forEach(n => {
+    if (n.view === "dash" || seen[n.view] || !wsViewOk(n.view)) return;
+    seen[n.view] = true;
+    const hay = [n.label, n.module, n.category, n.group].join(" ").toLowerCase();
+    if (q && hay.indexOf(q) < 0) return;
+    items.push({id: "", title: n.label,
+      subtitle: [n.module, n.category, n.group].filter(Boolean).join(" › "),
+      href: "#/" + n.view});
+  });
+  return items.length ? {key: "screens", label: "Screens", items} : null;
+}
+
 function renderPalette(body, term) {
-  const groups = body && body.groups ? body.groups : [];
+  const groups = body && body.groups ? body.groups.slice() : [];
+  const screens = paletteScreenGroup(term);
+  if (screens) groups.unshift(screens);
   const box = $("#paletteResults");
   if (!groups.length) {
     box.innerHTML = `<p class="palette-empty">No record matches “${esc(term)}” in the sections your role can read.</p>`;
@@ -2518,20 +3073,16 @@ function renderPalette(body, term) {
 async function paletteSearch(term) {
   const seq = ++state.palette.seq;
   if (term.length < 2) {
-    $("#paletteResults").innerHTML = "";
-    state.palette.items = [];
-    state.palette.i = -1;
-    $("#paletteNote").textContent = "Type at least two characters. Results follow what your role may read.";
+    renderPalette(null, term);
+    $("#paletteNote").textContent = "Type at least two characters to search records. Screens are listed above.";
     return;
   }
   $("#paletteNote").textContent = "Searching…";
   const res = await api(`/api/dashboard/search?q=${encodeURIComponent(term)}`);
   if (seq !== state.palette.seq || !state.palette.open) return;
   if (!res.ok) {
-    $("#paletteResults").innerHTML = `<p class="palette-empty">${esc(detail(res.body))}</p>`;
-    $("#paletteNote").textContent = "The search could not run.";
-    state.palette.items = [];
-    state.palette.i = -1;
+    renderPalette(null, term);
+    $("#paletteNote").textContent = `The record search could not run: ${detail(res.body)}`;
     return;
   }
   renderPalette(res.body, term);
@@ -5285,15 +5836,17 @@ function renderFollowups() {
 }
 function renderCustomers() {
   if (!$("#curows")) return;
+  const s = listState("customers");
   const q = ($("#cuq")?.value || "").trim().toLowerCase();
   const filter = state.distFilter;
   const sel = $("#cuFilter");
   if (sel && sel.value !== filter) sel.value = filter;
-  const list = state.dists.filter(d => {
+  const list = s.loaded ? s.rows : state.dists.filter(d => {
     const wanted = filter === "all" || (filter === "incomplete" ? d.needs_completion : d.status === filter);
     if (!wanted) return false;
     return !q || [d.code, d.name, d.gstin, d.territory].some(x => (x || "").toLowerCase().includes(q));
   });
+  const total = s.loaded ? s.total : state.dists.length;
   $("#curows").innerHTML = list.map(d => {
     const lim = Number(d.credit_limit), use = Number(d.exposure);
     const pct = lim > 0 ? Math.min(100, use / lim * 100) : (use > 0 ? 100 : 0);
@@ -5310,6 +5863,7 @@ function renderCustomers() {
       <td>${distChip(d.status)}</td>
       <td class="rowacts">${actions}</td></tr>`;
   }).join("");
+  paintListPager("customers", s);
   const messages = {
     incomplete: ["Every record has the details a tax document needs.", ""],
     active: ["No active customer or distributor matches.", " Select “All” to see the blocked ones."],
@@ -5318,7 +5872,8 @@ function renderCustomers() {
     "pending verification": ["Nothing is awaiting verification.", " A record in this state is kept out of new orders until it is made Active."],
     inactive: ["No record is inactive.", " An inactive record is kept out of new orders until it is made Active."]
   };
-  const [title, hint] = messages[filter] || ["No customer or distributor matches this search.",
+  const [title, hint] = messages[filter] || [
+    total ? "No customer or distributor matches this search." : "No customers or distributors yet.",
     can("distributor:write") ? " Select “New customer or distributor” to add the first one." : ""];
   empty($("#cuempty"), !list.length, title, hint);
 }
@@ -8299,9 +8854,11 @@ async function sendEmailTest(f) {
 }
 
 function renderProducts() {
-  const q = $("#pq").value.trim().toLowerCase();
-  const list = state.products.filter(x => !q || [x.sku, x.name, x.hsn || "", x.category || "", x.brand || ""].some(t => t.toLowerCase().includes(q)));
-  $("#prows").innerHTML = list.map(x => `<tr><td>${x.hsn ? esc(x.hsn) : '<span class="chip warn">Missing HSN</span>'}</td>
+  const p = state.plist;
+  // Until the server-paged list has loaded, fall back to the shared cache the
+  // forms already use. Once loaded, the table shows exactly one server page.
+  const rows = p.loaded ? p.rows : state.products.slice(0, p.size);
+  $("#prows").innerHTML = rows.map(x => `<tr><td>${x.hsn ? esc(x.hsn) : '<span class="chip warn">Missing HSN</span>'}</td>
     <td class="strong sku">${esc(x.sku)}</td><td>${esc(x.name)}</td>
     <td>${x.category || x.brand ? `${x.category ? esc(x.category) : "—"}${x.brand ? `<small>${esc(x.brand)}</small>` : ""}` : "—"}</td>
     <td>${esc(x.pack_size)}</td>
@@ -8311,12 +8868,282 @@ function renderProducts() {
     <td class="rowacts"><button class="btn ghost sm" type="button" data-act="open-product" data-id="${x.id}">Open</button>
       <button class="btn ghost sm" type="button" data-act="edit-product" data-id="${x.id}">Edit</button>
       <button class="btn ghost sm" type="button" data-act="save-product" data-id="${x.id}">Save</button></td></tr>`).join("");
-  empty($("#pempty"), !list.length, state.products.length ? "No product matches that search." : "No products yet.",
-    state.products.length ? "" : (can("product:write") ? " Select “New product” to add the first one." : ""));
+  const pager = $("#ppager");
+  pager.innerHTML = p.loaded ? pagerHtml(p) : "";
+  pager.classList.toggle("busy", p.loading);
+  // The server sorts by a whitelisted column; the header says which one is live.
+  $$("#v-products th[data-col]").forEach(th => {
+    const on = th.dataset.col === p.sort;
+    th.setAttribute("aria-sort", on ? (p.direction === "asc" ? "ascending" : "descending") : "none");
+    const mark = $(".sort-mark", th);
+    if (mark) mark.textContent = on ? (p.direction === "asc" ? " ▲" : " ▼") : "";
+  });
+  const filtered = !!(p.q || p.status);
+  empty($("#pempty"), p.loaded && !rows.length,
+    filtered ? "No product matches these filters." : "No products yet.",
+    filtered ? "Change the search or status, or clear the filters."
+      : (can("product:write") ? " Select “New product” to add the first one." : ""));
+}
+
+async function loadProductList(page) {
+  const p = state.plist;
+  if (!can("product:read")) return;
+  if (page != null) p.page = Math.max(1, Number(page) || 1);
+  const tok = ++p.seq;
+  p.loading = true;
+  $("#ppager").classList.add("busy");
+  const qs = new URLSearchParams({page: String(p.page), page_size: String(p.size),
+                                 sort: p.sort, direction: p.direction});
+  if (p.q) qs.set("q", p.q);
+  if (p.status) qs.set("status", p.status);
+  const res = await apiPage(`/api/products?${qs}`);
+  if (tok !== p.seq) return;                    // a newer request took over
+  p.loading = false;
+  if (!res.ok) {
+    p.loaded = true; p.rows = []; p.total = null;
+    toast(res, "Products not loaded");
+    renderProducts(); renderHead();
+    return;
+  }
+  p.rows = Array.isArray(res.body) ? res.body : [];
+  p.total = res.total;
+  p.loaded = true;
+  // A narrower filter or a deletion can strand the view past the last page.
+  if (p.total != null && !p.rows.length && p.page > 1) {
+    p.page = Math.max(1, Math.ceil(p.total / p.size));
+    return loadProductList(p.page);
+  }
+  renderProducts(); renderHead();
+}
+
+function productSort(key) {
+  const p = state.plist;
+  if (!key) return;
+  if (p.sort === key) p.direction = p.direction === "asc" ? "desc" : "asc";
+  else { p.sort = key; p.direction = "asc"; }
+  loadProductList(1);
+}
+
+function productListPage(to) {
+  const p = state.plist;
+  if (p.total == null) return;
+  const pages = Math.max(1, Math.ceil(p.total / p.size));
+  const target = to === "first" ? 1 : to === "last" ? pages
+    : to === "prev" ? p.page - 1 : p.page + 1;
+  const next = Math.min(pages, Math.max(1, target));
+  if (next !== p.page || p.loading) loadProductList(next);
+}
+
+async function exportProductsCsv() {
+  const p = state.plist;
+  const qs = new URLSearchParams();
+  if (p.q) qs.set("q", p.q);
+  if (p.status) qs.set("status", p.status);
+  // Export covers every matching row, not just the page on screen.
+  const res = await api(`/api/products${qs.toString() ? "?" + qs : ""}`);
+  if (!res.ok) { toast(res, "Products not exported"); return; }
+  const rows = Array.isArray(res.body) ? res.body : [];
+  const csv = [["HERBANOVA product master"], ["Exported", fmtStamp(new Date().toISOString())],
+    ["Search", p.q || "all"], ["Status", p.status || "all"], ["Rows", String(rows.length)],
+    ["HSN code", "SKU", "Name", "Category", "Brand", "Pack size", "MRP (INR)",
+     "Reorder level", "Status"]];
+  rows.forEach(x => csv.push([x.hsn || "", x.sku, x.name, x.category || "", x.brand || "",
+    x.pack_size, x.mrp, x.reorder_level ?? "", x.status]));
+  downloadCsv(`HERBANOVA_Products_${isoDay(0)}.csv`, csv);
+  toast({ok: true, status: "200"}, `Exported ${plural(rows.length, "product")}`);
+}
+
+/* ---------- shared list screens (WP-3 batch 2) ----------
+   The filter controls, the footer pager and the export all read one query, so
+   the number in the footer is the server's X-Total-Count and the export covers
+   every match, not the page on screen. Until a screen's first server page has
+   arrived it keeps drawing the shared 200-row cache the forms read, so a slow
+   or failed request never blanks a list. */
+function listState(key) {
+  if (!state.lp[key]) {
+    state.lp[key] = {rows: [], total: null, page: 1, size: 50, q: "",
+                     loading: false, loaded: false, seq: 0, timer: 0};
+  }
+  return state.lp[key];
+}
+function pressSeg(name, value) {
+  $$(`[data-${name}]`).forEach(b => b.setAttribute("aria-pressed", String(b.dataset[name] === value)));
+}
+const LIST_SPEC = {
+  suppliers: {
+    perm: "supplier:read", input: "supq", pager: "supPager", render: renderSuppliers,
+    url: "/api/suppliers", unit: "supplier", title: "Supplier records", file: "Suppliers",
+    filter: () => state.supFilter === "incomplete" ? {incomplete: "true"}
+      : state.supFilter === "all" ? {} : {status: state.supFilter},
+    filterText: () => state.supFilter === "all" ? "all" : state.supFilter,
+    clearFilter() { state.supFilter = "all"; pressSeg("sf2", "all"); },
+    head: ["Code", "Name", "GSTIN", "State", "Kind", "Terms (days)", "Purchase orders", "Status"],
+    row: x => [x.code, x.name, x.gstin || "", x.state || "", x.kind,
+      x.payment_terms_days, x.purchase_orders, x.status],
+  },
+  customers: {
+    perm: "sales:read", input: "cuq", pager: "cuPager", render: renderCustomers,
+    url: "/api/distributors", unit: "record", title: "Customer and distributor master",
+    file: "Customers",
+    filter: () => state.distFilter === "all" ? {}
+      : state.distFilter === "incomplete" ? {incomplete: "true"} : {status: state.distFilter},
+    filterText: () => state.distFilter === "all" ? "all" : state.distFilter,
+    clearFilter() {
+      state.distFilter = "all";
+      const el = $("#cuFilter");
+      if (el) el.value = "all";
+    },
+    head: ["Code", "Name", "GSTIN", "Territory", "Status", "Credit limit", "In use", "Available"],
+    row: x => [x.code, x.name, x.gstin || "", x.territory || "", x.status,
+      x.credit_limit, x.exposure, x.available],
+  },
+  sales: {
+    perm: "sales:read", input: "soq", pager: "soPager", render: renderSales,
+    url: "/api/sales-orders", unit: "order", title: "Sales orders", file: "Sales_Orders",
+    filter: () => state.soFilter === "all" ? {} : {status: state.soFilter},
+    filterText: () => state.soFilter === "all" ? "all" : state.soFilter,
+    clearFilter() { state.soFilter = "all"; pressSeg("sf", "all"); },
+    head: ["Order", "Distributor", "Code", "Created", "Lines", "Value", "Status"],
+    row: x => [x.so_number, x.distributor_name, x.distributor_code,
+      fmtDay(x.created_at), x.lines.length, x.total, x.status],
+  },
+  purchasing: {
+    perm: "stock:read", input: "oq", pager: "poPager", render: renderPOs,
+    url: "/api/purchase-orders", unit: "order", title: "Purchase orders", file: "Purchase_Orders",
+    filter: () => state.poFilter === "all" ? {} : {status: state.poFilter},
+    filterText: () => state.poFilter === "all" ? "all" : state.poFilter,
+    clearFilter() { state.poFilter = "all"; pressSeg("pf", "all"); },
+    head: ["PO number", "Supplier", "Created", "Lines", "Receipts", "Value", "Status"],
+    row: x => [x.po_number, x.supplier, fmtDay(x.created_at), x.lines.length,
+      x.receipts ? x.receipts.length : 0, poValue(x), x.status],
+  },
+  billing: {
+    perm: "sales:read", input: "biq", pager: "invPager", render: renderBilling,
+    url: "/api/invoices", unit: "invoice", title: "Tax invoices", file: "Invoices",
+    filter: () => state.invFilter === "all" ? {} : {status: state.invFilter},
+    filterText: () => state.invFilter === "all" ? "all" : state.invFilter,
+    clearFilter() { state.invFilter = "all"; pressSeg("if", "all"); },
+    head: ["Invoice", "Financial year", "Date", "Buyer", "Buyer GSTIN", "Value", "Credited", "Status"],
+    row: x => [x.invoice_number, x.financial_year, x.invoice_date, x.buyer_name,
+      x.buyer_gstin || "", x.grand_total, x.credit_note_total, x.status],
+  },
+  approvals: {
+    perm: "approval:read", input: "apq", pager: "apPager", render: renderApprovals,
+    url: "/api/approvals", unit: "request", title: "Approvals", file: "Approvals",
+    filter: () => state.apFilter === "pending" ? {status: "pending"}
+      : state.apFilter === "decided" ? {decided: "true"} : {},
+    filterText: () => state.apFilter,
+    clearFilter() { state.apFilter = "pending"; pressSeg("af", "pending"); },
+    head: ["Request", "Type", "Document", "Requester", "Submitted", "Status", "Decision remarks"],
+    row: x => [x.request_no || x.document_number || "", x.request_type_label,
+      x.document_number || "", x.requested_by, fmtDay(x.requested_at), x.status,
+      x.decision_reason || ""],
+  },
+  leads: {
+    perm: "lead:read", input: "ldq", pager: "ldPager", render: renderLeads,
+    url: "/api/leads", unit: "lead", title: "Leads", file: "Leads",
+    filter() {
+      const p = {}, f = state.ldFilter;
+      if (f === "open") p.status = "open";
+      else if (f === "closed") p.status = "closed";
+      else if (f === "overdue" || f === "today" || f === "week") p.due = f;
+      if (state.ldOwner === "mine") p.owner = "me";
+      return p;
+    },
+    filterText: () => `${state.ldFilter} / ${state.ldOwner}`,
+    clearFilter() { state.ldFilter = "open"; state.ldOwner = "all"; pressSeg("lf", "open"); pressSeg("lo", "all"); },
+    head: ["Lead number", "Name", "Company", "Owner", "Source", "Status", "Next follow-up", "Last activity"],
+    row: x => [x.lead_no, x.name, x.company || "", x.owner, x.source, x.status,
+      x.next_follow_up || "", fmtDay(x.last_activity_at)],
+  },
+};
+async function loadList(key, page) {
+  const spec = LIST_SPEC[key], s = listState(key);
+  if (!spec || !can(spec.perm)) return;
+  if (page != null) s.page = Math.max(1, Number(page) || 1);
+  const tok = ++s.seq;
+  s.loading = true;
+  const pager = $("#" + spec.pager);
+  if (pager) pager.classList.add("busy");
+  const qs = new URLSearchParams({page: String(s.page), page_size: String(s.size)});
+  if (s.q) qs.set("q", s.q);
+  Object.entries(spec.filter()).forEach(([k, v]) => qs.set(k, String(v)));
+  const res = await apiPage(`${spec.url}?${qs}`);
+  if (tok !== s.seq) return;                    // a newer request took over
+  s.loading = false;
+  if (!res.ok) {
+    s.loaded = true; s.rows = []; s.total = null;
+    toast(res, `${spec.title} not loaded`);
+    spec.render(); renderHead();
+    return;
+  }
+  s.rows = Array.isArray(res.body) ? res.body : [];
+  s.total = res.total;
+  s.loaded = true;
+  // A narrower filter or a deletion can strand the view past the last page.
+  if (s.total != null && !s.rows.length && s.page > 1) {
+    s.page = Math.max(1, Math.ceil(s.total / s.size));
+    return loadList(key, s.page);
+  }
+  spec.render(); renderHead();
+}
+function listGo(key, to) {
+  const s = listState(key);
+  if (s.total == null) return;
+  const pages = Math.max(1, Math.ceil(s.total / s.size));
+  const target = to === "first" ? 1 : to === "last" ? pages
+    : to === "prev" ? s.page - 1 : s.page + 1;
+  const next = Math.min(pages, Math.max(1, target));
+  if (next !== s.page || s.loading) loadList(key, next);
+}
+function searchList(key) {
+  const spec = LIST_SPEC[key], s = listState(key);
+  if (!spec) return;
+  clearTimeout(s.timer);
+  const el = spec.input ? $("#" + spec.input) : null;
+  s.q = el ? el.value.trim() : "";
+  loadList(key, 1);
+}
+function clearList(key) {
+  const spec = LIST_SPEC[key], s = listState(key);
+  if (!spec) return;
+  clearTimeout(s.timer);
+  s.q = "";
+  if (spec.input) { const el = $("#" + spec.input); if (el) el.value = ""; }
+  spec.clearFilter();
+  loadList(key, 1);
+}
+async function exportListCsv(key) {
+  const spec = LIST_SPEC[key], s = listState(key);
+  if (!spec) return;
+  const qs = new URLSearchParams();
+  if (s.q) qs.set("q", s.q);
+  Object.entries(spec.filter()).forEach(([k, v]) => qs.set(k, String(v)));
+  // The export read has no page, so the server returns every matching row.
+  const res = await api(`${spec.url}${qs.toString() ? "?" + qs : ""}`);
+  if (!res.ok) { toast(res, `${spec.title} not exported`); return; }
+  const rows = Array.isArray(res.body) ? res.body : [];
+  const csv = [[`HERBANOVA ${spec.title}`], ["Exported", fmtStamp(new Date().toISOString())],
+    ["Search", s.q || "all"], ["Filter", spec.filterText()], ["Rows", String(rows.length)],
+    spec.head];
+  rows.forEach(x => csv.push(spec.row(x)));
+  downloadCsv(`HERBANOVA_${spec.file}_${isoDay(0)}.csv`, csv);
+  toast({ok: true, status: "200"}, `Exported ${plural(rows.length, spec.unit)}`);
+}
+/* A page can show a record the 200-row cache does not hold; fetch it once so
+   Open still works from any page. */
+async function ensureCached(key, url, id) {
+  const list = state[key] || (state[key] = []);
+  const hit = list.find(x => x.id === Number(id));
+  if (hit) return hit;
+  const res = await api(url);
+  if (!res.ok) { toast(res, "Record not opened"); return null; }
+  if (res.body && typeof res.body === "object") list.push(res.body);
+  return res.body;
 }
 
 function productDrawer(id, mode) {
-  const x = id ? state.products.find(p => p.id === Number(id)) : null;
+  const x = id ? (state.plist.rows.find(p => p.id === Number(id)) || state.products.find(p => p.id === Number(id))) : null;
   if (id && !x) return;
   const edit = mode !== "open";
   const val = k => (x && x[k] != null ? esc(x[k]) : "");
@@ -8531,14 +9358,24 @@ const openLine = p => p.status === "partially_received"
   : `${plural(p.receipts ? p.receipts.length : 0, "receipt")} so far`;
 
 function renderPOs() {
+  const s = listState("purchasing");
   const q = $("#oq").value.trim().toLowerCase(), f = state.poFilter;
-  const list = state.pos.filter(p => (f === "all" || p.status === f) && (!q || p.po_number.toLowerCase().includes(q) || p.supplier.toLowerCase().includes(q)));
+  const list = s.loaded ? s.rows
+    : state.pos.filter(p => (f === "all" || p.status === f) && (!q || p.po_number.toLowerCase().includes(q) || p.supplier.toLowerCase().includes(q)));
+  const total = s.loaded ? s.total : state.pos.length;
   $("#orows").innerHTML = list.map(p => `<tr class="go" data-po="${p.id}"><td><button class="rowbtn" data-act="open-po" data-id="${p.id}" type="button">${esc(p.po_number)}</button></td>
     <td>${esc(p.supplier)}</td><td>${esc(fmtDay(p.created_at))}</td><td class="n">${p.lines.length}</td>
     <td class="n">${p.receipts ? p.receipts.length : 0}</td><td class="n">${money(poValue(p))}</td>
     <td>${chipOf(PO_STATUS, p.status)}</td></tr>`).join("");
-  empty($("#oempty"), !list.length, state.pos.length ? "No purchase order matches these filters." : "No purchase orders yet.",
-    state.pos.length ? "" : (can("stock:write") ? " Select “New purchase order” to raise the first one." : ""));
+  paintListPager("purchasing", s);
+  empty($("#oempty"), !list.length, total ? "No purchase order matches these filters." : "No purchase orders yet.",
+    total ? "" : (can("stock:write") ? " Select “New purchase order” to raise the first one." : ""));
+}
+function paintListPager(key, s) {
+  const el = $("#" + LIST_SPEC[key].pager);
+  if (!el) return;
+  el.innerHTML = s.loaded ? pagerHtml(s, key) : "";
+  el.classList.toggle("busy", s.loading);
 }
 
 /* ---------- suppliers (Module Phase 2) ---------- */
@@ -8549,15 +9386,19 @@ const BSTAT = {pending: ["Awaiting approval", "warn"], approved: ["Approved", "o
 const activeSuppliers = () => state.suppliers.filter(s => s.status === "active");
 
 function renderSuppliers() {
+  const s = listState("suppliers");
   const q = $("#supq").value.trim().toLowerCase(), f = state.supFilter;
-  const list = state.suppliers.filter(s => (f === "all" || (f === "incomplete" ? s.needs_completion : s.status === f)) &&
-    (!q || [s.code, s.name, s.gstin || "", s.state || ""].some(t => t.toLowerCase().includes(q))));
-  $("#suprows").innerHTML = list.map(s => `<tr><td><button class="rowbtn" data-act="open-supplier" data-id="${s.id}" type="button">${esc(s.code)}</button></td>
-    <td>${esc(s.name)}${s.needs_completion ? ` <span class="chip warn">Needs completion</span>` : ""}</td>
-    <td>${esc(s.gstin || "–")}</td><td>${esc(s.state || "–")}</td><td>${esc(SKIND[s.kind] || s.kind)}</td>
-    <td class="n">${esc(s.payment_terms_days)} d</td><td class="n">${s.purchase_orders}</td><td>${chipOf(SUP_STATUS, s.status)}</td></tr>`).join("");
-  empty($("#supempty"), !list.length, state.suppliers.length ? "No supplier matches these filters." : "No suppliers yet.",
-    state.suppliers.length ? "" : (can("supplier:write") ? " Select “New supplier” to add the first one." : ""));
+  const list = s.loaded ? s.rows
+    : state.suppliers.filter(x => (f === "all" || (f === "incomplete" ? x.needs_completion : x.status === f)) &&
+      (!q || [x.code, x.name, x.gstin || "", x.state || ""].some(t => t.toLowerCase().includes(q))));
+  const total = s.loaded ? s.total : state.suppliers.length;
+  $("#suprows").innerHTML = list.map(x => `<tr><td><button class="rowbtn" data-act="open-supplier" data-id="${x.id}" type="button">${esc(x.code)}</button></td>
+    <td>${esc(x.name)}${x.needs_completion ? ` <span class="chip warn">Needs completion</span>` : ""}</td>
+    <td>${esc(x.gstin || "–")}</td><td>${esc(x.state || "–")}</td><td>${esc(SKIND[x.kind] || x.kind)}</td>
+    <td class="n">${esc(x.payment_terms_days)} d</td><td class="n">${x.purchase_orders}</td><td>${chipOf(SUP_STATUS, x.status)}</td></tr>`).join("");
+  paintListPager("suppliers", s);
+  empty($("#supempty"), !list.length, total ? "No supplier matches these filters." : "No suppliers yet.",
+    total ? "" : (can("supplier:write") ? " Select “New supplier” to add the first one." : ""));
 
   const rows = state.bankChanges || [];
   $("#bankrows").innerHTML = rows.map(b => `<tr><td>${esc(b.supplier_code)}<small>${esc(b.supplier_name)}</small></td>
@@ -8965,30 +9806,40 @@ const orderOf = id => state.orders.find(o => o.id === Number(id));
 const activeDists = () => state.dists.filter(d => d.status === "active");
 
 function renderSales() {
+  const s = listState("sales");
   const q = $("#soq").value.trim().toLowerCase(), f = state.soFilter;
-  const list = state.orders.filter(o => (f === "all" || o.status === f) &&
-    (!q || o.so_number.toLowerCase().includes(q) || o.distributor_code.toLowerCase().includes(q) || o.distributor_name.toLowerCase().includes(q)));
+  const list = s.loaded ? s.rows
+    : state.orders.filter(o => (f === "all" || o.status === f) &&
+      (!q || o.so_number.toLowerCase().includes(q) || o.distributor_code.toLowerCase().includes(q) || o.distributor_name.toLowerCase().includes(q)));
+  const total = s.loaded ? s.total : state.orders.length;
   $("#sorows").innerHTML = list.map(o => `<tr class="go" data-so="${o.id}"><td><button class="rowbtn" data-act="open-so" data-id="${o.id}" type="button">${esc(o.so_number)}</button></td>
     <td>${esc(o.distributor_name)}<small>${esc(o.distributor_code)}</small></td><td>${esc(fmtDay(o.created_at))}</td><td class="n">${o.lines.length}</td>
     <td class="n">${money(o.total)}</td><td>${chipOf(SO, o.status)}</td></tr>`).join("");
-  empty($("#soempty"), !list.length, state.orders.length ? "No order matches these filters." : "No sales orders yet.",
-    state.orders.length ? "" : (can("sales:write") ? " Select “New sales order” to start one." : ""));
-  const n = state.orders.filter(o => o.status === "approved").length, c = $("#soCount");
-  c.textContent = n; c.classList.toggle("hide", !n); c.setAttribute("aria-label", `${n} orders ready to dispatch`);
+  paintListPager("sales", s);
+  empty($("#soempty"), !list.length, total ? "No order matches these filters." : "No sales orders yet.",
+    total ? "" : (can("sales:write") ? " Select “New sales order” to start one." : ""));
+  const n = state.orders.filter(o => o.status === "approved").length;
+  setBadge("soCount", n, `${n} orders ready to dispatch`);
 }
 
 function renderApprovals() {
+  const s = listState("approvals");
   const f = state.apFilter;
-  const list = state.approvals.filter(a => f === "all" || (f === "pending" ? a.status === "pending" : a.status !== "pending"));
+  const list = s.loaded ? s.rows
+    : state.approvals.filter(a => f === "all" || (f === "pending" ? a.status === "pending" : a.status !== "pending"));
+  const total = s.loaded ? s.total : state.approvals.length;
   $("#aprows").innerHTML = list.map(a => `<tr class="go" data-ap="${a.id}"><td><button class="rowbtn" data-act="open-ap" data-id="${a.id}" type="button">${esc(a.request_no || a.document_number || "Request")}</button></td>
     <td>${esc(a.request_type_label)}</td><td>${esc(a.document_number || "–")}<small>${esc(a.subject || "")}</small></td>
     <td>${esc(a.requested_by)}</td><td>${esc(fmtDay(a.requested_at))}</td>
     <td>${chipOf(AP, a.status)}${a.decided_by ? `<small>by ${esc(a.decided_by)}, ${esc(fmtDay(a.decided_at))}</small>` : ""}</td>
     <td>${esc(a.decision_reason || "–")}</td></tr>`).join("");
-  empty($("#apempty"), !list.length, f === "pending" ? "Nothing is waiting for a decision." : "No approval requests yet.",
-    f === "pending" ? " Orders over a credit limit, large discounts, HR requests and post-billing edits appear here." : "");
-  const n = state.approvals.filter(a => a.status === "pending").length, c = $("#apCount");
-  c.textContent = n; c.classList.toggle("hide", !n); c.setAttribute("aria-label", `${n} approvals waiting`);
+  paintListPager("approvals", s);
+  empty($("#apempty"), !list.length,
+    total ? "No request matches these filters."
+      : (f === "pending" ? "Nothing is waiting for a decision." : "No approval requests yet."),
+    total ? "" : (f === "pending" ? " Orders over a credit limit, large discounts, HR requests and post-billing edits appear here." : ""));
+  const n = state.approvals.filter(a => a.status === "pending").length;
+  setBadge("apCount", n, `${n} approvals waiting`);
 }
 
 // One status vocabulary, shared with the API (COR-001). An unknown value must
@@ -9258,16 +10109,20 @@ async function postDispatch(form) {
 const INV_STATUS = {issued: ["Issued", "ok"], cancelled: ["Cancelled", "off"]};
 
 function renderBilling() {
+  const s = listState("billing");
   const q = $("#biq").value.trim().toLowerCase(), f = state.invFilter;
-  const list = state.invoices.filter(i => (f === "all" || i.status === f) &&
-    (!q || [i.invoice_number, i.buyer_name, i.so_number || ""].some(t => t.toLowerCase().includes(q))));
+  const list = s.loaded ? s.rows
+    : state.invoices.filter(i => (f === "all" || i.status === f) &&
+      (!q || [i.invoice_number, i.buyer_name, i.so_number || ""].some(t => t.toLowerCase().includes(q))));
+  const total = s.loaded ? s.total : state.invoices.length;
   $("#invrows").innerHTML = list.map(i => `<tr><td><button class="rowbtn" data-act="open-inv" data-id="${i.id}" type="button">${esc(i.invoice_number)}</button><small>${esc(i.financial_year)}${i.so_number ? " · " + esc(i.so_number) : ""}</small></td>
     <td>${esc(fmtDate(i.invoice_date))}</td><td>${esc(i.buyer_name)}<small>${esc(i.buyer_gstin || "Unregistered")}</small></td>
     <td class="n strong">${money(i.grand_total)}</td><td class="n">${money(i.credit_note_total)}</td>
     <td>${chipOf(INV_STATUS, i.status)}</td>
     <td><button class="btn ghost sm" data-act="open-inv" data-id="${i.id}" type="button">Open</button><button class="btn ghost sm" data-act="print-inv" data-id="${i.id}" type="button">Print</button></td></tr>`).join("");
-  empty($("#invempty"), !list.length, state.invoices.length ? "No invoice matches this filter." : "No invoices yet.",
-    state.invoices.length ? "" : " An invoice is issued automatically when an approved sales order is dispatched.");
+  paintListPager("billing", s);
+  empty($("#invempty"), !list.length, total ? "No invoice matches this filter." : "No invoices yet.",
+    total ? "" : " An invoice is issued automatically when an approved sales order is dispatched.");
 
   const notes = [...state.creditNotes.map(n => ({...n, kind: "Credit", no: n.credit_note_number, noteKind: "credit_note"})),
                  ...state.debitNotes.map(n => ({...n, kind: "Debit", no: n.debit_note_number, noteKind: "debit_note"}))]
@@ -9665,14 +10520,18 @@ function leadVisible(l) {
 }
 function renderLeads() {
   if (!state.user) return;
+  const s = listState("leads");
   const q = $("#ldq").value.trim().toLowerCase();
-  const list = state.leads.filter(l => leadVisible(l) && (!q || [l.name, l.company, l.lead_no, l.phone, l.email].some(x => (x || "").toLowerCase().includes(q))));
+  const list = s.loaded ? s.rows
+    : state.leads.filter(l => leadVisible(l) && (!q || [l.name, l.company, l.lead_no, l.phone, l.email].some(x => (x || "").toLowerCase().includes(q))));
+  const total = s.loaded ? s.total : state.leads.length;
   $("#ldrows").innerHTML = list.map(l => `<tr class="go" data-ld="${l.id}"><td><button class="rowbtn" data-act="open-lead" data-id="${l.id}" type="button">${esc(l.name)}</button><small>${esc(l.company || l.lead_no)}</small></td>
     <td>${esc(l.owner)}</td><td>${esc(SRC[l.source] || l.source)}</td><td>${chipOf(LSTAT, l.status)}</td><td>${followCell(l)}</td><td>${esc(fmtDay(l.last_activity_at))}</td></tr>`).join("");
-  empty($("#ldempty"), !list.length, state.leads.length ? "No lead matches these filters." : "No leads yet.",
-    state.leads.length ? "" : (can("lead:write") ? " Select “New lead” to add the first one." : ""));
-  const n = state.leads.filter(l => l.owner === state.user.username && (l.follow_up_state === "overdue" || l.follow_up_state === "today")).length, c = $("#ldCount");
-  c.textContent = n; c.classList.toggle("hide", !n); c.setAttribute("aria-label", `${n} of your follow-ups need attention`);
+  paintListPager("leads", s);
+  empty($("#ldempty"), !list.length, total ? "No lead matches these filters." : "No leads yet.",
+    total ? "" : (can("lead:write") ? " Select “New lead” to add the first one." : ""));
+  const n = state.leads.filter(l => l.owner === state.user.username && (l.follow_up_state === "overdue" || l.follow_up_state === "today")).length;
+  setBadge("ldCount", n, `${n} of your follow-ups need attention`);
 }
 
 /* --- new lead --- */
@@ -10198,7 +11057,9 @@ async function saveRole(form) {
     ? await api(`/api/roles/${id}`, {method: "PATCH", body})
     : await api("/api/roles", {method: "POST", body: {...body, name: f.get("name")}});
   toast(res, res.ok ? "Role saved" : "Role not saved");
-  if (res.ok) { closeDrawer(); loadAll(); } else $(".err", form).textContent = detail(res.body);
+  // A role edit can change this very account's permissions, so ask the server
+  // for the menu again rather than trusting the copy loaded at sign-in.
+  if (res.ok) { closeDrawer(); loadAll(); navRefresh(); } else $(".err", form).textContent = detail(res.body);
 }
 
 async function employeeForm(empId) {
@@ -11163,6 +12024,12 @@ document.addEventListener("click", e => {
   const hrpTab = e.target.closest("[data-hrp]");
   if (hrpTab) return hrProfileDrawer(hrpTab.dataset.hrp);
   const a = e.target.closest("[data-act]");
+  const lp = e.target.closest("[data-act='list-page']");
+  if (lp) {
+    return lp.dataset.list === "products" ? productListPage(lp.dataset.page)
+      : listGo(lp.dataset.list, lp.dataset.page);
+  }
+  if (a && a.dataset.act === "nav-retry") return navRefresh();
   if (a && a.dataset.act === "reset-db") return dbResetOpen();
   if (a && a.dataset.act === "dbreset-backup") return dbResetBackup();
   if (a && a.dataset.act === "dbreset-verify") return dbResetVerify();
@@ -11285,6 +12152,22 @@ document.addEventListener("click", e => {
     else if (act === "open-product") productDrawer(a.dataset.id, "open");
     else if (act === "edit-product") productForm(a.dataset.id);
     else if (act === "save-product") productForm(a.dataset.id);
+    else if (act === "search-products") {
+      clearTimeout(state.plist.timer);
+      state.plist.q = ($("#pq").value || "").trim();
+      loadProductList(1);
+    }
+    else if (act === "clear-products") {
+      clearTimeout(state.plist.timer);
+      state.plist.q = ""; state.plist.status = "";
+      $("#pq").value = ""; $("#pstat").value = "";
+      loadProductList(1);
+    }
+    else if (act === "export-products") exportProductsCsv();
+    else if (act === "sort-products") productSort(a.dataset.sort);
+    else if (act === "search-list") searchList(a.dataset.list);
+    else if (act === "clear-list") clearList(a.dataset.list);
+    else if (act === "export-list") exportListCsv(a.dataset.list);
     else if (act === "new-so-dist") { state.soDistPreset = Number(a.dataset.id); soForm(); }
     else if (act === "hr-employees") hrEmployees();
     else if (act === "hr-range-apply") applyHrRange();
@@ -11367,19 +12250,19 @@ document.addEventListener("click", e => {
     else if (act === "new-warehouse") warehouseForm();
     else if (act === "edit-capacity") capacityForm(a.dataset.id);
     else if (act === "new-po") poForm();
-    else if (act === "open-po") poDetail(a.dataset.id);
+    else if (act === "open-po") ensureCached("pos", `/api/purchase-orders/${a.dataset.id}`, a.dataset.id).then(x => { if (x) poDetail(x.id); });
     else if (act === "cancel-po") cancelPoForm(a.dataset.id);
     else if (act === "new-supplier") supplierForm();
-    else if (act === "open-supplier") supplierDetail(a.dataset.id);
+    else if (act === "open-supplier") ensureCached("suppliers", `/api/suppliers/${a.dataset.id}`, a.dataset.id).then(x => { if (x) supplierDetail(x.id); });
     else if (act === "toggle-supplier") toggleSupplier(a.dataset.id);
     else if (act === "decide-bank") decideBankForm(a.dataset.id);
     else if (act === "add-line") { $("#plines").insertAdjacentHTML("beforeend", lineRow(true)); syncPoLines(); $("#plines").lastElementChild.querySelector("select").focus(); }
     else if (act === "rm-line") { a.closest("[data-line]").remove(); syncPoLines(); }
     else if (act === "goto-wh") { closeDrawer(); location.hash = "#/inventory/warehouses"; }
     else if (act === "new-so") soForm();
-    else if (act === "open-so") soDetail(a.dataset.id);
+    else if (act === "open-so") ensureCached("orders", `/api/sales-orders/${a.dataset.id}`, a.dataset.id).then(x => { if (x) soDetail(x.id); });
     else if (act === "submit-so") submitSO(a.dataset.id);
-    else if (act === "open-ap") apDetail(a.dataset.id);
+    else if (act === "open-ap") ensureCached("approvals", `/api/approvals/${a.dataset.id}`, a.dataset.id).then(x => { if (x) apDetail(x.id); });
     else if (act === "new-dist") distForm();
     else if (act === "edit-dist") distForm(a.dataset.id);
     else if (act === "change-limit") limitForm(a.dataset.id);
@@ -11402,7 +12285,7 @@ document.addEventListener("click", e => {
     else if (act === "close-rate") closeRateForm(a.dataset.id);
     else if (act === "new-slab") slabForm();
     else if (act === "edit-slab") editSlabForm(a.dataset.id);
-    else if (act === "open-inv") invDetail(a.dataset.id);
+    else if (act === "open-inv") ensureCached("invoices", `/api/invoices/${a.dataset.id}`, a.dataset.id).then(x => { if (x) invDetail(x.id); });
     else if (act === "print-inv") printDocument("invoice", Number(a.dataset.id), "ORIGINAL");
     else if (act === "open-note") noteDetail(a.dataset.kind, Number(a.dataset.id));
     else if (act === "print-note" && can("print:document"))
@@ -11434,11 +12317,11 @@ document.addEventListener("click", e => {
   const expb = e.target.closest("[data-eb]");
   if (expb) { setExpiryBucket(expb.dataset.eb); return; }
   const pf = e.target.closest("[data-pf]");
-  if (pf) { state.poFilter = pf.dataset.pf; $$("[data-pf]").forEach(b => b.setAttribute("aria-pressed", String(b === pf))); renderPOs(); return; }
+  if (pf) { state.poFilter = pf.dataset.pf; pressSeg("pf", pf.dataset.pf); loadList("purchasing", 1); return; }
   const inf = e.target.closest("[data-if]");
-  if (inf) { state.invFilter = inf.dataset["if"]; $$("[data-if]").forEach(b => b.setAttribute("aria-pressed", String(b === inf))); renderBilling(); return; }
+  if (inf) { state.invFilter = inf.dataset["if"]; pressSeg("if", inf.dataset["if"]); loadList("billing", 1); return; }
   const spf = e.target.closest("[data-sf2]");
-  if (spf) { state.supFilter = spf.dataset.sf2; $$("[data-sf2]").forEach(b => b.setAttribute("aria-pressed", String(b === spf))); renderSuppliers(); return; }
+  if (spf) { state.supFilter = spf.dataset.sf2; pressSeg("sf2", spf.dataset.sf2); loadList("suppliers", 1); return; }
   const srow = e.target.closest("tr[data-sup]");
   if (srow) { supplierDetail(srow.dataset.sup); return; }
   const rf = e.target.closest("[data-rf]");
@@ -11452,15 +12335,15 @@ document.addEventListener("click", e => {
   const fuf = e.target.closest("[data-fuf]");
   if (fuf) { state.fuFilter = fuf.dataset.fuf; $$("[data-fuf]").forEach(b => b.setAttribute("aria-pressed", String(b === fuf))); renderFollowups(); return; }
   const lf = e.target.closest("[data-lf]");
-  if (lf) { state.ldFilter = lf.dataset.lf; $$("[data-lf]").forEach(b => b.setAttribute("aria-pressed", String(b === lf))); renderLeads(); return; }
+  if (lf) { state.ldFilter = lf.dataset.lf; pressSeg("lf", lf.dataset.lf); loadList("leads", 1); return; }
   const lo = e.target.closest("[data-lo]");
-  if (lo) { state.ldOwner = lo.dataset.lo; $$("[data-lo]").forEach(b => b.setAttribute("aria-pressed", String(b === lo))); renderLeads(); return; }
+  if (lo) { state.ldOwner = lo.dataset.lo; pressSeg("lo", lo.dataset.lo); loadList("leads", 1); return; }
   const lr = e.target.closest("tr[data-ld]");
   if (lr) { leadDetail(lr.dataset.ld); return; }
   const sf = e.target.closest("[data-sf]");
-  if (sf) { state.soFilter = sf.dataset.sf; $$("[data-sf]").forEach(b => b.setAttribute("aria-pressed", String(b === sf))); renderSales(); return; }
+  if (sf) { state.soFilter = sf.dataset.sf; pressSeg("sf", sf.dataset.sf); loadList("sales", 1); return; }
   const af = e.target.closest("[data-af]");
-  if (af) { state.apFilter = af.dataset.af; $$("[data-af]").forEach(b => b.setAttribute("aria-pressed", String(b === af))); renderApprovals(); return; }
+  if (af) { state.apFilter = af.dataset.af; pressSeg("af", af.dataset.af); loadList("approvals", 1); return; }
   const sr = e.target.closest("tr[data-so]");
   if (sr) { soDetail(sr.dataset.so); return; }
   const ar = e.target.closest("tr[data-ap]");
@@ -11570,8 +12453,18 @@ document.addEventListener("input", e => {
   if (e.target.closest("#soForm")) syncSoLines();
   if (e.target.id === "lostq") renderLost();
   if (e.target.id === "fuq") renderFollowups();
-  if (e.target.id === "cuq") renderCustomers();
-  if (e.target.id === "pq") renderProducts();
+  const listHit = Object.entries(LIST_SPEC).find(([, v]) => v.input === e.target.id);
+  if (listHit) {
+    const [key] = listHit, s = listState(key);
+    clearTimeout(s.timer);
+    s.q = e.target.value.trim();
+    s.timer = setTimeout(() => loadList(key, 1), 300);
+  }
+  if (e.target.id === "pq") {
+    clearTimeout(state.plist.timer);
+    state.plist.q = e.target.value.trim();
+    state.plist.timer = setTimeout(() => loadProductList(1), 300);
+  }
   if (e.target.id === "rpq") { state.rpSearch = e.target.value; drawRpTabs(); }
   if (e.target.id === "hrq") renderHrDirectory();
   if (e.target.id === "expq") {
@@ -11594,6 +12487,17 @@ document.addEventListener("change", e => {
   if (e.target.id === "hrStatus" || e.target.id === "hrDept") renderHrDirectory();
   if (e.target.id === "expHead") setExpenseHead(e.target.value);
   if (e.target.id === "expFrom" || e.target.id === "expTo") loadExpenses();
+  if (e.target.id === "pstat") {
+    clearTimeout(state.plist.timer);
+    state.plist.status = e.target.value;
+    loadProductList(1);
+  }
+  if (e.target.dataset.act === "list-size") {
+    const key = e.target.dataset.list || "products";
+    const size = Number(e.target.value) || 50;
+    if (key === "products") { state.plist.size = size; loadProductList(1); }
+    else { listState(key).size = size; loadList(key, 1); }
+  }
 });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
@@ -11627,7 +12531,7 @@ document.addEventListener("keydown", e => {
 });
 document.addEventListener("keydown", e => {
   if (!drawerOpen()) return;
-  if (e.key === "Escape") { closeDrawer(); return; }
+  if (e.key === "Escape") { if (!requestCloseDrawer()) e.preventDefault(); return; }
   if (e.key === "Tab") {                                   // keep focus inside the open drawer
     const f = $$("#drawer button:not([disabled]),#drawer input,#drawer select,#drawer a[href]").filter(x => x.offsetParent !== null);
     if (!f.length) return;
@@ -11640,9 +12544,70 @@ document.addEventListener("keydown", e => {
    when the element is there, so a stale markup/cache pair degrades to one dead
    control instead of a blank screen. */
 const bind = (sel, event, fn) => { const el = typeof sel === "string" ? $(sel) : sel; if (el) el.addEventListener(event, fn); return el; };
-bind("#scrim", "click", closeDrawer);
-bind("#dclose", "click", closeDrawer);
-window.addEventListener("resize", fitDrawerTables);
+bind("#scrim", "click", () => requestCloseDrawer());
+bind("#dclose", "click", () => requestCloseDrawer());
+window.addEventListener("resize", () => { fitDrawerTables(); fitTabs(); });
+
+/* Workspace tabs: click, keyboard, overflow menu and favourites. */
+bind("#tabstrip", "click", e => {
+  const close = e.target.closest("[data-act='tab-close']");
+  if (close) { e.stopPropagation(); wsCloseTab(close.dataset.key); return; }
+  const tab = e.target.closest(".tab");
+  if (tab) wsActivate(tab.dataset.key);
+});
+bind("#tabstrip", "keydown", e => {
+  const strip = $("#tabstrip");
+  if (!strip) return;
+  const tabs = $$(".tab", strip);
+  if (!tabs.length) return;
+  const current = document.activeElement.closest(".tab");
+  const i = tabs.indexOf(current);
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    e.preventDefault();
+    const j = i < 0 ? 0 : (e.key === "ArrowRight" ? (i + 1) % tabs.length : (i - 1 + tabs.length) % tabs.length);
+    tabs[j].focus();
+    wsActivate(tabs[j].dataset.key);
+  } else if (e.key === "Home" || e.key === "End") {
+    e.preventDefault();
+    const j = e.key === "Home" ? 0 : tabs.length - 1;
+    tabs[j].focus();
+    wsActivate(tabs[j].dataset.key);
+  } else if ((e.key === "Delete" || e.key === "Backspace") && current && current.dataset.key !== WS.HOME) {
+    e.preventDefault();
+    wsCloseTab(current.dataset.key);
+  }
+});
+bind("#tabMore", "click", e => { e.stopPropagation(); toggleTabMenu(); });
+bind("#tabMenu", "click", e => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn || btn.disabled) return;
+  const act = btn.dataset.act, key = btn.dataset.key;
+  if (act === "tab-go") wsActivate(key);
+  else if (act === "tab-close") { closeTabMenu(); wsCloseTab(key); }
+  else if (act === "tab-close-others") { closeTabMenu(); wsCloseSiblings(wsModel ? wsModel.active : WS.HOME); }
+  else if (act === "tab-close-all") { closeTabMenu(); wsCloseSiblings(WS.HOME); }
+  else if (act === "tab-reopen") { closeTabMenu(); wsReopen(); }
+});
+document.addEventListener("click", e => {
+  if (!e.target.closest("#tabMenu, #tabMore")) closeTabMenu();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && !$("#tabMenu").classList.contains("hide")) { e.preventDefault(); closeTabMenu(); }
+});
+bind("#favBtn", "click", () => {
+  const key = wsCurrentKey();
+  if (key === WS.HOME) return;
+  const next = WS.toggleFavourite(wsFavourites(), key);
+  wsStore.set("localStorage", wsUserKey(WS_FAV), next);
+  renderNavExtra();
+  renderFavBtn();
+  toast({ok: true, status: "★"}, next.indexOf(key) >= 0 ? "Added to favourites" : "Removed from favourites");
+});
+document.addEventListener("input", wsDrawerTouched);
+document.addEventListener("change", wsDrawerTouched);
+window.addEventListener("beforeunload", e => {
+  if (state.user && drawerOpen() && drawerDirty) { e.preventDefault(); e.returnValue = ""; }
+});
 const signOut = async () => { const r = await api("/api/auth/logout", {method: "POST"}); toast(r, "Signed out"); leave(); };
 bind("#out", "click", signOut);
 bind("#mcOut", "click", signOut);
@@ -11714,7 +12679,7 @@ bind("#ltype", "change", renderLedger);
 document.addEventListener("change", e => {
   if (e.target.id !== "cuFilter") return;
   state.distFilter = e.target.value;
-  renderCustomers();
+  loadList("customers", 1);
 });
 // The receipt drawer's warehouse choice shows the capacity it is going into.
 document.addEventListener("change", e => {
@@ -11782,7 +12747,18 @@ document.addEventListener("change", e => {
   if (e.target.id === "accState") return setAccStateFilter(e.target.value);
   if (e.target.id === "accMonth") return setAccMonth(e.target.value);
 });
-window.addEventListener("hashchange", () => { if (state.user) { closeDrawer(); closePalette(); route(); } });
+window.addEventListener("hashchange", () => {
+  if (!state.user) return;
+  // Navigating away is a close of the open drawer: keep the address and the
+  // form when the operator says no, instead of losing what they typed.
+  if (drawerOpen() && drawerDirty && !confirmDiscard($("#dtitle").textContent)) {
+    if (wsLastHash) history.replaceState(null, "", wsLastHash);
+    return;
+  }
+  closeDrawer();
+  closePalette();
+  route();
+});
 
 let startTheme = "light";
 try {

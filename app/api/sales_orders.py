@@ -5,7 +5,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -196,7 +196,8 @@ def _lock_distributor(db: Session, dist_id: int) -> Distributor:
 # ---------------------------------------------------------------- reads
 @router.get("", response_model=list[SOOut])
 def list_orders(response: Response, distributor_id: int | None = None,
-                status: str | None = None, paging=Depends(page_params),
+                status: str | None = None, q: str | None = None,
+                paging=Depends(page_params),
                 db: Session = Depends(get_db), _=Depends(require("sales:read"))):
     page, page_size = paging
     stmt = select(SalesOrder)
@@ -204,6 +205,11 @@ def list_orders(response: Response, distributor_id: int | None = None,
         stmt = stmt.where(SalesOrder.distributor_id == distributor_id)
     if status:
         stmt = stmt.where(SalesOrder.status == status)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.join(Distributor, SalesOrder.distributor_id == Distributor.id).where(
+            or_(SalesOrder.so_number.ilike(like), Distributor.code.ilike(like),
+                Distributor.name.ilike(like)))
     return _build(db, paginate(db, stmt.order_by(SalesOrder.id.desc()),
                                response, page, page_size))
 

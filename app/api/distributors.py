@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -170,6 +170,7 @@ def _identity(registration_type, gstin, pan, state_code) -> dict:
 
 @router.get("", response_model=list[DistributorOut])
 def list_distributors(response: Response, q: str | None = None, status: str | None = None,
+                       incomplete: bool | None = None,
                        paging=Depends(page_params), db: Session = Depends(get_db),
                        _=Depends(require("sales:read"))):
     page, page_size = paging
@@ -183,6 +184,13 @@ def list_distributors(response: Response, q: str | None = None, status: str | No
                           | Distributor.gstin.ilike(like) | Distributor.territory.ilike(like))
     if status:
         stmt = stmt.where(Distributor.status == status)
+    if incomplete is not None:
+        # The same gaps `_completion()` reports, expressed as a WHERE clause so
+        # the page and its total describe the same rows.
+        gaps = or_(func.coalesce(Distributor.state_code, "") == "",
+                   and_(Distributor.registration_type.in_(("regular", "composition")),
+                        func.coalesce(Distributor.gstin, "") == ""))
+        stmt = stmt.where(gaps if incomplete else ~gaps)
     rows = paginate(db, stmt.order_by(Distributor.code), response, page, page_size)
     return [_out(d, Decimal(exp.get(d.id) or 0)) for d in rows]
 

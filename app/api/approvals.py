@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
@@ -78,14 +78,6 @@ class ApprovalOut(BaseModel):
     can_decide: bool = False
     age_days: int | None = None
     deciders: list[str] = []
-
-
-def _category_allowed(db: Session, user, record_type: str) -> bool:
-    if record_type == "sales_order":
-        return True
-    if record_type.startswith("hr_"):
-        return bool({"hr:read", "approval:read"} & role_permissions(db, user))
-    return True
 
 
 def _age_days(raised: datetime | None) -> int | None:
@@ -203,15 +195,53 @@ def _build(db: Session, rows: list[ApprovalRequest], user) -> list[ApprovalOut]:
     return out
 
 
+def _visible_approvals(stmt, db: Session, user):
+    """Apply the queue's visibility rules in the query, not after paging.
+
+    A page and its X-Total-Count must describe the same rows. The rules are
+    unchanged from when they ran in Python: someone without an HR right sees
+    only the HR requests they raised; payroll amounts stay with the payroll
+    approver and the person who raised them; a reporting manager sees their own
+    chain. `func.left(...) = 'hr_'` is the SQL spelling of
+    `record_type.startswith("hr_")`.
+    """
+    if is_admin(db, user):
+        return stmt
+    perms = role_permissions(db, user)
+    not_hr = func.left(ApprovalRequest.record_type, 3) != "hr_"
+    own = ApprovalRequest.requested_by == user.id
+    if not ({"hr:write", "hr:attendance_manage", "hr:leave_approve", "hr:payroll_prepare"}
+            & perms):
+        stmt = stmt.where(or_(not_hr, own))
+    if "hr:payroll_approve" not in perms:
+        stmt = stmt.where(or_(ApprovalRequest.record_type != "hr_payroll", own))
+    from ..services.hr import scoped_employee_ids
+    scope = scoped_employee_ids(db, user)
+    if scope is not None:
+        if scope:
+            # Read the stored id as text: no cast error on a malformed value,
+            # and a numeric JSON id compares equal to its text form.
+            in_chain = ApprovalRequest.detail.op("->>")("employee_id").in_(
+                [str(i) for i in scope])
+            stmt = stmt.where(or_(not_hr, own, in_chain))
+        else:
+            stmt = stmt.where(or_(not_hr, own))
+    return stmt
+
+
 @router.get("", response_model=list[ApprovalOut])
 def list_approvals(response: Response, status: str | None = None,
                    request_type: str | None = None, q: str | None = None,
+                   decided: bool | None = None,
                    paging=Depends(page_params), db: Session = Depends(get_db),
                    user=Depends(require("approval:read"))):
     page, page_size = paging
     stmt = select(ApprovalRequest).order_by(ApprovalRequest.id.desc())
     if status in ("pending", "approved", "rejected", "withdrawn", "cancelled"):
         stmt = stmt.where(ApprovalRequest.status == status)
+    if decided is not None:
+        stmt = stmt.where(ApprovalRequest.status != "pending" if decided
+                          else ApprovalRequest.status == "pending")
     if request_type:
         stmt = stmt.where(ApprovalRequest.record_type == request_type)
     if q and q.strip():
@@ -219,32 +249,21 @@ def list_approvals(response: Response, status: str | None = None,
         stmt = stmt.where(ApprovalRequest.document_number.ilike(like)
                           | ApprovalRequest.request_no.ilike(like)
                           | ApprovalRequest.subject.ilike(like))
-    rows = [a for a in paginate(db, stmt, response, page, page_size)
-            if _category_allowed(db, user, a.record_type)]
-    # An employee sees the HR requests they raised, not the whole company's.
-    perms = role_permissions(db, user)
-    if not ({"hr:write", "hr:attendance_manage", "hr:leave_approve", "hr:payroll_prepare"}
-            & perms) and not is_admin(db, user):
-        rows = [a for a in rows if not a.record_type.startswith("hr_")
-                or a.requested_by == user.id]
-    # Payroll amounts are salary data. Only the payroll approver (and the
-    # person who submitted the request) may see a payroll approval at all.
-    if not is_admin(db, user) and "hr:payroll_approve" not in perms:
-        rows = [a for a in rows if a.record_type != "hr_payroll"
-                or a.requested_by == user.id]
-    # A reporting manager sees only their own chain's HR requests.
-    from ..services.hr import scoped_employee_ids
-    scope = scoped_employee_ids(db, user)
-    if scope is not None:
-        def _in_scope(a) -> bool:
-            if not a.record_type.startswith("hr_"):
-                return True
-            if a.requested_by == user.id:
-                return True
-            emp_id = (a.detail or {}).get("employee_id")
-            return emp_id is not None and int(emp_id) in scope
-        rows = [a for a in rows if _in_scope(a)]
-    return _build(db, rows, user)
+    stmt = _visible_approvals(stmt, db, user)
+    return _build(db, paginate(db, stmt, response, page, page_size), user)
+
+
+@router.get("/{approval_id}", response_model=ApprovalOut)
+def get_approval(approval_id: int, db: Session = Depends(get_db),
+                 user=Depends(require("approval:read"))):
+    """One request, with the same visibility rules the list applies. The pager
+    can open a row that is no longer inside the 200-row cache."""
+    stmt = _visible_approvals(select(ApprovalRequest).where(
+        ApprovalRequest.id == approval_id), db, user)
+    row = db.scalars(stmt).first()
+    if not row:
+        raise HTTPException(404, "Approval request not found")
+    return _build(db, [row], user)[0]
 
 
 @router.post("/{approval_id}/decide", response_model=ApprovalOut)

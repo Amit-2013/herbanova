@@ -5,15 +5,16 @@ one. Products created before this rule stay readable: the list flags them as
 missing an HSN instead of hiding them, and the HSN can be added on edit.
 """
 from decimal import Decimal
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..core.pagination import page_params, paginate, sort_column
+from ..core.pagination import page_params, paginate, sort_clause
 from ..core.rbac import require
 from ..models.core import Product
 from ..services.audit import audit
@@ -92,6 +93,8 @@ class ProductOut(BaseModel):
 @router.get("", response_model=list[ProductOut])
 def list_products(response: Response, q: str | None = None,
                   status: str | None = None,
+                  sort: str | None = None,
+                  direction: Literal["asc", "desc"] = "asc",
                   paging=Depends(page_params), db: Session = Depends(get_db),
                   _=Depends(require("product:read"))):
     page, page_size = paging
@@ -103,11 +106,12 @@ def list_products(response: Response, q: str | None = None,
                               Product.brand.ilike(like)))
     if status:
         stmt = stmt.where(Product.status == status)
-    stmt = stmt.order_by(sort_column(Product, "sku", {
+    # Only the columns a header offers are sortable; SKU keeps every page disjoint.
+    stmt = stmt.order_by(sort_clause(sort, {
         "sku": Product.sku, "name": Product.name, "hsn": Product.hsn, "mrp": Product.mrp,
         "category": Product.category, "brand": Product.brand,
         "reorder_level": Product.reorder_level,
-        "status": Product.status}, Product.sku))
+        "status": Product.status}, Product.sku, direction), Product.sku)
     return paginate(db, stmt, response, page, page_size)
 
 

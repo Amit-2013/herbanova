@@ -18,8 +18,16 @@ def page_params(page: int | None = Query(None, ge=1),
     return page, page_size
 
 
-def sort_column(model, sort: str | None, allowed: dict[str, Any], default):
-    return allowed.get(sort or "", default)
+def sort_clause(sort: str | None, allowed: dict[str, Any], default,
+                direction: str = "asc"):
+    """Order by a whitelisted column; an unknown name falls back to the default.
+
+    NULLs sort last in both directions so a blank optional value never pushes
+    real rows off the first page. The caller adds a unique tie-break column so
+    pages stay disjoint when many rows share the sort value.
+    """
+    column = allowed.get(sort or "", default)
+    return column.desc().nulls_last() if direction == "desc" else column.asc().nulls_last()
 
 
 def paginate(db: Session, stmt, response: Response, page: int | None, page_size: int,

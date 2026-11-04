@@ -1,7 +1,7 @@
 # 1. Getting Started
 
 **Audience:** everyone with a login.
-**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification, screen layout refreshed), §1.11 (starting the servers) and §1.12 (the application shell) added 3 November 2026; §1.1 and §1.2 rewritten on 4 November 2026 for the new sign-in page (Administrator-managed banner, notices, help line and legal pages) and the **Save ID** / **Forgot Password** controls.
+**Chapter status:** written and verified against source on 31 October 2026; §1.6 (detail drawers), §1.10 (Administrator two-step verification, screen layout refreshed), §1.11 (starting the servers) and §1.12 (the application shell) added 3 November 2026; §1.1 and §1.2 rewritten on 4 November 2026 for the new sign-in page (Administrator-managed banner, notices, help line and legal pages) and the **Save ID** / **Forgot Password** controls; §1.12 extended and §1.13 added on 4 November 2026 for workspace tabs, breadcrumbs and favourites.
 **What you need:** the application address from your administrator, a username, and your password.
 
 ## 1.1 Opening the application
@@ -91,7 +91,7 @@ If you leave a shared machine, sign out. Closing the tab does not clear the cook
 
 ## 1.5 What you will see
 
-The sidebar has 21 entries, grouped under **Sales and customers**, **Stock and supply**, **Finance and insight**, and **People and admin**. Most are filtered by your permissions when you sign in; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read.
+The rail lists up to 25 screens in five top-level groups — **Overview**, **Sales and customers**, **Stock and supply**, **Finance and insight**, and **People and admin**. Each top-level group carries a category label (for example *Pipeline* or *Invoicing*), and screens are listed under it. The menu is built by the server for your account, so it shows exactly the screens your role and the enabled modules allow; the server refuses anything you are not permitted to use, so a visible page can still show only the records you may read. The menu is drawn immediately from the application's built-in list while the server answers; if the server cannot supply it, the same built-in list is kept and a notice with **Retry** appears above **Favourites** — the rail is never empty. Adding `?nav=builtin` to the address restores the built-in list for the rest of the session (the manual does not ask you to edit addresses; this is the administrator's fallback).
 
 | Sidebar entry | Usually requires | What it is for |
 |---|---|---|
@@ -253,30 +253,48 @@ After sign-in every screen shares the same frame.
 | Part | Where it is | What it does |
 |---|---|---|
 | **Application bar** | A dark forest strip across the top, 44 px high | Brand on the left (select it to return to Overview), **Search pages and records** in the middle, **Dark theme** / **Light theme** on the right |
-| **Search** | The search button, or **Ctrl K** / **⌘ K** from anywhere | Opens the command palette: type at least two characters to find pages, products, orders, invoices and parties your role may read. **Esc** closes it |
-| **Module rail** | The left column on a desktop or tablet | Modules grouped by area — Sales and customers, Stock and supply, Finance and insight, People and admin. The current screen has a lighter fill and a thin amber line; the number in an amber pill is a count of items waiting there |
-| **Page area** | Right of the rail | One title, a short factual subtitle and, where the screen has one, the primary action on the right of the title |
+| **Workspace tab bar** | A light strip directly under the application bar | One tab per screen you have opened, with **Home** pinned first. Select a tab to switch screens; **×** closes it; the **⋯** button lists the tabs that do not fit and offers **Close current tab**, **Close other tabs**, **Close all except Home** and **Reopen closed tab** (§1.13) |
+| **Search** | The search button, or **Ctrl K** / **⌘ K** from anywhere | Opens the command palette: type at least two characters to find screens, products, orders, invoices and parties your role may read. **Esc** closes it |
+| **Module rail** | The left column on a desktop or tablet | Five top-level groups — Overview, Sales and customers, Stock and supply, Finance and insight, People and admin — split into categories. **Favourites** and **Recently opened** appear above them once you have used the star or opened a few screens |
+| **Page head** | Right of the rail, above the content | A breadcrumb (**Module › Category › Feature**), then one title, a short factual subtitle, the **☆** favourite button and, where the screen has one, the primary action on the right of the title |
 | **Status bar** | A thin strip at the bottom | A factual statement about the figures and the name of the environment the server reports |
 
-**On a phone or a narrow tablet** the rail becomes a band under the bar: your
-username, role and **Sign out** sit on the right, and the module list runs
-horizontally below them (swipe it sideways to reach later modules). The status
-bar keeps only the environment name.
+**On a phone or a narrow tablet** the tab bar stays under the application bar and scrolls sideways; the rail becomes a band below it: your username, role and **Sign out** sit on the right, and the module list runs horizontally below them (swipe it sideways to reach later modules). The status bar keeps only the environment name.
 
-**Light and dark.** The theme control changes the whole application and is
-remembered in the browser. It does not change any figure, permission or saved
-record. The sign-in and two-step screens follow the theme chosen for that
-browser.
+**Light and dark.** The theme control changes the whole application and is remembered in the browser. It does not change any figure, permission or saved record. The sign-in and two-step screens follow the theme chosen for that browser.
 
-**Where figures come from.** No screen invents a number. A panel the server
-cannot compute says **No data yet**, names the missing input and links to the
-screen that supplies it; a section your role may not read is absent, never zero.
+**Where figures come from.** No screen invents a number. A panel the server cannot compute says **No data yet**, names the missing input and links to the screen that supplies it; a section your role may not read is absent, never zero.
 
 **VERIFIED:** the shell was reviewed in the running application on 3 November
 2026 at 1440, 1024, 768 and 390 px in both themes, with the drawer and palette
-open, using only read requests. A sweep of 23 routes at four widths found no
-sideways page scrolling. Evidence and what was not tested (physical devices,
-screen readers, other browsers) are in [`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md)
-§26; the token and component rules are in [`../DESIGN_SYSTEM.md`](../DESIGN_SYSTEM.md).
+open, using only read requests. The tab bar, breadcrumbs, favourites and
+recently opened screens were added on 4 November 2026 and walked at 1440, 768
+and 390 px in both themes (`var/shots/wp2-tabs-*.png`) with 42 automated checks
+in a real browser (`var/reports/wp2-browser.json`), no console error and no
+failed request while signed in. A sweep of 23 routes at four widths found no
+sideways page scrolling. Evidence, including what was not tested (physical
+devices, screen readers, other browsers), is in
+[`../VERIFICATION_REPORT.md`](../VERIFICATION_REPORT.md) §26 and §29; the token
+and component rules are in [`../DESIGN_SYSTEM.md`](../DESIGN_SYSTEM.md).
 
-**Next chapter (planned):** 2. Finding your way — navigation, roles and permissions in detail.
+## 1.13 Tabs, breadcrumbs and favourites
+
+**Tabs.** Every screen you open becomes a tab under the application bar, so you can move between two or three screens without losing your place. **Home** is pinned first and cannot be closed. Opening a screen that is already open selects its existing tab instead of making a copy. At most **20 tabs** are kept at once; opening a 21st screen closes the oldest one after Home, and that screen goes to the top of **Reopen closed tab**, so it is one click away if you need it again.
+
+| To do this | Use |
+|---|---|
+| Open a screen | Select it in the rail, in the palette, or follow a link. A new tab appears and becomes active |
+| Switch screens | Select the tab, or press **←** / **→** while a tab has keyboard focus |
+| Go to the first or last tab | The **Home** / **End** keys while a tab has keyboard focus |
+| Close the current tab | Its **×**, or **Delete** with the tab focused. Home cannot be closed |
+| Close every other tab | **⋯** → **Close other tabs**, or **Close all except Home** |
+| Reopen the last tab you closed | **⋯** → **Reopen closed tab** |
+| Find a tab that does not fit | The **⋯** button lists every open screen; the strip never scrolls a tab out of reach on a desktop |
+
+**Refresh and addresses.** The address bar always shows the screen you are on (`#/products`, `#/accounts/gst-out?...`), so refreshing the page, using Back and Forward, or sending someone a link all work. Your open tabs are remembered for your next visit in the same browser session; a tab whose permission or module switch has since been removed is quietly dropped rather than restored to a screen the server would refuse.
+
+**Unsaved work.** If you are halfway through a form in the detail panel and close the tab (or close the other tabs) that contains it, the application asks before discarding the entry. Select **Cancel** to stay on the form.
+
+**Breadcrumbs.** Above each title a short trail shows where the screen sits, using the same names as the rail — for example **Finance and insight › Books › Accounting & Finance**. Select an earlier part of the trail to return to that screen. The trail never offers a screen your role may not open.
+
+**Favourites and recently opened.** Select the **☆** beside the title to pin the screen. Favourites appear in their own group at the top of the rail, in the order you pinned them; select the star again (**★**) to remove one. The **Recently opened** group lists the screens you used most recently. These two lists are kept in this browser for your username only — they are not shared with other people or other computers. This is a documented temporary limitation until the navigation registry (WP-4) stores them on the server; see [`../NAVIGATION_AND_TAB_DESIGN.md`](../NAVIGATION_AND_TAB_DESIGN.md) §10.5.

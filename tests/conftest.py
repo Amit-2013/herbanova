@@ -2,10 +2,15 @@
 
 The production/dev database is never touched. The test database is created if
 missing; migrations and seed rows are idempotent.
+
+The database is dropped and recreated for every run, so two suites must never
+run at once. A session-wide OS file lock (`var/.pytest-suite.lock`) enforces
+that: a second run fails immediately instead of racing on the same database.
 """
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -25,6 +30,62 @@ settings.telegram_bot_token = ""
 settings.telegram_chat_id = ""
 
 ROOT = Path(__file__).resolve().parent.parent
+SUITE_LOCK = ROOT / "var" / ".pytest-suite.lock"
+
+
+@contextmanager
+def _suite_lock():
+    """Hold an exclusive OS lock; the kernel releases it if the process dies."""
+    SUITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    SUITE_LOCK.touch(exist_ok=True)
+    handle = SUITE_LOCK.open("r+b")
+    locked = False
+    try:
+        try:
+            # Lock the first byte before touching its contents: on Windows even
+            # reading a locked byte raises PermissionError, which must surface
+            # as the contention message below, not as a bare error.
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError:
+            raise RuntimeError(
+                "another pytest suite holds var/.pytest-suite.lock. The suite "
+                "drops and recreates herbanova_bcs_test, so runs must be serial: "
+                "wait for the other run to finish (or stop it) and try again."
+            ) from None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"pid={os.getpid()} database={TEST_URL.database}\n".encode())
+        handle.flush()
+        yield
+    finally:
+        if locked:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
+
+
+@pytest.fixture(scope="session")
+def suite_lock():
+    with _suite_lock():
+        yield
 
 
 def _create_database() -> None:
@@ -47,7 +108,7 @@ def _create_database() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def database():
+def database(suite_lock):
     _create_database()
     env = {**os.environ, "DATABASE_URL": settings.database_url}
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=ROOT,
